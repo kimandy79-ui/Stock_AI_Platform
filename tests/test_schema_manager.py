@@ -243,17 +243,19 @@ def _indexes(role: str) -> set[str]:
     return {row[0] for row in rows}
 
 
-def _table_columns(role: str, table_name: str) -> set[str]:
+def _table_columns(role: str, table_name: str) -> list[str]:
+    """Return the table's columns in definition order (by ordinal_position)."""
     conn = dbm.connect(role, read_only=True)
     try:
         rows = conn.execute(
             "SELECT column_name FROM information_schema.columns "
-            "WHERE table_schema = 'main' AND table_name = ?",
+            "WHERE table_schema = 'main' AND table_name = ? "
+            "ORDER BY ordinal_position",
             [table_name],
         ).fetchall()
     finally:
         conn.close()
-    return {row[0] for row in rows}
+    return [row[0] for row in rows]
 
 
 def _schema_version_rows(role: str) -> list[tuple]:
@@ -635,10 +637,13 @@ class TestColumnLevelSchema:
     ) -> None:
         sm.apply_prod_schema()
         present = _table_columns("prod", table_name)
-        assert present == set(EXPECTED_COLUMNS[table_name]), (
+        expected = EXPECTED_COLUMNS[table_name]
+        # Ordered comparison: verifies both membership AND column order.
+        assert present == expected, (
             f"{table_name} column drift: "
-            f"missing={set(EXPECTED_COLUMNS[table_name]) - present}, "
-            f"extra={present - set(EXPECTED_COLUMNS[table_name])}"
+            f"missing={set(expected) - set(present)}, "
+            f"extra={set(present) - set(expected)}, "
+            f"order_ok={set(present) == set(expected)}"
         )
 
     @pytest.mark.parametrize("table_name", sorted(EXPECTED_SIM_TABLES))
@@ -647,19 +652,24 @@ class TestColumnLevelSchema:
     ) -> None:
         sm.apply_simulation_schema()
         present = _table_columns("simulation", table_name)
-        assert present == set(EXPECTED_COLUMNS[table_name]), (
+        expected = EXPECTED_COLUMNS[table_name]
+        # Ordered comparison: verifies both membership AND column order.
+        assert present == expected, (
             f"{table_name} column drift: "
-            f"missing={set(EXPECTED_COLUMNS[table_name]) - present}, "
-            f"extra={present - set(EXPECTED_COLUMNS[table_name])}"
+            f"missing={set(expected) - set(present)}, "
+            f"extra={set(present) - set(expected)}, "
+            f"order_ok={set(present) == set(expected)}"
         )
 
     def test_debug_matches_prod_columns(
         self, tmp_db_paths: dict[str, Path]
     ) -> None:
-        # debug shares the production schema; spot-check a merged-column table.
+        # debug shares the production schema; spot-check a merged-column table
+        # with an ordered comparison.
         sm.apply_debug_schema()
-        assert _table_columns("debug", "step5_proposals") == set(
-            EXPECTED_COLUMNS["step5_proposals"]
+        assert (
+            _table_columns("debug", "step5_proposals")
+            == EXPECTED_COLUMNS["step5_proposals"]
         )
 
 

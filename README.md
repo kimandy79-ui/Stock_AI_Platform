@@ -18,8 +18,10 @@ establishes the project structure, configuration loading, constants, logging,
 and the shared `ServiceResult` contract. Module 02 adds centralized DuckDB
 connection management for the three approved database roles (`prod`, `debug`,
 `simulation`). Module 03 creates the final merged DuckDB schema on those
-databases. Per the roadmap, no provider calls, trading logic, simulation
-logic, or dashboard exist yet — those land in Module 04 and beyond.
+databases. Module 04 adds the abstract provider interface (contract only).
+Per the roadmap, no provider calls, trading logic, simulation logic, or
+dashboard exist yet — the provider interface lands in Module 04; provider
+calls land in Module 05 and beyond.
 
 ## Requirements
 
@@ -212,7 +214,127 @@ keyed on `(schema_name, 'schema_v01')`). The database schema version
 `daily_features.feature_schema_version` column but does not populate feature
 rows.
 
-## Next module
+## Module 04 — Provider Interface (usage)
 
-Per `docs/TODO_ROADMAP.md`, the next step is **Module 04 — Provider
-Interface**. It is intentionally not implemented here.
+Module 04 defines the **abstract, provider-neutral market-data contract** in
+`app/providers/provider_interface.py`. It is interface-only: no `yfinance`, no
+network client, no DuckDB access, and no concrete provider. The concrete
+YahooProvider is Module 05.
+
+The contract is `MarketDataProvider` (an `abc.ABC`) plus six frozen DTOs
+(`PriceBar`, `PriceHistoryRequest`, `TickerInfo`, `EarningsEvent`,
+`ProviderCapabilities`, `ProviderErrorDetail`) and the error vocabulary
+`PROVIDER_ERROR_KINDS`. Every data-fetching method returns a `ServiceResult`
+with the domain DTOs carried in `metadata` under stable keys
+(`capabilities` / `bars` / `symbols` / `events`, plus `error_detail` on failure
+and `provider_name` on every call).
+
+```python
+from datetime import date
+
+from app.providers import MarketDataProvider, PriceHistoryRequest
+from app.utils.service_result import ServiceResult
+
+# A future concrete provider (Module 05) implements all four methods. This is
+# illustrative only — no real network/yfinance calls live in Module 04.
+class ExampleProvider(MarketDataProvider):
+    def get_capabilities(self) -> ServiceResult: ...
+    def get_price_history(self, request: PriceHistoryRequest) -> ServiceResult: ...
+    def list_symbols(self, symbol_type: str | None = None) -> ServiceResult: ...
+    def get_earnings(self, ticker: str) -> ServiceResult: ...
+
+request = PriceHistoryRequest(
+    ticker="AAPL",
+    start_date=date(2024, 1, 1),
+    end_date=date(2024, 1, 31),  # inclusive range; start_date <= end_date enforced
+)
+```
+
+`symbol_type` validates against `constants.ALLOWED_SYMBOL_TYPES`. Empty results
+are `success` + empty list + `rows_processed == 0` (not an error); error
+conditions return `failed` with a `ProviderErrorDetail` whose `kind` is one of
+`PROVIDER_ERROR_KINDS`. `MarketDataProvider()` cannot be instantiated directly,
+and a subclass that omits a method raises `TypeError`.
+
+## Module 05 — YahooProvider (usage)
+
+Module 05 adds the first **concrete** provider, `YahooProvider`, in
+`app/providers/yahoo_provider.py`. It implements the frozen Module 04
+`MarketDataProvider` contract by fetching daily prices, ticker metadata, and
+earnings dates from Yahoo via `yfinance`. All Yahoo / `yfinance` access is
+confined to this single file — no other module imports `yfinance`.
+
+A caller obtains a provider and calls it; every method returns a
+`ServiceResult` with the DTOs in `metadata` (`bars` / `symbols` / `events` /
+`capabilities`, plus `error_detail` on failure and `provider_name == "yahoo"`
+on every call):
+
+```python
+from datetime import date
+
+from app.providers import YahooProvider, PriceHistoryRequest
+
+# Production: yfinance is imported lazily inside __init__ (no network at
+# construction). Tests inject a deterministic fake instead — see below.
+provider = YahooProvider()
+
+request = PriceHistoryRequest(
+    ticker="AAPL",
+    start_date=date(2024, 1, 1),
+    end_date=date(2024, 1, 31),  # inclusive on both ends
+)
+result = provider.get_price_history(request)
+if result.is_ok():
+    bars = result.metadata["bars"]  # list[PriceBar], raw + adjusted OHLC
+```
+
+The inclusive `[start_date, end_date]` range is honored even though yfinance
+treats `end` as exclusive: the provider calls yfinance internally with
+`end = end_date + 1 day`. Adjusted OHLC is derived per row from
+`Adj Close / Close`; `^VIX` keeps `close_raw == close_adj`. An empty result is a
+`success` with an empty list (not an error); unknown symbol / throttling /
+outage map to a `failed` `ServiceResult` with a `ProviderErrorDetail` whose
+`kind` is one of `PROVIDER_ERROR_KINDS`. In V1 `list_symbols()` does not scrape
+Yahoo (it returns an empty success unless a static source is injected), and
+`get_earnings()` is best-effort (empty success when no reliable date is found).
+
+For **offline tests**, inject a fake `yfinance`-like dependency (and, optionally,
+a static symbol source) through the constructor — no real network calls:
+
+```python
+provider = YahooProvider(yf_module=fake_yfinance)  # fake.Ticker(...).history(...)
+```
+
+## Module 06 — Universe Snapshot Engine (usage)
+
+`UniverseSnapshotEngine.apply_snapshot` takes provider-neutral `TickerInfo`
+entries (it does not fetch them), upserts them into `ticker_master`, manages the
+lifecycle flags, and writes one immutable row per ticker into
+`ticker_universe_snapshot` for the snapshot month. All DB access goes through
+the Module 02 `duckdb_manager` (`prod` / `debug` only — never `simulation`).
+
+```python
+from datetime import date
+
+from app.services.universe import UniverseSnapshotEngine
+from app.providers import TickerInfo
+
+engine = UniverseSnapshotEngine()
+result = engine.apply_snapshot(
+    [TickerInfo(ticker="AAPL", symbol_type="stock", sector="Technology")],
+    as_of_date=date(2024, 3, 10),   # normalized to snapshot_month 2024-03-01
+    db_role="prod",                 # "prod" | "debug"
+    source="manual",               # written verbatim to the snapshot row
+)
+# result.rows_processed == snapshot rows written; result.metadata carries
+# input_rows / valid_rows / skipped_rows / tickers_inserted / tickers_updated /
+# tickers_marked_inactive / snapshot_rows / snapshot_month / db_role / source.
+```
+
+The month write is idempotent (delete-then-insert inside one transaction);
+re-running a month never duplicates rows. New tickers start
+`active_flag = TRUE, delisted_flag = FALSE` with `first_seen = last_seen =
+snapshot_month`; tickers absent from a later input are set `active_flag = FALSE`
+(but **not** `delisted_flag`, since absence alone is not delisting).
+`yahoo_symbol` equals `ticker` (V1 identity) and `market_cap_bucket` is always
+`NULL` in V1. See `M06_UNIVERSE_SNAPSHOT_SPEC.md`.
