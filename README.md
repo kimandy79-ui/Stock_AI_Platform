@@ -419,3 +419,83 @@ for repair (`repair_reason = "missing_price"`, `status = "pending"`) and skipped
 Module 08 only enqueues repairs — it never processes them. All writes run inside
 one transaction that rolls back on error. See
 `M08_DAILY_PRICE_INGESTION_SPEC.md`.
+
+## Module 09 — Data Validator (usage)
+
+`DataValidator.validate` validates already-ingested `daily_prices` rows for an
+inclusive `[start_date, end_date]` range (pipeline step 6, after Module 08
+ingestion and before Module 10 mutation detection / Module 11 features). It owns
+the real `daily_prices.data_quality_status` (Module 08 wrote the placeholder
+`"ok"`) and enqueues validation repairs into `data_repair_queue`. It never calls
+a provider — it validates DB rows only. All DB access goes through the Module 02
+`duckdb_manager` (`prod` / `debug` only — never `simulation`).
+
+```python
+from datetime import date
+
+from app.services.validation import DataValidator
+
+engine = DataValidator()
+result = engine.validate(
+    start_date=date(2024, 1, 1),
+    end_date=date(2024, 3, 31),
+    db_role="prod",                 # "prod" | "debug"
+)
+# result.rows_processed == rows validated; result.metadata carries
+# db_role / start_date / end_date / rows_validated / rows_ok / rows_failed /
+# status_updates_written / repair_queue_enqueued.
+```
+
+Implemented checks are structural OHLCV invariants (null OHLC, `high < low`,
+open/close outside `[low, high]`, non-positive price, negative volume) over both
+the raw and adjusted tuples. A failing row is escalated to
+`data_quality_status = "failed"` using a strict **no-downgrade** rule (a worse
+status such as `quarantined` is never lowered) and gets one
+`data_repair_queue` row (`repair_reason = "bad_ohlc"`, `status = "pending"`)
+deduplicated by a deterministic `repair_id` (the Module 08 pattern). Module 09
+only inserts repairs — it never processes them — and never modifies price
+values, OHLCV raw/adjusted columns, dividend/split fields, `adjustment_factor`,
+or `mutation_flag`. Threshold- or calendar-dependent checks (missing trading
+days, large jumps, stale coverage) are intentionally left as documented open
+spec gaps rather than invented. All writes run inside one transaction that rolls
+back on error. See `M09_DATA_VALIDATOR_SPEC.md`.
+
+## Module 10 — Mutation Detector (usage)
+
+`MutationDetector.detect` scans already-ingested `daily_prices` rows for an
+inclusive `[start_date, end_date]` range (after Module 09 validation, before
+Module 11 features). It owns `daily_prices.adjustment_factor` derivation and
+`daily_prices.mutation_flag`. It never calls a provider — it operates on DB rows
+only. All DB access goes through the Module 02 `duckdb_manager` (`prod` /
+`debug` only — never `simulation`).
+
+```python
+from datetime import date
+
+from app.services.mutation import MutationDetector
+
+engine = MutationDetector()
+result = engine.detect(
+    start_date=date(2024, 1, 1),
+    end_date=date(2024, 3, 31),
+    db_role="prod",                 # "prod" | "debug"
+)
+# result.rows_processed == eligible rows; result.metadata carries db_role /
+# start_date / end_date / rows_read / rows_processed / rows_skipped_non_ok /
+# adjustment_factors_written / mutation_rows_detected / mutation_flags_written /
+# tickers_with_mutation / repair_queue_enqueued / rebuild_logs_enqueued.
+```
+
+For each eligible (`data_quality_status = "ok"`) row it derives
+`adjustment_factor = close_adj / close_raw` (NULL when underivable; an existing
+value may be cleared) and detects explicit splits (`split_ratio != 1`), setting
+`mutation_flag = TRUE` under a strict **no-downgrade** rule. Each eligible ticker
+with a detected mutation gets one `data_repair_queue` row
+(`repair_reason = "mutation"`) and one `feature_rebuild_log` row, keyed on the
+ticker's earliest detected mutation date and deduplicated by deterministic
+`uuid5` ids (insert-or-ignore — the Module 08 pattern). Module 10 only inserts
+those rows; it never processes them, never modifies price/split/dividend/status
+columns, and never touches the simulation DB. Historical `close_raw/close_adj`
+ratio-discontinuity detection is left as documented open spec gap `G1` (no
+threshold defined). All writes run inside one transaction that rolls back on
+error. See `M10_MUTATION_DETECTOR_SPEC.md`.
