@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="ProjectModuleManager">
+    <modules>
+<<<<<<< HEAD
+      <module fileurl="file://$PROJECT_DIR$/.idea/stock_ai_platform.iml" filepath="$PROJECT_DIR$/.idea/stock_ai_platform.iml" />
+=======
+      <module fileurl="file://$PROJECT_DIR$/.idea/Stock_AI_Platform.iml" filepath="$PROJECT_DIR$/.idea/Stock_AI_Platform.iml" />
+>>>>>>> 363ce62fc09d4b10b4ee28f8d467bf2be93cf4f9
+    </modules>
+  </component>
+</project>

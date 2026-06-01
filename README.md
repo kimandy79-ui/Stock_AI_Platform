@@ -338,3 +338,43 @@ snapshot_month`; tickers absent from a later input are set `active_flag = FALSE`
 (but **not** `delisted_flag`, since absence alone is not delisting).
 `yahoo_symbol` equals `ticker` (V1 identity) and `market_cap_bucket` is always
 `NULL` in V1. See `M06_UNIVERSE_SNAPSHOT_SPEC.md`.
+
+## Module 07 — Benchmark / Sector ETF Loader (usage)
+
+`BenchmarkEtfLoader.load` loads benchmark, index, and sector-ETF price history
+before the feature engine. It reads the symbol set from
+`constants.REQUIRED_BENCHMARK_SYMBOLS`, fetches bars **only** through the
+Module 04 `MarketDataProvider` interface, upserts them into `daily_prices`
+keyed by `(ticker, date)`, upserts each loaded symbol into `ticker_master`
+(without clobbering Module-06-owned fields), and seeds `sector_etf_map` from
+`constants.SECTOR_ETF_MAP` with insert-or-ignore semantics. All DB access goes
+through the Module 02 `duckdb_manager` (`prod` / `debug` only — never
+`simulation`).
+
+```python
+from datetime import date
+
+from app.providers import YahooProvider  # any MarketDataProvider
+from app.services.benchmarks import BenchmarkEtfLoader
+
+loader = BenchmarkEtfLoader()
+result = loader.load(
+    provider=YahooProvider(),
+    start_date=date(2024, 1, 1),
+    end_date=date(2024, 3, 31),
+    db_role="prod",                 # "prod" | "debug"
+)
+# result.rows_processed == price rows written; result.metadata carries
+# db_role / start_date / end_date / symbols_requested / symbols_loaded /
+# symbols_skipped / price_rows_written / ticker_master_upserted /
+# sector_etf_map_seeded.
+```
+
+Classification is locked: `SPY`/`QQQ` → `benchmark`, `^VIX` → `index`, sector
+SPDRs → `etf`. For `^VIX`, `close_raw` mirrors `close_adj` and `volume_raw` is
+`NULL`. On every written bar, `volume_adj` and `adjustment_factor` are `NULL`
+(Module 10 owns adjustment), `data_quality_status` is `"ok"` (Module 09 owns
+validation), and `mutation_flag` is `FALSE`. A per-symbol provider failure or
+zero bars is a non-fatal warning (the symbol is skipped); all writes run inside
+one transaction that rolls back on error. See
+`M07_BENCHMARK_ETF_LOADER_SPEC.md`.

@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="VcsDirectoryMappings">
+<<<<<<< HEAD
+    <mapping directory="$PROJECT_DIR$/Stock-Analyzer" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/Stock_AI_Platform" vcs="Git" />
+=======
+    <mapping directory="" vcs="Git" />
+>>>>>>> 363ce62fc09d4b10b4ee28f8d467bf2be93cf4f9
+  </component>
+</project>
