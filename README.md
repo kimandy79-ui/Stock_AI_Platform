@@ -378,3 +378,44 @@ validation), and `mutation_flag` is `FALSE`. A per-symbol provider failure or
 zero bars is a non-fatal warning (the symbol is skipped); all writes run inside
 one transaction that rolls back on error. See
 `M07_BENCHMARK_ETF_LOADER_SPEC.md`.
+
+## Module 08 — Daily Price Ingestion (usage)
+
+`DailyPriceIngestionEngine.ingest` downloads and updates daily OHLCV prices for
+all active stock-universe tickers before the feature engine. It reads the active
+tickers from `ticker_master` (`symbol_type = 'stock' AND active_flag = TRUE`,
+never hardcoded), fetches bars **only** through the Module 04
+`MarketDataProvider` interface, upserts them into `daily_prices` keyed by
+`(ticker, date)`, and enqueues failed / empty-result tickers into
+`data_repair_queue` (insert-or-ignore on `(ticker, repair_date, repair_reason)`).
+It is the stock-universe equivalent of Module 07. `ticker_master` is read-only
+here. All DB access goes through the Module 02 `duckdb_manager` (`prod` /
+`debug` only — never `simulation`).
+
+```python
+from datetime import date
+
+from app.providers import YahooProvider  # any MarketDataProvider
+from app.services.ingestion import DailyPriceIngestionEngine
+
+engine = DailyPriceIngestionEngine()
+result = engine.ingest(
+    provider=YahooProvider(),
+    start_date=date(2024, 1, 1),
+    end_date=date(2024, 3, 31),
+    db_role="prod",                 # "prod" | "debug"
+)
+# result.rows_processed == price rows written; result.metadata carries
+# db_role / start_date / end_date / tickers_requested / tickers_loaded /
+# tickers_skipped / price_rows_written / repair_queue_enqueued.
+```
+
+On every written bar, `volume_adj` and `adjustment_factor` are `NULL` (Module 10
+owns adjustment), `data_quality_status` is `"ok"` (Module 09 owns validation),
+and `mutation_flag` is `FALSE`; missing `dividend_amount` / `split_ratio` default
+to `0` / `1`. A per-ticker provider failure, exception, missing
+`metadata['bars']`, or zero bars is a non-fatal warning: the ticker is enqueued
+for repair (`repair_reason = "missing_price"`, `status = "pending"`) and skipped.
+Module 08 only enqueues repairs — it never processes them. All writes run inside
+one transaction that rolls back on error. See
+`M08_DAILY_PRICE_INGESTION_SPEC.md`.
