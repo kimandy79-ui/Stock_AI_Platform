@@ -499,3 +499,91 @@ columns, and never touches the simulation DB. Historical `close_raw/close_adj`
 ratio-discontinuity detection is left as documented open spec gap `G1` (no
 threshold defined). All writes run inside one transaction that rolls back on
 error. See `M10_MUTATION_DETECTOR_SPEC.md`.
+
+## Module 11 — Feature Engine (usage)
+
+Module 11 (`app/services/features/feature_engine.py`) runs after Module 10 and
+before Module 12. `FeatureEngine().calculate(start_date, end_date,
+tickers=None, db_role="prod", run_id=None)` reads eligible `daily_prices` rows
+(`data_quality_status = 'ok'`, plus warmup history and the mapped sector ETF
+rows), computes the `daily_features` indicators with Polars strictly from the
+frozen formulas (adjusted prices for price indicators, raw volume for volume
+features), and upserts one row per processed ticker — anchored on that ticker's
+`feature_cutoff_date` (the latest eligible in-range date, so no look-ahead) — on
+`(ticker, feature_date, feature_schema_version)`. `feature_ready = TRUE` only
+when every required indicator is non-null. `calculated_at` is refreshed on every
+upsert; reruns are idempotent. `db_role` accepts only `prod`/`debug`. The module
+writes only `daily_features` (no provider/network, no `duckdb`/`ATTACH`/DDL).
+`market_regime` (Module 12) and the earnings/macro context columns are left at
+documented defaults (NULL / NULL / NULL / FALSE) as open gaps. See
+`M11_FEATURE_ENGINE_SPEC.md`.
+
+## Module 12 — Market Regime Engine (usage)
+
+Module 12 (`app/services/regime/market_regime_engine.py`) runs after Module 11
+and before Module 13. `MarketRegimeEngine().classify(start_date, end_date,
+db_role="prod", run_id=None)` reads eligible `daily_prices` rows
+(`data_quality_status = 'ok'`, plus warmup) for `SPY`/`QQQ`/`^VIX`, computes
+EMA200 per symbol with Polars (`coalesce(close_adj, close_raw)`; `^VIX` uses raw)
+and as-of aligns each symbol backward onto every requested calendar date (no
+look-ahead). It classifies one market-wide regime per date by consuming
+`constants.MARKET_REGIME_PRIORITY` top-down — VIX gates
+(`>= 30 extreme_risk`, `>= 25 high_risk`) over an SPY/QQQ trend rule
+(`SPY > EMA200 bull`; `SPY < EMA200 and QQQ < EMA200 bear`; else `neutral`) —
+then updates every existing `daily_features` row for the date / current
+`feature_schema_version`, setting only `market_regime` and `calculated_at` in a
+single transaction. SPY-absent dates are skipped; insufficient SPY EMA200 →
+`neutral` (warning). `db_role` accepts only `prod`/`debug`. The module never
+inserts `daily_features`, never writes other tables, and never uses
+provider/`duckdb`/`ATTACH`/DDL/`print()`. This closes open gap G-REGIME. See
+`M12_MARKET_REGIME_ENGINE_SPEC.md`.
+
+## Module 13 — Step 3 Screening (usage)
+
+Module 13 (`app/services/screening/step3_screening.py`) runs after Module 12 and
+before Module 14. `Step3ScreeningEngine().screen(signal_date, strategy_config,
+strategy_config_id, db_role="prod", run_id=None)` reads `daily_features_current`
+for `feature_date == signal_date`, left-joins `ticker_master` (`symbol_type`) and
+`daily_prices` (`close_raw`/`close_adj`/`data_quality_status` on
+`date = feature_date`), then applies the Step 3 hard filters
+(`feature_ready`, `symbol_type='stock'`, `close_raw >= min_price`,
+`avg_dollar_volume_20d >= min_avg_dollar_volume_20d`, `rvol20 >= min_rvol`,
+`data_quality_status='ok'`) and, for passing rows, the Polars-vectorized soft
+score (`trend/momentum/setup/volume/market` sub-scores clamped 0–100, weighted by
+the top-level `config.scoring_weights`). Every evaluated ticker — passed and
+failed — is appended as one `step3_candidates` row in a single transaction:
+passed rows carry a non-null `screening_score` with `hard_filter_fail_reasons=[]`;
+failed rows carry `screening_score=NULL` and all collected fail labels. Empty
+input returns `success` with no insert. `db_role` accepts only `prod`/`debug`
+(`simulation` rejected before DB access). The module only ever **inserts** into
+`step3_candidates` (no updates/deletes, no other tables, no provider/`duckdb`/
+`ATTACH`/DDL/`print()`). Open gaps: the `avg_dollar_volume_20d` volume
+sub-component lacks a mapping in Project Files (omitted), and the
+`distance_to_ema50` taper / `breakout_proximity` mid-band are closed by
+documented assumptions. See `M13_STEP3_SCREENING_SPEC.md`.
+
+## Module 14 — Step 4 Setup Analysis (usage)
+
+Module 14 (`app/services/analysis/step4_analysis_engine.py`) runs after Module 13.
+`Step4AnalysisEngine().analyze(signal_date, strategy_config, strategy_config_id,
+db_role="prod", run_id=None)` reads the qualifying `step3_candidates`
+(`signal_date`, `strategy_config_id`, `passed_hard_filters = TRUE`), joins
+`daily_features_current` and `daily_prices` on `(ticker, signal_date)`, derives
+`recent_20d_low_raw` from the last ≤20 `daily_prices.low_raw` rows, and reads the
+prior ≤10 feature rows for the `trend_resume` history check. For each analyzable
+candidate it classifies the setup (`high_tight_flag` → `breakout` →
+`volatility_squeeze` → `trend_pullback` → `trend_resume` → `unknown`, first match
+wins), computes the four 0–100 component scores and the clamped `setup_score`
+(with earnings/macro penalties), and derives `entry_proxy_raw = close_raw`, an
+ATR/recent-low `stop_price_raw` (clamped to `entry * 0.95` when inputs are
+missing/invalid), `target_price_raw`, and `estimated_rr`. Each analyzable row is
+written to `step4_analysis` with a fresh `uuid4` `analysis_id`, the preserved
+`candidate_id`, and a sorted-key `explanation_json`, in a single transaction.
+Empty qualifying input returns `success` with zero counts and no insert; a
+candidate with no current feature row or no usable `close_raw` is skipped as not
+analyzable (counted, not written). `db_role` accepts only `prod`/`debug`
+(`simulation` rejected before DB access); config is validated before DB access.
+The module only ever **inserts** into `step4_analysis` (no updates/deletes, no
+other tables, no provider/`duckdb`/`ATTACH`/DDL/`print()`). Open assumptions:
+`G-ATR-CONTRACTION`, `G-TREND-RESUME-HISTORY`, `G-SCORING-SUBCOMPONENT-WEIGHTS`,
+`G-MISSING-ATR-OR-PRICE`. See `M14_STEP4_ANALYSIS_SPEC.md`.
