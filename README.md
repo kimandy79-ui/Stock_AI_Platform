@@ -587,3 +587,35 @@ The module only ever **inserts** into `step4_analysis` (no updates/deletes, no
 other tables, no provider/`duckdb`/`ATTACH`/DDL/`print()`). Open assumptions:
 `G-ATR-CONTRACTION`, `G-TREND-RESUME-HISTORY`, `G-SCORING-SUBCOMPONENT-WEIGHTS`,
 `G-MISSING-ATR-OR-PRICE`. See `M14_STEP4_ANALYSIS_SPEC.md`.
+
+## Module 15 — Step 5 Proposal Engine (usage)
+
+Module 15 (`app/services/proposal/step5_proposal_engine.py`) runs after Module 14
+and before Module 16. `Step5ProposalEngine().propose(signal_date, strategy_config,
+strategy_config_id, db_role="prod", run_id=None)` reads the `step4_analysis` rows
+for `(signal_date, strategy_config_id)`, `LEFT JOIN`ing `step3_candidates` (on
+`candidate_id`) for `screening_score` and `ticker_master` (on `ticker`) for
+`sector`/`industry`. Each analyzable analysis (non-NULL `setup_score` and
+`screening_score`) gets a `proposal_score_raw = 0.40*setup_score +
+0.25*screening_score + 0.20*rr_score + 0.15*timing_score` (RR tiers
+100/80/60/0 at the 3.0/2.2/1.8 boundaries; NULL `timing_score` → 50; NULL
+`estimated_rr` → `rr_score=0` and lowest in tie-breaks; scores clamped to
+`[0,100]`). Raw ranking is `proposal_score_raw` DESC, `estimated_rr` DESC (NULL
+lowest), `ticker` ASC, giving `raw_rank` / `in_raw_top_n`. Diversification is
+either hard-cap (`hard_cap_enabled=True`: over-cap candidates are still inserted
+with `diversified_rank=NULL`, `proposal_score_final=proposal_score_raw`, no soft
+penalty, `rejection_reason` `sector_cap`/`industry_cap` with sector taking
+priority when both are full) or soft-penalty (`hard_cap_enabled=False`:
+`proposal_score_final = raw * sector_penalty**prior_sector * industry_penalty**
+prior_industry`, then re-ranked by final DESC, ticker ASC, no rejections). Shared
+semantics: `selected_flag = in_diversified_top_n`, `selected_top_n = in_raw_top_n
+OR in_diversified_top_n`. One row per analyzable analysis (incl. rejected) is
+appended to `step5_proposals` in a single transaction with a fresh `uuid4`
+`proposal_id`. `db_role` accepts only `prod`/`debug` (`simulation` rejected before
+DB access); config is validated before DB access; empty input returns `success`
+with zero counts. Reruns are append-only (a new `run_id` adds rows). The module
+only ever **inserts** into `step5_proposals` (no updates/deletes, no other tables,
+no provider/`duckdb`/`ATTACH`/DDL/`print()`). Open gaps: `G-SOFT-PENALTY-PRIOR-
+COUNT` (prompt key names `sector_penalty`/`industry_penalty` vs the `*_factor`
+names in the example config blocks), `G-UNKNOWN-BUCKET`. See
+`M15_STEP5_PROPOSAL_ENGINE_SPEC.md`.
