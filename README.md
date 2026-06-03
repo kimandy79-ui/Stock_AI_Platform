@@ -619,3 +619,121 @@ no provider/`duckdb`/`ATTACH`/DDL/`print()`). Open gaps: `G-SOFT-PENALTY-PRIOR-
 COUNT` (prompt key names `sector_penalty`/`industry_penalty` vs the `*_factor`
 names in the example config blocks), `G-UNKNOWN-BUCKET`. See
 `M15_STEP5_PROPOSAL_ENGINE_SPEC.md`.
+
+## Module 16 — Outcome Queue (usage)
+
+Module 16 (`app/services/outcomes/outcome_queue.py`) runs after Module 15 and
+turns Step 5 proposals into realized `signal_outcomes`. It has two services.
+
+`OutcomeQueueCreator().enqueue(signal_date, strategy_config_id, strategy_config,
+db_role="prod", run_id=None)` reads every `step5_proposals` row for the given
+`signal_date` / `strategy_config_id` that is in the raw OR diversified Top-N
+(`in_raw_top_n OR in_diversified_top_n`, AD-22.13) and inserts one
+`outcome_tracking_queue` row per horizon in `OUTCOME_HORIZONS_BD` (`[5,10,20,40]`).
+`tracking_id = uuid5(NAMESPACE_URL, "outcome_tracking_queue:{proposal_id}:{horizon_bd}")`
+makes inserts idempotent (`ON CONFLICT DO NOTHING`); reruns add zero rows.
+`entry_date = next NYSE trading day after signal_date`, `eval_date = horizon_bd`
+NYSE sessions after `entry_date` (via `app/utils/trading_calendar.py`). Rows start
+`pending`.
+
+`OutcomeQueueProcessor().process(run_date, strategy_config, db_role="prod",
+run_id=None)` processes every `pending` queue row with `eval_date <= run_date`.
+Per row it reads the entry-date `open_raw`, derives `entry_price_sim = open_raw *
+(1 + slippage_bps/10000)` (AD-22.14), computes horizon returns for horizons
+`<= horizon_bd`, 40bd MFE/MAE (40bd rows only), `realized_r_multiple` (NULL when
+`stop_price_raw` missing or the denominator `<= 0`), and a tri-state
+`earnings_within_window`, then upserts one `signal_outcomes` row
+(`outcome_id = uuid5(NAMESPACE_URL, "signal_outcomes:{proposal_id}:{horizon_bd}")`)
+and marks the queue row `done`. A missing entry price increments `repair_attempts`
+(no outcome written) and flips the row to `unresolvable` on the 3rd attempt.
+`db_role` accepts only `prod`/`debug` (`simulation` rejected before DB access);
+config (`simulation.slippage_bps`) is validated before DB access; reads are
+read-only and all writes run in one rolled-back-on-failure transaction. The
+services write only `outcome_tracking_queue` / `signal_outcomes` (no other tables,
+no provider/`duckdb`/`ATTACH`/DDL/`print()`). See `M16_OUTCOME_QUEUE_SPEC.md`.
+
+## Module 17 — Simulation Engine (usage)
+
+Module 17 (`app/services/simulation/simulation_engine.py`) replays the frozen
+Step 3/4/5 pipeline and realized outcomes over a historical date range into the
+`sim_*` tables of `simulation.duckdb`, reading production data **only** through a
+read-only prod attach.
+
+`SimulationEngine().run(sim_name, mode, start_date, end_date, config_ids,
+strategy_configs, db_role="simulation", run_id=None)` returns a `ServiceResult`.
+`run_id` is minted (`uuid4`) when `None` and otherwise preserved. All
+preconditions are validated before any DB access: `db_role == "simulation"`; a
+valid `mode` (`research` / `walk_forward` / `config_comparison`); non-empty
+`config_ids`; every `config_id` present in `strategy_configs`; and
+`start_date <= end_date`.
+
+For each NYSE session in the window the engine screens `prod.daily_features`
+(current schema version, `feature_cutoff_date <= sim_date`) joined to
+`prod.ticker_master` / `prod.daily_prices` (price `date <= sim_date`), enforcing
+**no look-ahead in SQL**, then reuses the frozen Module 13–15 scoring/ranking
+code to write `sim_step3_candidates`, `sim_step4_analysis` and
+`sim_step5_proposals`. Each raw- or diversified-Top-N proposal gets one
+`sim_signal_outcomes` row computed with the Module 16 / FORMULAS §64 rules using
+`entry_price_sim` as the denominator and a `list_membership` of `raw_only`,
+`diversified_only` or `both`. `sim_config_comparisons` then gets one row per
+`(config_id, horizon_bd, list_type)` for both `raw` and `diversified`
+(expectancy, win_rate, avg_win, avg_loss, profit_factor, max_drawdown_pct,
+resolved_outcomes_pct on resolved outcomes only). In `walk_forward` mode the
+engine plans expanding-window calendar-quarter folds (12-month minimum initial
+train), selects the best config per fold by max train expectancy subject to
+`resolved_outcomes_pct >= 0.85` and `max_drawdown_pct <= 25`, flags
+`cross_fold_outcome` for 40bd realizations that spill past a fold's test period
+(excluded from fold metrics), and records fold metadata in `sim_folds`. `sim_runs`
+moves `pending` → `running` → `success`; on failure partial writes are rolled
+back and the row is marked `failed` with the error in `notes`. The engine writes
+only `sim_*` tables and never opens prod directly, imports `duckdb`, calls
+providers, runs DDL, or uses `print()`. See `M17_SIMULATION_ENGINE_SPEC.md`.
+
+## Module 18 — Export Package Engine (usage)
+
+Module 18 (`app/services/export/export_package_engine.py`) builds reviewer ZIP
+packages and records one manual review row.
+`ExportPackageEngine(db_manager=None).export_ticker_review(signal_date,
+strategy_config_id, proposal_ids, db_role="prod")` reads `step3_candidates`,
+`step4_analysis`, `step5_proposals`, `daily_features_current` and `daily_prices`
+for the named proposals, writes `ticker_review_{signal_date}_{run_id[:8]}.zip`
+(`metadata.json`, `prices.csv`, `features.csv`, `step3.csv`, `step4.csv`,
+`step5.csv`, `explanation.txt`) under `settings.EXPORTS_DIR`, and inserts one
+`ai_reviews` row (`review_type='ticker_review'`, `provider='manual'`,
+`prompt_version='v1'`). `export_simulation_review(sim_run_id,
+db_role="simulation")` reads the `sim_*` tables and writes
+`simulation_review_{sim_run_id[:8]}_{run_id[:8]}.zip` (`configs.json`,
+`performance_metrics.csv`, `score_buckets.csv`, `setup_performance.csv`,
+`regime_performance.csv`, `drawdowns.csv`, `unresolved_outcomes.csv`) plus one
+`sim_ai_reviews` row. Every call returns a `ServiceResult`. The engine routes all
+DB access through the injected `db_manager`, writes ZIPs only under
+`EXPORTS_DIR`, mutates only `ai_reviews` / `sim_ai_reviews`, and never imports
+`duckdb`, calls providers, runs DDL/`ATTACH`, or uses `print()`. Open gaps
+(`G-PROMPT-TEXT`, `G-ZIP-CLEANUP`, `G-PRICES-WINDOW`, `G-REGIME-SOURCE`,
+`G-CONFIGS-SOURCE`, `G-SIM-AI-SCHEMA`) are documented in
+`M18_EXPORT_PACKAGE_ENGINE_SPEC.md`.
+
+## Module 19 — AI Review Engine (usage)
+
+Module 19 (`app/services/ai_review/ai_review_engine.py`) sends a manual review
+row recorded by Module 18 to an AI provider, stores the AI response on the same
+row, and later records the reviewer's qualitative action. It is an UPDATE-only
+overlay on `ai_reviews` (ticker, `prod` / `debug`) and `sim_ai_reviews`
+(simulation). `AiReviewEngine(db_manager=None, ai_client=None).send_ticker_review(
+ai_review_id, db_role="prod")` reads the row read-only, refuses if
+`ai_response_text` is already set (G-FORCE-RESEND), calls
+`ai_client.send(prompt_text, provider, model)`, and writes only
+`ai_reviews.ai_response_text`. `send_simulation_review(ai_review_id,
+db_role="simulation")` does the same against `sim_ai_reviews`.
+`record_human_action(ai_review_id, human_action, db_role="prod")` writes only
+`ai_reviews.human_action` for one of `ignored` / `accepted` / `overrode` /
+`deferred`, and is blocked until an AI response exists. Every call returns a
+`ServiceResult`. The injectable `ai_client` follows `AiClientProtocol`; the
+`DefaultAiClient` resolves provider/model from the row and the API key
+(`ANTHROPIC_API_KEY` / `OPENAI_API_KEY`) lazily at call time, imports no SDK at
+import time, and adds no SDK dependency (G-API-KEY-ENV, G-SDK-DEP). The engine
+issues UPDATE only (no INSERT/DELETE), mutates only
+`ai_response_text` / `human_action`, and never imports `duckdb`, calls
+market-data providers, runs DDL/`ATTACH`, or uses `print()`. Open gaps
+(`G-FORCE-RESEND`, `G-RESPONSE-ORPHAN`, `G-API-KEY-ENV`, `G-SDK-DEP`) are
+documented in `M19_AI_REVIEW_ENGINE_SPEC.md`.
