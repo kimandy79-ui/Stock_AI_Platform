@@ -737,3 +737,34 @@ issues UPDATE only (no INSERT/DELETE), mutates only
 market-data providers, runs DDL/`ATTACH`, or uses `print()`. Open gaps
 (`G-FORCE-RESEND`, `G-RESPONSE-ORPHAN`, `G-API-KEY-ENV`, `G-SDK-DEP`) are
 documented in `M19_AI_REVIEW_ENGINE_SPEC.md`.
+
+## Module 20 — Pipeline Orchestrator (usage)
+
+Module 20 (`app/services/pipeline/pipeline_orchestrator.py`) coordinates one
+daily run end to end as a control-plane layer: it owns the `daily_pipeline`
+lock, the `pipeline_runs` lifecycle row, and the ordering of the frozen step
+engines, but performs no domain logic itself. `PipelineOrchestrator(...)` takes
+an injectable `db_manager`, `provider`, and every step engine (defaults are
+built in `__init__` only: `db_manager` → the approved `duckdb_manager`,
+`provider` → `YahooProvider()`, each engine → its class with
+`db_manager=self._db`). `run(run_date, run_type="scheduled", db_role="prod",
+force_rerun=False, resume_from=None, strategy_configs=None, run_id=None)` mints a
+UUID4 `run_id` when none is given, validates inputs **before** any DB access,
+acquires the lock (overriding a stale one past the 300 s threshold; refusing if
+an active run holds it), guards against an already-succeeded `run_date` (unless
+`force_rerun`), inserts a `running` row, then drives the 13 ordered steps —
+benchmark/universe/price ingestion, validation, mutation detection, feature
+calculation, the step-major strategy block (each logical step runs for all strategy
+configs before the next: `step3_screening` for all configs → record;
+`step4_analysis` for all configs → record; … `outcome_processing` for
+all configs → record), dashboard materialization
+(V1 no-op), and backup. Critical-step failures abort and write
+`status='failed'`; recoverable failures degrade to `success_with_warnings` and
+continue. The lock is always released in `finally`, with a heartbeat after each
+completed step. Every call returns a `ServiceResult` whose `metadata` carries
+exactly `run_id`, `run_date`, `run_type`, `db_role`, `steps_completed`,
+`failed_step`, `error`, `duration_sec`, and `status`. All SQL is parameterized
+against only `pipeline_runs` / `pipeline_locks`; the module never imports
+`duckdb`, runs DDL/`ATTACH`, writes the simulation DB, or uses `print()`. Open
+gaps (`G-STRATEGY-CONFIGS`, `G-HEARTBEAT-THREADING`, `G-DASHBOARD-MAT`,
+`G-UNIVERSE-PROVIDER`) are documented in `M20_PIPELINE_ORCHESTRATOR_SPEC.md`.
