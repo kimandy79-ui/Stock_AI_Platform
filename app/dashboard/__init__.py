@@ -14,7 +14,7 @@ Streamlit server or a live DuckDB file:
     fake manager is injected.
 
 - :mod:`app.dashboard.app`
-    Streamlit entry point (``streamlit run app/dashboard/app.py``).
+    Streamlit entry point (``streamlit run app/dashboard/streamlit_app.py``).
     Renders what :mod:`data_access` returns; owns
     ``st.session_state["show_diversified"]``.  Imports Streamlit; the data
     layer does not.

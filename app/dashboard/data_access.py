@@ -69,7 +69,7 @@ RAW_RANK_COLUMN: Final[str] = "raw_rank"
 DIVERSIFIED_RANK_COLUMN: Final[str] = "diversified_rank"
 
 # Ordered display columns (01e UI spec).  Single source of truth shared by
-# data helpers and app.py -- they can never fall out of sync.
+# data helpers and streamlit_app.py -- they can never fall out of sync.
 DISPLAY_COLUMNS: Final[tuple[str, ...]] = (
     "raw_rank",
     "diversified_rank",
@@ -223,7 +223,7 @@ def extract_disagreement_flags(rows: list[dict[str, Any]]) -> list[bool]:
 
     Each flag is ``True`` when the corresponding row has
     ``in_raw_top_n != in_diversified_top_n`` (i.e. ``list_disagreement``
-    injected by :func:`annotate_rows`).  app.py uses this list as the styling
+    injected by :func:`annotate_rows`).  streamlit_app.py uses this list as the styling
     source so it cannot accidentally reuse the stripped display DataFrame, which
     no longer contains ``list_disagreement``.
     """
@@ -251,7 +251,7 @@ def build_proposals_display(
       keys.  ``list_disagreement`` is deliberately excluded from the visible
       table.
     - ``flags`` -- parallel ``list[bool]`` of disagreement flags from the
-      *same* ``view.rows`` source, so app.py cannot accidentally decouple the
+      *same* ``view.rows`` source, so streamlit_app.py cannot accidentally decouple the
       two.
 
     Pure -- no pandas, no Streamlit, directly unit-testable.

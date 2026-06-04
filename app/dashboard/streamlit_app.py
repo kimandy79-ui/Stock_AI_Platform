@@ -2,7 +2,7 @@
 
 Launch::
 
-    streamlit run app/dashboard/app.py
+    streamlit run app/dashboard/streamlit_app.py
 
 This module is the thin rendering layer.  All DB access and display logic is
 delegated to :mod:`app.dashboard.data_access`, which reads precomputed DuckDB
@@ -37,6 +37,13 @@ from typing import Any
 
 import pandas as pd
 import streamlit as st
+
+import sys
+from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 from app.dashboard import data_access
 from app.dashboard.data_access import DashboardDataLoader
@@ -178,11 +185,40 @@ def _render_ai_review(loader: DashboardDataLoader) -> None:
 # --------------------------------------------------------------------------- #
 # Entry point.
 # --------------------------------------------------------------------------- #
+def _selected_db_missing() -> tuple[bool, str]:
+    """Return (missing, path_str) for the currently selected DB role.
+
+    A pure filesystem existence check via the approved DB manager's path
+    resolver -- it opens no connection and writes nothing, preserving the
+    dashboard's read-only contract.
+    """
+    role = st.session_state.get(SESSION_DB_ROLE, data_access.DB_ROLE_PROD)
+    try:
+        from app.database import duckdb_manager
+
+        path = duckdb_manager.get_database_path(role)
+        return (not path.exists(), str(path))
+    except Exception:  # noqa: BLE001 - never block rendering on a path probe
+        return (False, "")
+
+
 def main() -> None:
     st.set_page_config(
         page_title="Swing Trading Analyzer", layout="wide", page_icon="📈"
     )
     _render_sidebar()
+
+    missing, db_path = _selected_db_missing()
+    if missing:
+        role = st.session_state.get(SESSION_DB_ROLE, data_access.DB_ROLE_PROD)
+        st.warning(
+            f"The selected **{role}** database does not exist yet at `{db_path}`.\n\n"
+            "Run the pipeline first to create and populate it:\n\n"
+            "- prod: `python tools/init_prod_db.py` then `python tools/run_prod_pipeline.py`\n"
+            "- debug: `python tools/run_debug_pipeline.py --preset fast_smoke_test`"
+        )
+        return
+
     loader = _loader()
 
     proposals_tab, outcomes_tab, health_tab, review_tab = st.tabs(
