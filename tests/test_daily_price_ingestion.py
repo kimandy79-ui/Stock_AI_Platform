@@ -337,9 +337,11 @@ def test_import_and_signature() -> None:
         "end_date",
         "db_role",
         "run_id",
+        "tickers",   # optional scope for batched/backfill use; None = all active stocks
     ]
     assert sig.parameters["db_role"].default == "prod"
     assert sig.parameters["run_id"].default is None
+    assert sig.parameters["tickers"].default is None  # None preserves existing full-universe behaviour
     public = [
         n
         for n in vars(DailyPriceIngestionEngine)

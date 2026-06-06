@@ -1,0 +1,3 @@
+ticker,yahoo_symbol,symbol_type,active_flag,name,industry,market_cap,last_price,volume,source_symbol
+NVDA,NVDA,stock,TRUE,NVIDIA Corporation Common Stock,Technology,5.29157E+12,218.66,169024638,NVDA
+AAPL,AAPL,stock,TRUE,Apple Inc. Common Stock,Technology,4.57115E+12,311.23,44869329,AAPL

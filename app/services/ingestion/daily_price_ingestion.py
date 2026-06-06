@@ -212,8 +212,9 @@ class DailyPriceIngestionEngine:
         end_date: date,
         db_role: str = "prod",
         run_id: str | None = None,
+        tickers: list[str] | None = None,
     ) -> ServiceResult:
-        """Ingest daily prices for all active stock-universe tickers.
+        """Ingest daily prices for the active stock universe (or a ticker scope).
 
         Parameters
         ----------
@@ -229,6 +230,14 @@ class DailyPriceIngestionEngine:
             ``"simulation"``) returns a ``failed`` result with no writes.
         run_id:
             A fresh ``uuid4`` is minted when ``None`` (mirrors Module 07).
+        tickers:
+            Optional explicit ticker scope. ``None`` (the default, used by the
+            daily pipeline) preserves the original behavior exactly: select all
+            active stocks from ``ticker_master``. When a list is supplied (e.g.
+            by the historical backfill tool to process the universe in batches),
+            only those tickers are ingested and no ``ticker_master`` read is
+            performed. Empty/duplicate entries are dropped while preserving
+            order. This is an additive, behavior-preserving argument.
 
         Returns
         -------
@@ -269,15 +278,21 @@ class DailyPriceIngestionEngine:
             log.error("ingest failed: %s", message)
             return self._failed(run_id, message, db_role, start_iso, end_iso)
 
-        # --- ticker selection (read-only): active stocks only. ------------- #
-        try:
-            tickers = self._select_active_stocks(db_role)
-        except Exception as exc:  # noqa: BLE001 - surface DB read failure as failed
-            message = f"ticker selection failed: {type(exc).__name__}: {exc}"
-            log.error("ingest failed: %s", message)
-            return self._failed(run_id, message, db_role, start_iso, end_iso)
+        # --- ticker selection (read-only): active stocks only, unless an
+        #     explicit scope is supplied (additive; daily passes None). ------- #
+        if tickers is not None:
+            # Explicit scope: drop empties/dupes, keep order; no ticker_master
+            # read. Used by the historical backfill tool for batched ingestion.
+            selected = [t for t in dict.fromkeys(tickers) if t]
+        else:
+            try:
+                selected = self._select_active_stocks(db_role)
+            except Exception as exc:  # noqa: BLE001 - surface DB read failure as failed
+                message = f"ticker selection failed: {type(exc).__name__}: {exc}"
+                log.error("ingest failed: %s", message)
+                return self._failed(run_id, message, db_role, start_iso, end_iso)
 
-        tickers_requested = len(tickers)
+        tickers_requested = len(selected)
         log.info("ingest tickers_requested=%d", tickers_requested)
 
         # --- fetch phase (no DB writes): one provider call per ticker. ----- #
@@ -289,7 +304,7 @@ class DailyPriceIngestionEngine:
         repair_tickers: list[str] = []
         warnings: list[str] = []
 
-        for ticker in tickers:
+        for ticker in selected:
             try:
                 request = PriceHistoryRequest(
                     ticker=ticker,

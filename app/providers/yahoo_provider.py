@@ -62,6 +62,11 @@ _VIX_SYMBOL: Final[str] = constants.BENCHMARK_VIX  # "^VIX"
 # Documented metadata keys (PROVIDER_INTERFACE_SPEC.md §8).
 _KEY_CAPABILITIES: Final[str] = "capabilities"
 _KEY_BARS: Final[str] = "bars"
+# Multi-ticker batch download (get_price_history_many) carries a per-ticker
+# mapping under this key in addition to a flattened ``bars`` list. The flat
+# ``bars`` key is kept so the batch result is still readable by code that only
+# knows the single-ticker contract.
+_KEY_BARS_BY_TICKER: Final[str] = "bars_by_ticker"
 _KEY_SYMBOLS: Final[str] = "symbols"
 _KEY_EVENTS: Final[str] = "events"
 _KEY_ERROR_DETAIL: Final[str] = "error_detail"
@@ -244,6 +249,205 @@ class YahooProvider(MarketDataProvider):
             rows_processed=len(bars),
             warnings=list(warnings),
             metadata={_KEY_BARS: bars, _KEY_PROVIDER_NAME: PROVIDER_NAME},
+        )
+
+    # ----------------------------------------------------------------- #
+    # Multi-ticker batch price history (additive; backfill-oriented).
+    # ----------------------------------------------------------------- #
+    def get_price_history_many(
+        self,
+        tickers: list[str],
+        start_date: datetime.date,
+        end_date: datetime.date,
+        symbol_type: str = constants.SYMBOL_TYPE_STOCK,
+    ) -> ServiceResult:
+        """Return daily OHLCV bars for many symbols in one vendor download.
+
+        This is an *additive* convenience over :meth:`get_price_history`,
+        intended for historical backfill where issuing one network call per
+        ticker invites Yahoo throttling. It is the only place a multi-ticker
+        ``yf.download`` is allowed (still inside the provider layer); the
+        single-ticker contract and behavior of :meth:`get_price_history` are
+        unchanged.
+
+        Semantics
+        ---------
+        - Inclusive ``[start_date, end_date]`` is preserved exactly as in
+          :meth:`get_price_history` (vendor ``end`` is exclusive, so the call
+          uses ``end_date + 1 day``); per-ticker mapping reuses
+          :meth:`_map_price_frame`, so raw/adjusted OHLCV, ``^VIX`` identity,
+          dividends/splits, and per-row warnings are identical.
+        - Per-ticker isolation: a missing/empty/unparseable single ticker yields
+          an empty bar list for that ticker plus a warning; it does **not** fail
+          the whole call. Only a failure of the underlying ``yf.download`` call
+          itself (transport / rate limit) produces a ``failed`` result.
+
+        Returns
+        -------
+        ServiceResult
+            ``metadata['bars_by_ticker']`` maps each requested ticker to its
+            ``list[PriceBar]`` (empty list when no data). ``metadata['bars']``
+            is the flattened list across all tickers. ``rows_processed`` is the
+            total bar count.
+        """
+        run_id = self._new_run_id()
+        log = logging_config.get_logger(__name__, run_id)
+
+        # Preserve the single-ticker validation contract per symbol/range.
+        if start_date > end_date:
+            detail = ProviderErrorDetail(
+                kind="malformed_response",
+                message=(
+                    "get_price_history_many requires start_date <= end_date "
+                    f"(got {start_date!r} > {end_date!r})"
+                ),
+                symbol=None,
+            )
+            return self._failed_batch(run_id, [], detail)
+
+        requested = [t for t in dict.fromkeys(tickers) if t]  # de-dupe, keep order
+        if not requested:
+            return ServiceResult(
+                status=service_result.STATUS_SUCCESS,
+                run_id=run_id,
+                rows_processed=0,
+                metadata={
+                    _KEY_BARS_BY_TICKER: {},
+                    _KEY_BARS: [],
+                    _KEY_PROVIDER_NAME: PROVIDER_NAME,
+                },
+            )
+
+        vendor_symbols = [self._to_vendor_symbol(t) for t in requested]
+        vendor_end = end_date + datetime.timedelta(days=1)  # inclusive -> exclusive
+        log.info(
+            "batch download tickers=%d start=%s end=%s (vendor_end=%s)",
+            len(requested),
+            start_date,
+            end_date,
+            vendor_end,
+        )
+
+        try:
+            frame = self._yf.download(
+                tickers=vendor_symbols,
+                start=start_date,
+                end=vendor_end,
+                group_by="ticker",
+                auto_adjust=False,
+                actions=True,
+                threads=True,
+            )
+        except Exception as exc:  # noqa: BLE001 - mapped to a §9 failed result
+            kind = self._classify_transport_exception(exc)
+            message = (
+                f"Yahoo batch download for {len(requested)} ticker(s) failed "
+                f"({type(exc).__name__}): {exc}"
+            )
+            log.error("batch transport failure kind=%s: %s", kind, exc)
+            detail = ProviderErrorDetail(kind=kind, message=message, symbol=None)
+            return self._failed_batch(run_id, requested, detail)
+
+        single = len(requested) == 1
+        bars_by_ticker: dict[str, list[PriceBar]] = {}
+        flat_bars: list[PriceBar] = []
+        warnings: list[str] = []
+
+        for ticker in requested:
+            try:
+                subframe = self._subframe_for_ticker(frame, ticker, single)
+            except Exception as exc:  # noqa: BLE001 - isolate one ticker
+                bars_by_ticker[ticker] = []
+                warnings.append(
+                    f"{ticker}: could not extract sub-frame from batch ({exc})."
+                )
+                continue
+
+            if self._frame_is_empty(subframe):
+                bars_by_ticker[ticker] = []
+                warnings.append(f"No price rows returned for {ticker} in range.")
+                continue
+
+            request = PriceHistoryRequest(
+                ticker=ticker,
+                start_date=start_date,
+                end_date=end_date,
+                symbol_type=symbol_type,
+            )
+            try:
+                bars, bar_warnings = self._map_price_frame(subframe, request)
+            except Exception as exc:  # noqa: BLE001 - isolate one ticker
+                bars_by_ticker[ticker] = []
+                warnings.append(
+                    f"{ticker}: could not parse batch price payload ({exc})."
+                )
+                continue
+
+            bars_by_ticker[ticker] = bars
+            flat_bars.extend(bars)
+            warnings.extend(f"{ticker}: {w}" for w in bar_warnings)
+            if not bars:
+                warnings.append(f"No price rows returned for {ticker} in range.")
+
+        status = (
+            service_result.STATUS_SUCCESS_WITH_WARNINGS
+            if warnings
+            else service_result.STATUS_SUCCESS
+        )
+        log.info(
+            "batch mapped tickers=%d total_bars=%d status=%s",
+            len(requested),
+            len(flat_bars),
+            status,
+        )
+        return ServiceResult(
+            status=status,
+            run_id=run_id,
+            rows_processed=len(flat_bars),
+            warnings=warnings,
+            metadata={
+                _KEY_BARS_BY_TICKER: bars_by_ticker,
+                _KEY_BARS: flat_bars,
+                _KEY_PROVIDER_NAME: PROVIDER_NAME,
+            },
+        )
+
+    def _subframe_for_ticker(
+        self, frame: Any, ticker: str, single: bool
+    ) -> Any:
+        """Return the per-ticker sub-frame from a ``group_by='ticker'`` download.
+
+        ``yf.download(..., group_by="ticker")`` yields columns keyed by ticker
+        (a MultiIndex), so ``frame[ticker]`` is the per-symbol OHLCV frame. For a
+        single-ticker request yfinance may instead return a flat frame with no
+        ticker level; in that case the whole frame is the sub-frame. Frame
+        access is duck-typed (no pandas import at this boundary).
+        """
+        try:
+            sub = frame[ticker]
+        except Exception:  # noqa: BLE001 - flat single-ticker frame, or absent
+            sub = None
+        if sub is not None and not self._frame_is_empty(sub):
+            return sub
+        if single:
+            return frame
+        return sub
+
+    def _failed_batch(
+        self, run_id: str, requested: list[str], detail: ProviderErrorDetail
+    ) -> ServiceResult:
+        """Build a ``failed`` batch result with empty per-ticker lists."""
+        return ServiceResult(
+            status=service_result.STATUS_FAILED,
+            run_id=run_id,
+            rows_processed=0,
+            errors=[detail.message],
+            metadata={
+                _KEY_BARS_BY_TICKER: {t: [] for t in requested},
+                _KEY_BARS: [],
+                _KEY_ERROR_DETAIL: detail,
+                _KEY_PROVIDER_NAME: PROVIDER_NAME,
+            },
         )
 
     # ----------------------------------------------------------------- #
