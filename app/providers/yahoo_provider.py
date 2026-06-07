@@ -329,6 +329,15 @@ class YahooProvider(MarketDataProvider):
         )
 
         try:
+            # threads=False: download is sequential in the calling thread.
+            # threads=True spawns a ThreadPoolExecutor whose OS threads share
+            # the process file-handle table; on Windows this prevents DuckDB
+            # from acquiring the exclusive write lock it needs for the next
+            # ingest batch, causing the write connection to hang indefinitely.
+            # Single-ticker benchmark loads (per-request path) are unaffected
+            # because they never call this method. Sequential download here is
+            # slightly slower per batch but reliable; the caller can compensate
+            # with a larger --batch-size.
             frame = self._yf.download(
                 tickers=vendor_symbols,
                 start=start_date,
@@ -336,7 +345,7 @@ class YahooProvider(MarketDataProvider):
                 group_by="ticker",
                 auto_adjust=False,
                 actions=True,
-                threads=True,
+                threads=False,
             )
         except Exception as exc:  # noqa: BLE001 - mapped to a §9 failed result
             kind = self._classify_transport_exception(exc)

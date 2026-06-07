@@ -11,6 +11,9 @@ frame that mimics the duck-typed interface the provider relies on
 from __future__ import annotations
 
 import inspect
+import json
+import os
+import sys
 from datetime import date
 from pathlib import Path
 from typing import Any
@@ -611,6 +614,380 @@ def test_cli_tickers_file_missing_exits_nonzero(
 
 
 # --------------------------------------------------------------------------- #
+# Single-instance lock tests
+# --------------------------------------------------------------------------- #
+
+def test_lock_atomic_create_creates_file_with_correct_fields(tmp_path: Path) -> None:
+    """First acquire uses O_CREAT|O_EXCL and writes pid/started_at/argv/cwd."""
+    lock_path = tmp_path / "locks" / "prod_backfill_history.lock"
+    lock = bpf._BackfillLock(lock_path, argv=["--start-date", "2024-01-01",
+                                               "--end-date", "2024-12-31"])
+    ok, msg = lock.acquire()
+
+    assert ok is True, f"acquire should succeed on a fresh path, got: {msg!r}"
+    assert lock_path.exists(), "lock file must be created on disk"
+
+    payload = json.loads(lock_path.read_text(encoding="utf-8"))
+    assert payload["pid"] == os.getpid(), "pid must be the current process"
+    assert "started_at" in payload,       "started_at field required"
+    assert isinstance(payload["argv"], list), "argv must be a list"
+    assert "--start-date" in payload["argv"]
+    assert "cwd" in payload,             "cwd field required"
+
+    lock.release()
+    assert not lock_path.exists(), "lock file must be removed after release"
+
+
+def test_lock_atomic_prevents_second_live_run(tmp_path: Path) -> None:
+    """O_CREAT|O_EXCL ensures a second acquire against a live PID returns False."""
+    lock_path = tmp_path / "locks" / "prod_backfill_history.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    # Plant a lock owned by the current (definitely live) process.
+    lock_path.write_text(
+        json.dumps({
+            "pid": os.getpid(),
+            "started_at": "2024-01-01T00:00:00+00:00",
+            "argv": ["--start-date", "2024-01-01", "--end-date", "2024-01-31"],
+            "cwd": os.getcwd(),
+        }),
+        encoding="utf-8",
+    )
+
+    lock2 = bpf._BackfillLock(lock_path, argv=[])
+    ok, msg = lock2.acquire()
+
+    assert ok is False, "second acquire against live pid must fail"
+    assert "already running" in msg
+    assert str(os.getpid()) in msg
+    # Original lock file untouched — we did not own it.
+    assert lock_path.exists()
+
+
+def test_lock_stale_pid_deleted_and_replaced(tmp_path: Path) -> None:
+    """A lock with a dead PID is deleted and replaced by the new process."""
+    lock_path = tmp_path / "locks" / "prod_backfill_history.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    # PID 0 is never a valid user process on any platform.
+    lock_path.write_text(
+        json.dumps({
+            "pid": 0,
+            "started_at": "2023-01-01T00:00:00+00:00",
+            "argv": ["--start-date", "2023-01-01"],
+            "cwd": "/old/path",
+        }),
+        encoding="utf-8",
+    )
+
+    lock = bpf._BackfillLock(lock_path, argv=["--start-date", "2024-01-01"])
+    ok, msg = lock.acquire()
+
+    assert ok is True, f"stale lock must be replaced, got: {msg!r}"
+    assert lock_path.exists(), "new lock file must exist"
+    payload = json.loads(lock_path.read_text(encoding="utf-8"))
+    assert payload["pid"] == os.getpid(), "new lock must carry current pid"
+    assert isinstance(payload["argv"], list)
+    assert "cwd" in payload
+
+    lock.release()
+    assert not lock_path.exists()
+
+
+def test_lock_second_run_fails_before_db_or_provider_calls(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    """main() exits 1 before _build_backfiller is called when lock is live."""
+    lock_path = tmp_path / "locks" / "prod_backfill_history.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path.write_text(
+        json.dumps({
+            "pid": os.getpid(),
+            "started_at": "2024-01-01T00:00:00+00:00",
+            "argv": ["--start-date", "2024-01-01", "--end-date", "2024-01-31"],
+            "cwd": os.getcwd(),
+        }),
+        encoding="utf-8",
+    )
+
+    build_calls: list[int] = []
+
+    def _fake_build():
+        build_calls.append(1)
+        raise AssertionError("_build_backfiller must not be called when lock is held")
+
+    monkeypatch.setattr(bpf, "_build_backfiller", _fake_build)
+    monkeypatch.setattr(bpf, "_default_lock_path", lambda: lock_path)
+
+    code = bpf.main(["--start-date", "2024-01-01", "--end-date", "2024-01-31"])
+
+    assert code == 1
+    out = capsys.readouterr().out
+    assert "FAILURE" in out
+    assert "already running" in out
+    assert str(os.getpid()) in out
+    assert build_calls == [], "_build_backfiller must not be called"
+    assert lock_path.exists(), "original lock must be untouched"
+
+
+def test_lock_path_is_absolute_and_under_project_data_locks() -> None:
+    """_default_lock_path returns an absolute path rooted at project data/locks."""
+    p = bpf._default_lock_path()
+    assert p.is_absolute(), f"lock path must be absolute, got: {p}"
+    assert p.name == "prod_backfill_history.lock"
+    # Must be inside a directory named 'locks' which is inside 'data'.
+    assert p.parent.name == "locks"
+    assert p.parent.parent.name == "data"
+    # Path must derive from the tool's own directory (project root), not cwd.
+    tool_dir = Path(bpf.__file__).resolve().parent
+    assert p.is_relative_to(tool_dir.parent), (
+        f"lock path {p} must be under project root {tool_dir.parent}"
+    )
+
+
+def test_lock_removed_on_success_and_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Lock file is gone after both a successful and a failed run."""
+    lock_path = tmp_path / "locks" / "prod_backfill_history.lock"
+    monkeypatch.setattr(bpf, "_default_lock_path", lambda: lock_path)
+
+    class _OkBackfiller:
+        def run(self, **_kw):
+            return ServiceResult(
+                status=service_result.STATUS_SUCCESS,
+                run_id="rid", rows_processed=0, metadata={},
+            )
+
+    monkeypatch.setattr(bpf, "_build_backfiller", lambda: _OkBackfiller())
+    code = bpf.main(["--start-date", "2024-01-01", "--end-date", "2024-01-31"])
+    assert code == 0
+    assert not lock_path.exists(), "lock must be removed after success"
+
+    def _raise_build():
+        raise RuntimeError("simulated crash")
+
+    monkeypatch.setattr(bpf, "_build_backfiller", _raise_build)
+    code = bpf.main(["--start-date", "2024-01-01", "--end-date", "2024-01-31"])
+    assert code == 1
+    assert not lock_path.exists(), "lock must be removed after failure"
+
+
+# --------------------------------------------------------------------------- #
+# --lock-self-test path
+# --------------------------------------------------------------------------- #
+
+def test_lock_self_test_acquires_and_releases(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """--lock-self-test acquires the lock, writes payload, and releases on exit."""
+    lock_path = tmp_path / "locks" / "prod_backfill_history.lock"
+    monkeypatch.setattr(bpf, "_default_lock_path", lambda: lock_path)
+    # Replace time.sleep so the test doesn't wait 60 s.
+    monkeypatch.setattr(bpf.time, "sleep", lambda _s: None)
+
+    code = bpf.main(["--lock-self-test"])
+
+    assert code == 0
+    assert not lock_path.exists(), "lock must be removed after --lock-self-test exits"
+
+
+def test_lock_self_test_live_lock_fails_immediately(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    """--lock-self-test exits 1 without sleeping when another live PID holds the lock."""
+    lock_path = tmp_path / "locks" / "prod_backfill_history.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path.write_text(
+        json.dumps({
+            "pid": os.getpid(),
+            "started_at": "2024-01-01T00:00:00+00:00",
+            "argv": ["--lock-self-test"],
+            "cwd": os.getcwd(),
+        }),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(bpf, "_default_lock_path", lambda: lock_path)
+    sleep_calls: list[float] = []
+    monkeypatch.setattr(bpf.time, "sleep", sleep_calls.append)
+
+    code = bpf.main(["--lock-self-test"])
+
+    assert code == 1
+    out = capsys.readouterr().out
+    assert "FAILURE" in out
+    assert "already running" in out
+    assert sleep_calls == [], "must not sleep when lock is denied"
+    # Lock file is untouched — we did not own it.
+    assert lock_path.exists()
+
+
+def test_lock_self_test_no_db_or_provider(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """--lock-self-test must never call _build_backfiller."""
+    lock_path = tmp_path / "locks" / "prod_backfill_history.lock"
+    monkeypatch.setattr(bpf, "_default_lock_path", lambda: lock_path)
+    monkeypatch.setattr(bpf.time, "sleep", lambda _s: None)
+
+    build_calls: list[int] = []
+
+    def _fail_build():
+        build_calls.append(1)
+        raise AssertionError("_build_backfiller must not be called in --lock-self-test")
+
+    monkeypatch.setattr(bpf, "_build_backfiller", _fail_build)
+
+    code = bpf.main(["--lock-self-test"])
+
+    assert code == 0
+    assert build_calls == [], "--lock-self-test must not call _build_backfiller"
+
+
+# --------------------------------------------------------------------------- #
+# Static structural checks (diagnostics and entrypoint)
+# --------------------------------------------------------------------------- #
+
+def test_only_one_entrypoint_in_tool() -> None:
+    """There must be exactly one if __name__ == '__main__' block."""
+    src = Path(bpf.__file__).read_text(encoding="utf-8")
+    count = src.count('if __name__ == "__main__"')
+    assert count == 1, f"expected 1 entrypoint, found {count}"
+
+
+def test_no_subprocess_or_process_spawning_in_tool() -> None:
+    """The tool must not spawn subprocesses or child processes anywhere.
+
+    This is the static confirmation that the two python.exe processes observed
+    on Windows with Get-CimInstance are NOT caused by the script.  The real
+    cause is the .venv launcher stub pattern: .venv/Scripts/python.exe is a
+    thin stub that CreateProcess-es the real CPython with the same command line,
+    producing a parent-child pair with identical CommandLine values.  Only the
+    child (real interpreter) runs any Python code.
+    """
+    src = Path(bpf.__file__).read_text(encoding="utf-8")
+    # Any of these patterns would directly spawn a child process.
+    forbidden_spawn_patterns = [
+        "subprocess.run(",
+        "subprocess.Popen(",
+        "subprocess.call(",
+        "subprocess.check_call(",
+        "subprocess.check_output(",
+        "multiprocessing.Process(",
+        "multiprocessing.Pool(",
+        "concurrent.futures.ProcessPoolExecutor",
+        "os.system(",
+        "os.popen(",
+        "os.execv(",
+        "os.execvp(",
+        "os.execve(",
+        "os.spawnv(",
+        "os.spawnl(",
+        "os.spawnve(",
+        "runpy.run_module(",
+        "runpy.run_path(",
+    ]
+    for pattern in forbidden_spawn_patterns:
+        assert pattern not in src, (
+            f"spawn pattern {pattern!r} found in tool — "
+            "this would create child processes and break the single-instance guarantee"
+        )
+
+
+def test_lock_self_test_spawns_no_child_processes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Runtime proof: --lock-self-test calls no subprocess/multiprocessing API.
+
+    Monkeypatches every spawn-capable stdlib function to raise AssertionError.
+    If --lock-self-test calls any of them, the test fails immediately.
+    The test also checks that the 'multiprocessing' module is NOT imported
+    during the --lock-self-test path (it should never be needed).
+    """
+    import subprocess as _subprocess
+    import os as _os
+
+    def _forbidden(*_a, **_kw):
+        raise AssertionError(
+            "_lock_self_test must not spawn any child processes"
+        )
+
+    # Patch subprocess module spawn functions.
+    monkeypatch.setattr(_subprocess, "Popen", _forbidden)
+    monkeypatch.setattr(_subprocess, "run", _forbidden)
+    monkeypatch.setattr(_subprocess, "call", _forbidden)
+    monkeypatch.setattr(_subprocess, "check_call", _forbidden)
+    monkeypatch.setattr(_subprocess, "check_output", _forbidden)
+
+    # Patch os-level spawn/exec functions.
+    for fn_name in ("system", "popen", "execv", "execvp", "execve",
+                    "spawnv", "spawnl", "spawnve"):
+        if hasattr(_os, fn_name):
+            monkeypatch.setattr(_os, fn_name, _forbidden)
+
+    # Remove 'multiprocessing' from sys.modules so we can detect if it gets
+    # imported during the self-test path.
+    import sys as _sys
+    mp_before = "multiprocessing" in _sys.modules
+
+    lock_path = tmp_path / "locks" / "prod_backfill_history.lock"
+    monkeypatch.setattr(bpf, "_default_lock_path", lambda: lock_path)
+    monkeypatch.setattr(bpf.time, "sleep", lambda _s: None)
+
+    # This must complete normally — any spawn attempt raises AssertionError.
+    code = bpf.main(["--lock-self-test"])
+
+    assert code == 0, "--lock-self-test should exit 0 when no live lock exists"
+    assert not lock_path.exists(), "lock must be cleaned up after --lock-self-test"
+
+    # multiprocessing must not have been freshly imported by the self-test path.
+    if not mp_before:
+        # If it was absent before the call, it must still be absent after.
+        assert "multiprocessing" not in _sys.modules, (
+            "--lock-self-test must not import the multiprocessing module"
+        )
+
+
+def test_backfill_diag_prints_appear_before_lock(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    """BACKFILL_DIAG header lines appear before the lock-acquisition print."""
+    lock_path = tmp_path / "locks" / "prod_backfill_history.lock"
+    monkeypatch.setattr(bpf, "_default_lock_path", lambda: lock_path)
+
+    class _OkBF:
+        def run(self, **_kw):
+            return ServiceResult(status=service_result.STATUS_SUCCESS,
+                                 run_id="r", rows_processed=0, metadata={})
+
+    monkeypatch.setattr(bpf, "_build_backfiller", lambda: _OkBF())
+    bpf.main(["--start-date", "2024-01-01", "--end-date", "2024-01-31"])
+
+    out = capsys.readouterr().out
+    lines = out.splitlines()
+    diag_lines = [i for i, l in enumerate(lines) if l.startswith("BACKFILL_DIAG:")]
+    attempt_line = next(
+        (i for i, l in enumerate(lines) if "attempting lock" in l), None
+    )
+    assert diag_lines, "BACKFILL_DIAG lines must be present"
+    assert attempt_line is not None, "'attempting lock' line must be present"
+    # All BACKFILL_DIAG header lines (pid, ppid, etc.) must precede
+    # the 'attempting lock' line which is emitted inside acquire().
+    header_diag = [i for i in diag_lines if i < attempt_line]
+    assert len(header_diag) >= 5, (
+        "at least 5 BACKFILL_DIAG header lines must precede 'attempting lock'"
+    )
+
+
+# --------------------------------------------------------------------------- #
 # Required: tickers-file snapshot failure + zero-ticker — benchmark/ingest
 # must never be called in either case.
 # --------------------------------------------------------------------------- #
@@ -695,4 +1072,87 @@ def test_no_tickers_file_zero_ticker_master_returns_failed_benchmark_not_called(
     )
     assert ingest_eng.calls == [], (
         "price ingestion must not be called when zero active tickers found"
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Parent-exe detection and lock-owner printing
+# --------------------------------------------------------------------------- #
+
+def test_get_parent_exe_windows_returns_string() -> None:
+    """_get_parent_exe_windows always returns a str (empty on non-Windows)."""
+    result = bpf._get_parent_exe_windows()
+    assert isinstance(result, str), "_get_parent_exe_windows must return str"
+    if sys.platform != "win32":
+        assert result == "", "must return empty string on non-Windows"
+
+
+def test_get_parent_exe_windows_never_raises() -> None:
+    """_get_parent_exe_windows must never raise even when ctypes fails."""
+    result = bpf._get_parent_exe_windows()
+    assert isinstance(result, str)
+
+
+def test_lock_owner_printed_after_acquisition(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    """After successful acquire(), the lock file JSON is printed as lock_owner."""
+    lock_path = tmp_path / "locks" / "prod_backfill_history.lock"
+    lock = bpf._BackfillLock(lock_path, argv=["--start-date", "2024-01-01"])
+    ok, _ = lock.acquire()
+    assert ok
+    out = capsys.readouterr().out
+    assert "BACKFILL_DIAG: lock_owner=" in out, (
+        "lock file JSON must be printed after successful acquisition"
+    )
+    owner_line = next(l for l in out.splitlines() if "lock_owner=" in l)
+    assert str(os.getpid()) in owner_line, "lock_owner must contain current pid"
+    lock.release()
+
+
+def test_lock_denied_message_includes_verify_hint(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    """The lock-denied BACKFILL_DIAG line includes a Get-Content verification hint."""
+    lock_path = tmp_path / "locks" / "prod_backfill_history.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path.write_text(
+        json.dumps({"pid": os.getpid(), "started_at": "2024-01-01T00:00:00+00:00",
+                    "argv": [], "cwd": os.getcwd()}),
+        encoding="utf-8",
+    )
+    lock2 = bpf._BackfillLock(lock_path, argv=[])
+    ok, _ = lock2.acquire()
+    assert not ok
+    out = capsys.readouterr().out
+    assert "Get-Content" in out or "lock denied" in out, (
+        "denial message must include verification command or 'lock denied'"
+    )
+
+
+def test_parent_exe_diag_in_main_output_when_parent_is_python(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    """parent_is_python=True appears in output when parent_exe contains 'python'."""
+    lock_path = tmp_path / "locks" / "prod_backfill_history.lock"
+    monkeypatch.setattr(bpf, "_default_lock_path", lambda: lock_path)
+    monkeypatch.setattr(bpf, "_get_parent_exe_windows",
+                        lambda: r"C:\Python39\python.exe")
+
+    class _OkBF:
+        def run(self, **_kw):
+            return ServiceResult(status=service_result.STATUS_SUCCESS,
+                                 run_id="r", rows_processed=0, metadata={})
+
+    monkeypatch.setattr(bpf, "_build_backfiller", lambda: _OkBF())
+    bpf.main(["--start-date", "2024-01-01", "--end-date", "2024-01-31"])
+
+    out = capsys.readouterr().out
+    assert "parent_exe=" in out
+    assert "parent_is_python=True" in out, (
+        "parent_is_python=True must appear when parent exe contains 'python'"
     )

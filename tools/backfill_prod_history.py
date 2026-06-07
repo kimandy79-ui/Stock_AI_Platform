@@ -42,7 +42,11 @@ from __future__ import annotations
 
 import argparse
 import csv
+import datetime
+import gc
+import json
 import logging
+import os
 import random
 import time
 import uuid
@@ -87,6 +91,259 @@ def _split_batches(tickers: list[str], batch_size: int) -> list[list[str]]:
     if batch_size < 1:
         raise ValueError("batch_size must be >= 1")
     return [tickers[i : i + batch_size] for i in range(0, len(tickers), batch_size)]
+
+
+
+# --------------------------------------------------------------------------- #
+# Single-instance lock (prevents concurrent prod backfill runs).
+# --------------------------------------------------------------------------- #
+
+def _pid_is_alive(pid: int) -> bool:
+    """Return ``True`` if a process with *pid* is currently running.
+
+    Uses ``ctypes`` on Windows (no ``os.kill`` signal semantics) and
+    ``os.kill(pid, 0)`` on POSIX — both are stdlib-only, no external deps.
+    """
+    if pid <= 0:
+        return False
+    if sys.platform == "win32":
+        import ctypes
+        import ctypes.wintypes
+
+        PROCESS_QUERY_INFORMATION = 0x0400
+        STILL_ACTIVE = 259
+        handle = ctypes.windll.kernel32.OpenProcess(  # type: ignore[attr-defined]
+            PROCESS_QUERY_INFORMATION, False, pid
+        )
+        if not handle:
+            return False  # no such process
+        try:
+            exit_code = ctypes.wintypes.DWORD()
+            ok = ctypes.windll.kernel32.GetExitCodeProcess(  # type: ignore[attr-defined]
+                handle, ctypes.byref(exit_code)
+            )
+            return bool(ok) and exit_code.value == STILL_ACTIVE
+        finally:
+            ctypes.windll.kernel32.CloseHandle(handle)  # type: ignore[attr-defined]
+    else:
+        try:
+            os.kill(pid, 0)
+            return True
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True  # process exists; we lack permission to signal it
+
+
+def _get_parent_exe_windows() -> str:
+    """Return the parent process's executable path on Windows; empty string elsewhere.
+
+    Uses ``QueryFullProcessImageNameW`` (Win32 API, no extra dependencies).
+    If the parent executable path contains ``python``, the parent is a Python
+    process — the clearest indicator of the Windows ``.venv`` launcher stub
+    pattern where ``.venv\\Scripts\\python.exe`` creates a child CPython with
+    the same command line and then waits.
+    """
+    if sys.platform != "win32":
+        return ""
+    try:
+        import ctypes
+        import ctypes.wintypes
+
+        ppid = os.getppid()
+        if ppid <= 0:
+            return ""
+        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+        handle = ctypes.windll.kernel32.OpenProcess(  # type: ignore[attr-defined]
+            PROCESS_QUERY_LIMITED_INFORMATION, False, ppid
+        )
+        if not handle:
+            return ""
+        try:
+            buf = ctypes.create_unicode_buffer(32768)
+            size = ctypes.wintypes.DWORD(32768)
+            ok = ctypes.windll.kernel32.QueryFullProcessImageNameW(  # type: ignore[attr-defined]
+                handle, 0, buf, ctypes.byref(size)
+            )
+            return buf.value[: size.value] if ok else ""
+        finally:
+            ctypes.windll.kernel32.CloseHandle(handle)  # type: ignore[attr-defined]
+    except Exception:  # noqa: BLE001 – diagnostic only; never block startup
+        return ""
+
+
+
+
+class _BackfillLock:
+    """File-based single-instance guard for the prod historical backfill tool.
+
+    Atomicity guarantee: the lock file is created with ``os.open(...,
+    O_CREAT | O_EXCL | O_WRONLY)`` which is an atomic kernel-level exclusive
+    create on both POSIX and Windows — unlike ``open(..., "x")`` which goes
+    through Python's buffered I/O and does not carry the same OS-level guarantee
+    in all Python builds.  This means only one process can ever succeed in
+    claiming the lock even when two are racing at the same instant.
+
+    Lock file content (JSON): ``pid``, ``started_at`` (UTC ISO-8601), ``argv``
+    (list), ``cwd`` (working directory).  This lets an operator inspect who is
+    running and when.
+
+    Acquire / release via :meth:`acquire` + :meth:`release`, or use as a
+    context manager.  :meth:`release` is idempotent and safe to call multiple
+    times.
+    """
+
+    def __init__(self, lock_path: Path, argv: list[str] | None = None) -> None:
+        self._path = lock_path
+        self._argv = list(argv or [])
+        self._acquired = False
+
+    # ------------------------------------------------------------------ #
+    def acquire(self) -> tuple[bool, str]:
+        """Try to acquire the lock.
+
+        Returns ``(True, "")`` on success or ``(False, reason)`` when another
+        live process holds the lock.  Stale locks (dead PID) are silently
+        removed and the acquisition retried once.
+        """
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        pid = os.getpid()
+        print(f"BACKFILL_DIAG: attempting lock pid={pid} lock_path={self._path}")
+
+        # Happy path: file does not exist → create it atomically via the
+        # kernel's O_CREAT | O_EXCL guarantee.
+        if self._atomic_create():
+            print(f"BACKFILL_DIAG: lock acquired pid={pid}")
+            # Print the lock file contents so the user can cross-check which
+            # PID owns the lock.  On Windows: the PID here is the REAL Python
+            # interpreter; the parent python.exe visible in Get-CimInstance
+            # (with the same CommandLine) is the .venv launcher stub — it never
+            # calls main() and holds no lock.  To verify at any time:
+            #   Get-Content .\data\locks\prod_backfill_history.lock | ConvertFrom-Json
+            try:
+                owner_data = json.loads(self._path.read_text(encoding="utf-8"))
+                print(f"BACKFILL_DIAG: lock_owner={json.dumps(owner_data)}")
+            except Exception:  # noqa: BLE001 – diagnostic only
+                pass
+            return True, ""
+
+        # Lock file already exists — read it and decide.
+        existing_pid, existing_data = self._read_existing()
+        print(
+            f"BACKFILL_DIAG: lock exists pid={pid} "
+            f"existing_lock={json.dumps(existing_data)}"
+        )
+
+        if existing_pid and _pid_is_alive(existing_pid):
+            print(
+                f"BACKFILL_DIAG: lock denied pid={pid} owner_pid={existing_pid} — "
+                f"verify: Get-Content {self._path} | ConvertFrom-Json"
+            )
+            return (
+                False,
+                f"another prod historical backfill is already running "
+                f"(pid={existing_pid})",
+            )
+
+        # Stale lock: dead PID (or unreadable/corrupt file) — delete and retry.
+        logger.info(
+            "Removing stale backfill lock (pid=%s is not alive)", existing_pid
+        )
+        try:
+            self._path.unlink(missing_ok=True)
+        except OSError:
+            pass  # already removed by a concurrent process — that's fine
+
+        # One retry: handles the race where two processes both detected a stale
+        # lock and attempt to replace it simultaneously.
+        if self._atomic_create():
+            print(f"BACKFILL_DIAG: lock acquired pid={pid} (after stale removal)")
+            return True, ""
+
+        # Lost the creation race to another concurrent process.
+        existing_pid, existing_data = self._read_existing()
+        print(
+            f"BACKFILL_DIAG: lock denied pid={pid} owner_pid={existing_pid} "
+            f"(lost stale-replacement race)"
+        )
+        return (
+            False,
+            f"another prod historical backfill is already running "
+            f"(pid={existing_pid})",
+        )
+
+    def release(self) -> None:
+        """Remove the lock file if this instance owns it (idempotent)."""
+        if not self._acquired:
+            return
+        try:
+            self._path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        self._acquired = False
+        print(f"BACKFILL_DIAG: lock released pid={os.getpid()}")
+
+    # ------------------------------------------------------------------ #
+    def __enter__(self) -> "_BackfillLock":
+        ok, msg = self.acquire()
+        if not ok:
+            raise RuntimeError(msg)
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        self.release()
+
+    # ------------------------------------------------------------------ #
+    def _lock_payload(self) -> dict[str, object]:
+        return {
+            "pid": os.getpid(),
+            "started_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            "argv": self._argv,
+            "cwd": os.getcwd(),
+        }
+
+    def _atomic_create(self) -> bool:
+        """Atomically create the lock file using ``O_CREAT | O_EXCL``.
+
+        ``os.open`` with these flags is an atomic kernel operation on both
+        POSIX and Windows: the call either succeeds exclusively or raises
+        ``FileExistsError`` — there is no window where two processes can both
+        see the file as absent.
+        """
+        flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY
+        if hasattr(os, "O_BINARY"):   # Windows: disable CRLF translation
+            flags |= os.O_BINARY
+        try:
+            fd = os.open(str(self._path), flags)
+        except FileExistsError:
+            return False
+        try:
+            os.write(fd, json.dumps(self._lock_payload()).encode("utf-8"))
+        finally:
+            os.close(fd)
+        self._acquired = True
+        return True
+
+    def _read_existing(self) -> tuple[int, dict]:
+        """Read an existing lock file; return ``(pid, data)`` or ``(0, {})``."""
+        try:
+            data = json.loads(self._path.read_text(encoding="utf-8"))
+            return int(data.get("pid", 0)), data
+        except (OSError, ValueError, json.JSONDecodeError):
+            return 0, {}
+
+
+def _default_lock_path() -> Path:
+    """Return the absolute lock path rooted at the project directory.
+
+    Resolved from ``__file__`` (``tools/backfill_prod_history.py``), so it is
+    always ``<project_root>/data/locks/prod_backfill_history.lock`` regardless
+    of the working directory or any ``DATA_DIR`` environment override.  Using a
+    fixed absolute path ensures both a running process and a second invocation
+    resolve to the same file even when launched from different ``cwd``s.
+    """
+    project_root = Path(__file__).resolve().parents[1]
+    return project_root / "data" / "locks" / "prod_backfill_history.lock"
 
 
 # --------------------------------------------------------------------------- #
@@ -548,6 +805,20 @@ class Backfiller:
                 warnings=warnings,
             )
 
+        # Force CPython garbage collection BEFORE the benchmark write.
+        # Root cause: DuckDB's Python bindings contain reference cycles between
+        # the DuckDB database object and DuckDBPyConnection wrappers.
+        # CPython's reference counting cannot break cycles; it defers them to
+        # the cyclic GC.  Until the GC runs, the C++ Connection destructor is
+        # not called, so DuckDB does not call UnmapViewOfFile() on Windows —
+        # the memory-mapped pages from _select_active_stocks() (3,980 rows)
+        # remain mapped.  A mapped region prevents duckdb.connect(read_only=
+        # False) from acquiring the exclusive write lock it needs for the
+        # benchmark write, causing it to block indefinitely.
+        # gc.collect() breaks the cycles, destroys the C++ objects, and
+        # releases the mmap BEFORE the write connection is opened.
+        gc.collect()
+
         # 4. Benchmark / sector-ETF backfill for the full range (critical).
         #    Placed after the active-ticker guard so it only runs when the
         #    universe is confirmed non-empty.
@@ -577,6 +848,13 @@ class Backfiller:
         # 5. Resume filtering.
         if resume and active:
             remaining, skipped = self._apply_resume(active, start_date, end_date)
+            # Force CPython garbage collection immediately after the large read
+            # connection closes.  On Windows, DuckDB memory-maps the database
+            # file for read connections; the mmap may not be released until the
+            # Python connection wrapper is GC'd.  Without this, the mmap can
+            # block DuckDB from acquiring the exclusive write lock for the first
+            # ticker batch even though conn.close() has been called.
+            gc.collect()
             print(f"Resume enabled: skipped={len(skipped)}, remaining={len(remaining)}")
         else:
             remaining, skipped = active, []
@@ -936,6 +1214,65 @@ class Backfiller:
 # --------------------------------------------------------------------------- #
 # CLI.
 # --------------------------------------------------------------------------- #
+def _lock_self_test(lock_path: Path, argv: list[str]) -> int:
+    """Acquire lock, print contents, sleep 60 s, release.  For manual testing only.
+
+    This function contains **no subprocess, multiprocessing, Popen, os.exec*, or
+    os.spawn* calls**.  It runs entirely within the current process and sleeps
+    using ``time.sleep``.  The user opens a *second terminal* manually to test
+    that the guard blocks a concurrent invocation.
+
+    **Windows note — two python.exe processes are expected and are NOT a bug:**
+    On Windows, ``.venv\\Scripts\\python.exe`` is a launcher stub that calls
+    ``CreateProcess`` to start the real CPython interpreter with the same command
+    line, producing a parent-child pair.  ``Get-CimInstance Win32_Process`` shows
+    both with identical ``CommandLine`` values.  Only the child (real interpreter)
+    runs this code and acquires the lock; the parent stub just waits for the child.
+    Running ``--lock-self-test`` in a *second PowerShell window* starts a completely
+    separate process tree — that second tree's child is the one the lock will block.
+
+    Run in two terminals to verify the single-instance guard:
+
+    Terminal 1::
+
+        python tools\\backfill_prod_history.py --lock-self-test
+
+    Terminal 2 (while Terminal 1 is still sleeping)::
+
+        python tools\\backfill_prod_history.py --lock-self-test
+
+    Terminal 2 must print ``FAILURE: another prod historical backfill is
+    already running (pid=...)`` and exit immediately with code 1.  Terminal 1
+    must print ``LOCK_SELF_TEST: lock released`` after 60 s (or Ctrl-C).
+
+    This path does **not** open DuckDB, call Yahoo, or touch any market data.
+    """
+    pid = os.getpid()
+    print(f"LOCK_SELF_TEST: pid={pid} attempting lock at {lock_path}")
+    lock = _BackfillLock(lock_path, argv=argv)
+    ok, msg = lock.acquire()
+    if not ok:
+        print(f"FAILURE: {msg}")
+        return 1
+    try:
+        contents = json.loads(lock_path.read_text(encoding="utf-8"))
+        print(f"LOCK_SELF_TEST: lock acquired pid={pid}")
+        print(f"LOCK_SELF_TEST: lock_file={lock_path}")
+        print(f"LOCK_SELF_TEST: lock_contents={json.dumps(contents, indent=2)}")
+        print(
+            "LOCK_SELF_TEST: sleeping 60 s — open a second terminal and run "
+            "--lock-self-test to verify the guard..."
+        )
+        time.sleep(60)
+        print("LOCK_SELF_TEST: sleep complete, releasing lock")
+    except KeyboardInterrupt:
+        print(f"\nLOCK_SELF_TEST: interrupted, releasing lock")
+    finally:
+        lock.release()
+        print(f"LOCK_SELF_TEST: lock released pid={pid}")
+    return 0
+
+
 def _build_backfiller() -> Backfiller:
     """Construct the real Backfiller (isolated so tests can monkeypatch it)."""
     ensure_repo_root_on_path()
@@ -947,10 +1284,12 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         prog="backfill_prod_history",
         description="Backfill prod.duckdb with historical market data over a range.",
     )
-    parser.add_argument("--start-date", dest="start_date", type=date.fromisoformat,
-                        required=True, help="Inclusive range start (YYYY-MM-DD).")
-    parser.add_argument("--end-date", dest="end_date", type=date.fromisoformat,
-                        required=True, help="Inclusive range end (YYYY-MM-DD).")
+    parser.add_argument("--start-date", dest="start_date",
+                        type=date.fromisoformat, default=None,
+                        help="Inclusive range start (YYYY-MM-DD). Required unless --lock-self-test.")
+    parser.add_argument("--end-date", dest="end_date",
+                        type=date.fromisoformat, default=None,
+                        help="Inclusive range end (YYYY-MM-DD). Required unless --lock-self-test.")
     parser.add_argument(
         "--tickers-file", dest="tickers_file", default=None,
         metavar="PATH",
@@ -994,6 +1333,14 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser.add_argument("--run-daily-pipeline-after", dest="run_daily_pipeline_after",
                         action="store_true",
                         help="Run the normal daily pipeline for end_date afterward.")
+    parser.add_argument(
+        "--lock-self-test", dest="lock_self_test", action="store_true",
+        help=(
+            "Acquire the single-instance lock, print its contents, sleep 60 s, "
+            "then release. Run in two terminals to manually verify that a second "
+            "invocation is blocked immediately. Does not open DuckDB or call Yahoo."
+        ),
+    )
     return parser.parse_args(argv)
 
 
@@ -1001,6 +1348,81 @@ def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 
+    # ------------------------------------------------------------------ #
+    # Diagnostic header — printed before ANY work so both processes leave
+    # an immediately visible trace even if the second one exits within ms.
+    # ------------------------------------------------------------------ #
+    pid = os.getpid()
+    try:
+        ppid = os.getppid()
+    except AttributeError:  # Python < 3.8 on Windows (shouldn't happen)
+        ppid = "unavailable"
+
+    project_root = Path(__file__).resolve().parents[1]
+    lock_path = _default_lock_path()
+
+    print(f"BACKFILL_DIAG: enter main")
+    print(f"BACKFILL_DIAG: pid={pid}")
+    print(f"BACKFILL_DIAG: ppid={ppid}")
+    print(f"BACKFILL_DIAG: executable={sys.executable}")
+    print(f"BACKFILL_DIAG: base_executable={sys._base_executable}")
+    # If executable != base_executable, sys.executable is the venv launcher
+    # stub; the real CPython interpreter is base_executable.  On Windows the
+    # launcher (parent process) calls CreateProcessW with the same argv to
+    # start base_executable (child process), then WaitForSingleObject.  Both
+    # appear as python.exe in Get-CimInstance with identical CommandLine.
+    # The child is the only process running Python code — the parent is a
+    # thin C wrapper that will never call main() or open DuckDB.
+    if sys.executable != sys._base_executable:
+        print(
+            f"BACKFILL_DIAG: venv_launcher_detected=True — "
+            f"'{sys.executable}' is the venv launcher stub; "
+            f"'{sys._base_executable}' is the real interpreter. "
+            "Two python.exe will appear in Get-CimInstance. "
+            "Only the child (this process, real interpreter) does any work. "
+            "To avoid the pair: use base_executable directly — see tools\\run_backfill.ps1"
+        )
+    else:
+        print("BACKFILL_DIAG: venv_launcher_detected=False (running base interpreter directly)")
+    print(f"BACKFILL_DIAG: argv={sys.argv}")
+    print(f"BACKFILL_DIAG: cwd={os.getcwd()}")
+    print(f"BACKFILL_DIAG: script_file={__file__}")
+    print(f"BACKFILL_DIAG: resolved_script_file={Path(__file__).resolve()}")
+    print(f"BACKFILL_DIAG: project_root={project_root}")
+    print(f"BACKFILL_DIAG: lock_path={lock_path}")
+
+    # Detect if our parent process is also a Python executable (Windows venv
+    # launcher pattern).  The result is definitive: if parent_is_python=True
+    # and the parent has the same CommandLine (visible via Get-CimInstance),
+    # the parent is the .venv stub that only calls CreateProcess and waits —
+    # it never calls main() or acquires the lock.  Only this process (pid=N)
+    # does any Python work.  The lock file written below will contain pid=N,
+    # confirming which process is the sole owner.
+    parent_exe = _get_parent_exe_windows()
+    if parent_exe:
+        print(f"BACKFILL_DIAG: parent_exe={parent_exe!r}")
+        if "python" in parent_exe.lower():
+            print(
+                f"BACKFILL_DIAG: parent_is_python=True pid={pid} ppid={ppid} — "
+                "parent process is a Python executable (.venv launcher stub). "
+                f"Only I (pid={pid}) will acquire the lock and do actual work. "
+                "To confirm after lock acquisition: "
+                "Get-Content .\\data\\locks\\prod_backfill_history.lock | ConvertFrom-Json"
+            )
+        else:
+            print(f"BACKFILL_DIAG: parent_is_python=False parent_exe={parent_exe!r}")
+
+    # --lock-self-test: pure lock test, no DB or provider work at all.
+    raw_argv = list(argv) if argv is not None else sys.argv[1:]
+    if getattr(args, "lock_self_test", False):
+        return _lock_self_test(lock_path, raw_argv)
+
+    # start-date and end-date are required for all non-self-test paths.
+    if args.start_date is None or args.end_date is None:
+        print("ERROR: --start-date and --end-date are required")
+        return 1
+
+    # Cheap CLI-only validations before the lock (no DB / provider involved).
     if args.start_date > args.end_date:
         print("ERROR: start-date must be <= end-date")
         return 1
@@ -1012,6 +1434,19 @@ def main(argv: list[str] | None = None) -> int:
             print(f"ERROR: --tickers-file not found: {tickers_file}")
             return 1
 
+    # Single-instance guard — acquired before any DB connection or provider
+    # call so two concurrent runs can never both reach DuckDB.
+    print(
+        f"Starting prod historical backfill: pid={pid} "
+        f"start_date={args.start_date} end_date={args.end_date}"
+    )
+    lock = _BackfillLock(lock_path, argv=raw_argv)
+    acquired, lock_msg = lock.acquire()
+    if not acquired:
+        print(f"FAILURE: {lock_msg}")
+        return 1
+
+    exit_code = 1
     try:
         backfiller = _build_backfiller()
         result = backfiller.run(
@@ -1031,33 +1466,43 @@ def main(argv: list[str] | None = None) -> int:
             run_regime=args.run_regime,
             run_daily_pipeline_after=args.run_daily_pipeline_after,
         )
-    except Exception as exc:  # noqa: BLE001 - operator script reports any failure
-        print(f"FAILURE: prod historical backfill raised an exception: {exc}")
-        logger.exception("prod historical backfill failed")
-        return 1
 
-    status = getattr(result, "status", STATUS_FAILED)
-    metadata = getattr(result, "metadata", {}) or {}
-    is_ok = status in (STATUS_SUCCESS, STATUS_SUCCESS_WITH_WARNINGS)
+        status = getattr(result, "status", STATUS_FAILED)
+        metadata = getattr(result, "metadata", {}) or {}
+        is_ok = status in (STATUS_SUCCESS, STATUS_SUCCESS_WITH_WARNINGS)
 
-    if is_ok:
-        if status == STATUS_SUCCESS_WITH_WARNINGS:
-            print(
-                "SUCCESS_WITH_WARNINGS: prod historical backfill completed "
-                f"(price_rows_written={metadata.get('price_rows_written', 0)})."
-            )
-            for warn in getattr(result, "warnings", []) or []:
-                print(f"  warning: {warn}")
+        if is_ok:
+            if status == STATUS_SUCCESS_WITH_WARNINGS:
+                print(
+                    "SUCCESS_WITH_WARNINGS: prod historical backfill completed "
+                    f"(price_rows_written={metadata.get('price_rows_written', 0)})."
+                )
+                for warn in getattr(result, "warnings", []) or []:
+                    print(f"  warning: {warn}")
+            else:
+                print(
+                    "SUCCESS: prod historical backfill completed "
+                    f"(price_rows_written={metadata.get('price_rows_written', 0)})."
+                )
+            exit_code = 0
         else:
             print(
-                "SUCCESS: prod historical backfill completed "
-                f"(price_rows_written={metadata.get('price_rows_written', 0)})."
+                f"FAILURE: prod historical backfill status={status}; "
+                f"errors={getattr(result, 'errors', [])}"
             )
-        return 0
+            exit_code = 1
 
-    print(f"FAILURE: prod historical backfill status={status}; "
-          f"errors={getattr(result, 'errors', [])}")
-    return 1
+    except KeyboardInterrupt:
+        print("\nINTERRUPTED: prod historical backfill was cancelled by the user.")
+        exit_code = 1
+    except Exception as exc:  # noqa: BLE001 - operator script surfaces any failure
+        print(f"FAILURE: prod historical backfill raised an exception: {exc}")
+        logger.exception("prod historical backfill failed")
+        exit_code = 1
+    finally:
+        lock.release()
+
+    return exit_code
 
 
 if __name__ == "__main__":
