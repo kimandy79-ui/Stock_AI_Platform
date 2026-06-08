@@ -10,8 +10,6 @@ __pycache__/
 htmlcov/
 
 # Data artifacts (keep directory structure via .gitkeep, ignore contents)
-data/duckdb/*.duckdb
-data/duckdb/*.duckdb.wal
 data/logs/*.log
 data/exports/*
 data/backups/*
