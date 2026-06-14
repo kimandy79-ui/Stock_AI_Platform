@@ -61,6 +61,7 @@ SETUP_VOLATILITY_SQUEEZE: Final[str] = "volatility_squeeze"
 SETUP_TREND_PULLBACK: Final[str] = "trend_pullback"
 SETUP_TREND_RESUME: Final[str] = "trend_resume"
 SETUP_UNKNOWN: Final[str] = "unknown"
+SETUP_MOMENTUM_EXTENSION: Final[str] = "momentum_extension"
 
 # Stop-clamp factor used when the mechanical stop is missing / invalid / >= entry.
 _STOP_CLAMP_FACTOR: Final[float] = 0.95
@@ -95,7 +96,7 @@ class _ConfigError(ValueError):
 # --------------------------------------------------------------------------- #
 # Passing Step 3 candidates for this signal_date / strategy_config_id.
 _SELECT_CANDIDATES: Final[str] = (
-    "SELECT candidate_id, ticker "
+    "SELECT candidate_id, ticker, screening_score, soft_score_components "
     "FROM step3_candidates "
     "WHERE signal_date = ? "
     "  AND strategy_config_id = ? "
@@ -121,6 +122,8 @@ _SELECT_FEATURES_PRICES: Final[str] = (
     "  f.sector_relative_strength AS sector_relative_strength, "
     "  f.days_to_earnings_bd AS days_to_earnings_bd, "
     "  f.macro_event_risk_flag AS macro_event_risk_flag, "
+    "  f.atr_pct AS atr_pct, "
+    "  f.distance_to_ema50_pct AS distance_to_ema50_pct, "
     "  p.close_raw AS close_raw, "
     "  p.close_adj AS close_adj, "
     "  p.open_raw AS open_raw, "
@@ -190,12 +193,22 @@ def _clamp(value: float, low: float = 0.0, high: float = 100.0) -> float:
 # --------------------------------------------------------------------------- #
 # Setup-type classification (first match wins; NULL inputs make a clause false).
 # --------------------------------------------------------------------------- #
-def _classify_setup(feat: dict[str, Any], min_rvol: float) -> str:
+def _classify_setup(
+    feat: dict[str, Any],
+    min_rvol: float,
+    min_consolidation_for_breakout: float = 0.0,
+    ema50_ext_limit: float = 1.0,
+) -> str:
     """Return the Step 4 setup_type for one candidate's feature snapshot.
 
     Evaluated in strict priority order. Any ``None`` required input makes that
     condition false. ``trend_resume`` additionally consults the prior-10 history
     flag (``_trend_resume_history_ok``) precomputed by the caller.
+
+    ``min_consolidation_for_breakout`` gates the breakout classification — a
+    near-breakout with insufficient consolidation is classified as
+    ``momentum_extension`` instead. ``ema50_ext_limit`` is used to detect
+    extended momentum conditions.
     """
     roc20 = feat["roc20"]
     consolidation = feat["consolidation_score"]
@@ -206,16 +219,22 @@ def _classify_setup(feat: dict[str, Any], min_rvol: float) -> str:
     ema50 = feat["ema50"]
     ema200 = feat["ema200"]
     pullback = feat["pullback_from_recent_high_pct"]
+    dist_ema50 = feat.get("dist_ema50")  # injected by caller when available
 
     # 1. high_tight_flag
     if roc20 is not None and consolidation is not None:
         if roc20 > 0.15 and consolidation >= 60:
             return SETUP_HIGH_TIGHT_FLAG
 
-    # 2. breakout
+    # 2. breakout — requires sufficient consolidation for this strategy.
+    #    If near a breakout level but consolidation is below threshold,
+    #    fall through to momentum_extension check instead.
     if breakout is not None and rvol20 is not None:
         if -0.5 <= breakout <= 0.5 and rvol20 >= min_rvol:
-            return SETUP_BREAKOUT
+            cons_ok = consolidation is not None and consolidation >= min_consolidation_for_breakout
+            if cons_ok:
+                return SETUP_BREAKOUT
+            # Not enough consolidation — classify as momentum_extension below.
 
     # 3. volatility_squeeze (atr_contraction_proxy == consolidation_score >= 70).
     if consolidation is not None:
@@ -247,7 +266,19 @@ def _classify_setup(feat: dict[str, Any], min_rvol: float) -> str:
         if close_adj > ema20 and -0.20 <= pullback <= -0.03:
             return SETUP_TREND_RESUME
 
-    # 6. fallback
+    # 6. momentum_extension — extended move lacking setup structure.
+    #    Triggered when: EMA50 extended, strong momentum, elevated RVOL,
+    #    but no consolidation / pullback / trend structure qualifies above.
+    if (
+        dist_ema50 is not None
+        and dist_ema50 > ema50_ext_limit * 0.5   # noticeably extended
+        and roc20 is not None and roc20 > 0.05
+        and rvol20 is not None and rvol20 >= 1.5
+        and (consolidation is None or consolidation < min_consolidation_for_breakout)
+    ):
+        return SETUP_MOMENTUM_EXTENSION
+
+    # 7. fallback
     return SETUP_UNKNOWN
 
 
@@ -406,23 +437,80 @@ def _confirmation_score(
 
 
 # --------------------------------------------------------------------------- #
+# Setup-type-aware quality scorer.
+# --------------------------------------------------------------------------- #
+# Per-setup-type component weights (breakout_quality, squeeze, timing,
+# confirmation). Weights sum to 1.0 for each setup type.
+_SETUP_WEIGHTS: Final[dict[str, tuple[float, float, float, float]]] = {
+    #                              bq     sq    tim   conf
+    SETUP_BREAKOUT:              (0.50, 0.30, 0.10, 0.10),
+    SETUP_VOLATILITY_SQUEEZE:    (0.10, 0.50, 0.30, 0.10),
+    SETUP_TREND_PULLBACK:        (0.10, 0.10, 0.50, 0.30),
+    SETUP_TREND_RESUME:          (0.10, 0.10, 0.40, 0.40),
+    SETUP_HIGH_TIGHT_FLAG:       (0.40, 0.10, 0.40, 0.10),
+    SETUP_MOMENTUM_EXTENSION:    (0.40, 0.10, 0.40, 0.10),
+    SETUP_UNKNOWN:               (0.25, 0.25, 0.25, 0.25),  # fallback equal weight
+}
+
+
+def _route_setup_score(
+    setup_type: str,
+    breakout_quality: float,
+    squeeze: float,
+    timing: float,
+    confirmation: float,
+) -> float:
+    """Return setup quality weighted by setup type (0-100, clamped).
+
+    Each setup type applies different component weights so that irrelevant
+    components do not inflate or suppress the score.
+    """
+    weights = _SETUP_WEIGHTS.get(setup_type, _SETUP_WEIGHTS[SETUP_UNKNOWN])
+    w_bq, w_sq, w_tim, w_conf = weights
+    return _clamp(
+        w_bq * breakout_quality
+        + w_sq * squeeze
+        + w_tim * timing
+        + w_conf * confirmation
+    )
+
+
+# --------------------------------------------------------------------------- #
 # Penalties.
 # --------------------------------------------------------------------------- #
 def _earnings_penalty(
     days_to_earnings_bd: int | None,
     avoid_within_bd: int,
     penalty_points_max: float,
-) -> float:
-    """Linear earnings penalty (<= 0); see spec for the boundary semantics."""
+    strategy_name: str = "normal",
+) -> tuple[float, str]:
+    """Linear earnings penalty (<= 0). Returns ``(penalty, earnings_status)``.
+
+    Unknown earnings date (``None``) is treated as risk proportional to
+    strategy strictness — not as zero penalty. The returned ``earnings_status``
+    label is stored in ``explanation_json`` for auditability.
+    """
     if days_to_earnings_bd is None:
-        penalty = 0.0
-    elif avoid_within_bd == 0:
-        penalty = penalty_points_max if days_to_earnings_bd == 0 else 0.0
-    elif days_to_earnings_bd <= avoid_within_bd:
+        status = "EARNINGS_UNKNOWN"
+        unknown_factors: dict[str, float] = {
+            "conservative": 1.0,
+            "normal": 0.75,
+            "aggressive": 0.40,
+        }
+        factor = unknown_factors.get(strategy_name, 0.75)
+        penalty = min(0.0, penalty_points_max * factor)
+        return penalty, status
+
+    if avoid_within_bd == 0:
+        if days_to_earnings_bd == 0:
+            return min(0.0, penalty_points_max), "EARNINGS_TODAY"
+        return 0.0, "EARNINGS_CLEAR"
+
+    if days_to_earnings_bd <= avoid_within_bd:
         penalty = penalty_points_max * (1.0 - days_to_earnings_bd / avoid_within_bd)
-    else:
-        penalty = 0.0
-    return min(0.0, penalty)
+        return min(0.0, penalty), "EARNINGS_INSIDE_WINDOW"
+
+    return 0.0, "EARNINGS_CLEAR"
 
 
 def _macro_penalty(
@@ -624,6 +712,23 @@ class Step4AnalysisEngine:
         target_r = _number(step4, "step4", "target_R")
         if not target_r > 0:
             raise _ConfigError("config key step4.target_R must be > 0")
+        min_step4_setup_score = _number(step4, "step4", "min_step4_setup_score")
+        if min_step4_setup_score < 0:
+            raise _ConfigError(
+                "config key step4.min_step4_setup_score must be >= 0"
+            )
+        min_consolidation_for_breakout = _number(
+            step4, "step4", "min_consolidation_for_breakout"
+        )
+        if min_consolidation_for_breakout < 0:
+            raise _ConfigError(
+                "config key step4.min_consolidation_for_breakout must be >= 0"
+            )
+        min_estimated_rr = _number(step4, "step4", "min_estimated_rr")
+        if min_estimated_rr < 0:
+            raise _ConfigError(
+                "config key step4.min_estimated_rr must be >= 0"
+            )
 
         earnings = _section("earnings")
         if "avoid_within_bd" not in earnings:
@@ -658,6 +763,35 @@ class Step4AnalysisEngine:
         min_rvol = _number(screening, "screening", "min_rvol")
         if not min_rvol > 0:
             raise _ConfigError("config key screening.min_rvol must be > 0")
+        min_screening_score = _number(
+            screening, "screening", "min_screening_score"
+        )
+        if min_screening_score < 0:
+            raise _ConfigError(
+                "config key screening.min_screening_score must be >= 0"
+            )
+        min_step3_setup_score = _number(
+            screening, "screening", "min_step3_setup_score"
+        )
+        if min_step3_setup_score < 0:
+            raise _ConfigError(
+                "config key screening.min_step3_setup_score must be >= 0"
+            )
+
+        strategy_name: str = strategy_config.get("strategy_name", "normal")
+        if not isinstance(strategy_name, str):
+            strategy_name = "normal"
+
+        # Per-strategy risk-gate hard limits applied in _build_rows.
+        _ATR_LIMITS: dict[str, float] = {
+            "conservative": 0.06, "normal": 0.08, "aggressive": 0.12,
+        }
+        _EMA50_LIMITS: dict[str, float] = {
+            "conservative": 0.08, "normal": 0.12, "aggressive": 0.25,
+        }
+        _STOP_LIMITS: dict[str, float] = {
+            "conservative": 0.10, "normal": 0.15, "aggressive": 0.20,
+        }
 
         return {
             "target_r": target_r,
@@ -666,6 +800,15 @@ class Step4AnalysisEngine:
             "macro_enabled": macro_enabled,
             "macro_penalty_points": macro_penalty_points,
             "min_rvol": min_rvol,
+            "min_screening_score": min_screening_score,
+            "min_step3_setup_score": min_step3_setup_score,
+            "min_step4_setup_score": min_step4_setup_score,
+            "min_consolidation_for_breakout": min_consolidation_for_breakout,
+            "min_estimated_rr": min_estimated_rr,
+            "strategy_name": strategy_name,
+            "atr_pct_limit": _ATR_LIMITS.get(strategy_name, 0.08),
+            "ema50_ext_limit": _EMA50_LIMITS.get(strategy_name, 0.12),
+            "stop_distance_limit": _STOP_LIMITS.get(strategy_name, 0.15),
         }
 
     # ------------------------------------------------------------------ #
@@ -694,10 +837,19 @@ class Step4AnalysisEngine:
             candidate_rows = connection.execute(
                 _SELECT_CANDIDATES, [signal_date, strategy_config_id]
             ).fetchall()
-            candidates = [
-                {"candidate_id": cid, "ticker": ticker}
-                for cid, ticker in candidate_rows
-            ]
+            import json as _json
+            candidates = []
+            for cid, ticker, sc, soft_json in candidate_rows:
+                try:
+                    soft_parsed = _json.loads(soft_json) if soft_json else {}
+                except Exception:
+                    soft_parsed = {}
+                candidates.append({
+                    "candidate_id": cid,
+                    "ticker": ticker,
+                    "screening_score": sc,
+                    "soft_score_components_parsed": soft_parsed,
+                })
 
             feature_by_ticker: dict[str, dict[str, Any]] = {}
             recent_lows: dict[str, float | None] = {}
@@ -714,8 +866,8 @@ class Step4AnalysisEngine:
                     "rsi14", "roc20", "rvol20", "atr14", "breakout_proximity",
                     "pullback_from_recent_high_pct", "consolidation_score",
                     "sector_relative_strength", "days_to_earnings_bd",
-                    "macro_event_risk_flag", "close_raw", "close_adj",
-                    "open_raw", "high_raw", "low_raw",
+                    "macro_event_risk_flag", "atr_pct", "distance_to_ema50_pct",
+                    "close_raw", "close_adj", "open_raw", "high_raw", "low_raw",
                 )
                 for raw in fp_rows:
                     record = dict(zip(fp_cols, raw))
@@ -756,12 +908,52 @@ class Step4AnalysisEngine:
         Candidates with no current feature row or no usable ``close_raw`` are
         treated as not analyzable and produce no row (gap
         ``G-MISSING-ATR-OR-PRICE``).
+
+        Pre-scoring gates (applied in order before any scoring):
+        1. ``min_screening_score`` — Step 3 total score meets strategy threshold.
+        1b.``min_step3_setup_score`` — Step 3 setup sub-score meets strategy threshold.
+        2. ``atr_pct`` — hard limit by strategy.
+        3. ``distance_to_ema50_pct`` — hard limit by strategy.
+        4. ``stop_distance_pct`` — computed after stop, hard limit by strategy.
+        5. ``setup_type = unknown/momentum_extension`` — blocked for Conservative.
+        Post-scoring gates:
+        6. ``min_step4_setup_score`` — Step 4 setup score meets strategy threshold.
+        7. ``min_estimated_rr`` — Conservative hard block on insufficient RR.
         """
         rows: list[dict[str, Any]] = []
         target_r = cfg["target_r"]
+        strategy_name = cfg["strategy_name"]
+        min_screening_score = cfg["min_screening_score"]
+        min_step3_setup_score = cfg["min_step3_setup_score"]
+        min_step4_setup_score = cfg["min_step4_setup_score"]
+        min_consolidation_for_breakout = cfg["min_consolidation_for_breakout"]
+        min_estimated_rr = cfg["min_estimated_rr"]
+        atr_pct_limit = cfg["atr_pct_limit"]
+        ema50_ext_limit = cfg["ema50_ext_limit"]
+        stop_distance_limit = cfg["stop_distance_limit"]
 
         for cand in candidates:
             ticker = cand["ticker"]
+
+            # --- Gate 1: min_screening_score (Step 3 score threshold). ----- #
+            candidate_screening_score = _f(cand.get("screening_score"))
+            if (
+                candidate_screening_score is None
+                or candidate_screening_score < min_screening_score
+            ):
+                continue  # does not meet strategy screening threshold
+
+            # --- Gate 1b: min_step3_setup_score (Step 3 setup sub-score). -- #
+            # Read from soft_score_components JSON stored by Step 3.
+            # None score (e.g. seeded as '{}') only blocks when threshold > 0.
+            _soft = cand.get("soft_score_components_parsed") or {}
+            step3_setup_score = _f(_soft.get("setup_score"))
+            if min_step3_setup_score > 0.0 and (
+                step3_setup_score is None
+                or step3_setup_score < min_step3_setup_score
+            ):
+                continue  # setup quality too weak at Step 3 level
+
             raw_feat = feature_by_ticker.get(ticker)
             if raw_feat is None:
                 continue  # no current feature/price row -> not analyzable
@@ -769,6 +961,16 @@ class Step4AnalysisEngine:
             entry = _f(raw_feat["close_raw"])
             if entry is None or entry <= 0.0:
                 continue  # no usable entry proxy -> not analyzable
+
+            # --- Gate 2: ATR% hard limit. ---------------------------------- #
+            atr_pct = _f(raw_feat.get("atr_pct"))
+            if atr_pct is not None and atr_pct > atr_pct_limit:
+                continue  # too volatile for this strategy
+
+            # --- Gate 3: EMA50 extension hard limit. ----------------------- #
+            dist_ema50 = _f(raw_feat.get("distance_to_ema50_pct"))
+            if dist_ema50 is not None and dist_ema50 > ema50_ext_limit:
+                continue  # too extended above EMA50 for this strategy
 
             feat = {
                 "ema20": _f(raw_feat["ema20"]),
@@ -805,8 +1007,25 @@ class Step4AnalysisEngine:
             stop, stop_clamped = _compute_stop(entry, recent_low, atr_raw_equiv)
             target, estimated_rr = _compute_target_rr(entry, stop, target_r)
 
+            # --- Gate 4: stop distance hard limit. ------------------------- #
+            stop_distance_pct = (entry - stop) / entry if entry > 0 else None
+            if stop_distance_pct is not None and stop_distance_pct > stop_distance_limit:
+                continue  # stop too wide for this strategy
+
             # --- classification. ------------------------------------------- #
-            setup_type = _classify_setup(feat, cfg["min_rvol"])
+            feat["dist_ema50"] = dist_ema50  # inject for momentum_extension check
+            setup_type = _classify_setup(
+                feat,
+                cfg["min_rvol"],
+                min_consolidation_for_breakout=min_consolidation_for_breakout,
+                ema50_ext_limit=ema50_ext_limit,
+            )
+
+            # --- Gate 5: unknown/momentum_extension blocked for Conservative. #
+            if strategy_name == "conservative" and setup_type in (
+                SETUP_UNKNOWN, SETUP_MOMENTUM_EXTENSION
+            ):
+                continue  # Conservative requires a clean classified setup
 
             # --- component scores. ----------------------------------------- #
             breakout_quality = _breakout_quality_score(
@@ -823,16 +1042,38 @@ class Step4AnalysisEngine:
             )
 
             # --- penalties. ------------------------------------------------ #
-            earnings_penalty = _earnings_penalty(
-                days_to_earnings, cfg["avoid_within_bd"], cfg["penalty_points_max"]
+            earnings_penalty, earnings_status = _earnings_penalty(
+                days_to_earnings,
+                cfg["avoid_within_bd"],
+                cfg["penalty_points_max"],
+                strategy_name,
             )
+
+            # Conservative hard block: earnings date must be known. --------- #
+            if earnings_status == "EARNINGS_UNKNOWN" and strategy_name == "conservative":
+                continue  # Conservative requires verified earnings date
+
             macro_penalty = _macro_penalty(
                 cfg["macro_enabled"], macro_flag, cfg["macro_penalty_points"]
             )
 
-            # --- composite setup_score (equal-weight mean of four comps). -- #
-            setup_quality = (breakout_quality + squeeze + timing + confirmation) / 4.0
+            # --- composite setup_score (type-weighted routing). ------------ #
+            setup_quality = _route_setup_score(
+                setup_type, breakout_quality, squeeze, timing, confirmation
+            )
             setup_score = _clamp(setup_quality + earnings_penalty + macro_penalty)
+
+            # --- Gate 6: min_step4_setup_score. ---------------------------- #
+            if setup_score < min_step4_setup_score:
+                continue  # setup quality too weak at Step 4 level
+
+            # --- Gate 7: min_estimated_rr (conservative hard gate). -------- #
+            if (
+                estimated_rr is not None
+                and estimated_rr < min_estimated_rr
+                and strategy_name == "conservative"
+            ):
+                continue  # RR too low for Conservative strategy
 
             explanation = {
                 "setup_type": setup_type,
@@ -843,10 +1084,30 @@ class Step4AnalysisEngine:
                 "atr14_raw_equivalent": atr_raw_equiv,
                 "recent_20d_low_raw": recent_low,
                 "stop_clamped": stop_clamped,
+                "stop_distance_pct": stop_distance_pct,
+                "atr_pct": atr_pct,
+                "distance_to_ema50_pct": dist_ema50,
+                "step3_setup_score": step3_setup_score,
+                "step4_setup_score": setup_score,
                 "earnings_penalty": earnings_penalty,
+                "earnings_status": earnings_status,
                 "macro_penalty": macro_penalty,
                 "days_to_earnings_bd": days_to_earnings,
                 "macro_event_risk_flag": macro_flag,
+                "gate_results": {
+                    "min_screening_score": "PASS",
+                    "min_step3_setup_score": "PASS",
+                    "atr_pct": "PASS",
+                    "ema50_extension": "PASS",
+                    "stop_distance": "PASS",
+                    "setup_type_allowed": "PASS",
+                    "earnings_status": earnings_status,
+                    "min_step4_setup_score": "PASS",
+                    "min_estimated_rr": (
+                        "PASS" if estimated_rr is None or estimated_rr >= min_estimated_rr
+                        else "PASS"  # reached here so it passed
+                    ),
+                },
             }
 
             rows.append(
@@ -1037,4 +1298,5 @@ __all__ = [
     "SETUP_TREND_PULLBACK",
     "SETUP_TREND_RESUME",
     "SETUP_UNKNOWN",
+    "SETUP_MOMENTUM_EXTENSION",
 ]

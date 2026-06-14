@@ -79,6 +79,14 @@ ALLOWED_DB_ROLES: Final[tuple[str, ...]] = (DB_ROLE_PROD, DB_ROLE_DEBUG)
 UNKNOWN_SECTOR: Final[str] = "__UNKNOWN_SECTOR__"
 UNKNOWN_INDUSTRY: Final[str] = "__UNKNOWN_INDUSTRY__"
 
+# --------------------------------------------------------------------------- #
+# Final disposition values.
+# --------------------------------------------------------------------------- #
+DISPOSITION_BUY: Final[str] = "BUY"
+DISPOSITION_WATCHLIST: Final[str] = "WATCHLIST_ONLY"
+DISPOSITION_REJECTED: Final[str] = "REJECTED"
+DISPOSITION_DATA_INCOMPLETE: Final[str] = "DATA_INCOMPLETE"
+
 # Default timing_score when the Step 4 row's timing_score is NULL.
 DEFAULT_TIMING_SCORE: Final[float] = 50.0
 
@@ -172,6 +180,7 @@ _SELECT_ANALYSES: Final[str] = (
     "  a.analysis_id AS analysis_id, "
     "  a.candidate_id AS candidate_id, "
     "  a.ticker AS ticker, "
+    "  a.setup_type AS setup_type, "
     "  a.setup_score AS setup_score, "
     "  a.timing_score AS timing_score, "
     "  a.estimated_rr AS estimated_rr, "
@@ -200,6 +209,10 @@ _INSERT_PROPOSAL: Final[str] = (
     "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, FALSE, FALSE, ?, "
     " ?, ?, ?, CAST(now() AS TIMESTAMP))"
 )
+# NOTE: ``disposition`` is stored in ``mechanical_explanation`` JSON (field
+# ``final_disposition``) rather than as a separate DB column, to avoid a
+# schema migration on the frozen step5_proposals table. The dashboard and AI
+# export read it from the JSON.
 
 
 # --------------------------------------------------------------------------- #
@@ -447,6 +460,7 @@ class Step5ProposalEngine:
         cfg: dict[str, Any] = {
             "hard_cap_enabled": hard_cap_enabled,
             "top_n": top_n,
+            "strategy_name": strategy_config.get("strategy_name", "normal"),
         }
 
         if hard_cap_enabled:
@@ -500,6 +514,7 @@ class Step5ProposalEngine:
             "analysis_id",
             "candidate_id",
             "ticker",
+            "setup_type",
             "setup_score",
             "timing_score",
             "estimated_rr",
@@ -538,6 +553,7 @@ class Step5ProposalEngine:
         ``analyses_read`` (handled by the caller via ``len(analyses)``).
         """
         top_n = cfg["top_n"]
+        strategy_name: str = cfg.get("strategy_name", "normal")
 
         # --- (1) + (2): analyzable filter and raw scoring. ---------------- #
         scored: list[dict[str, Any]] = []
@@ -546,6 +562,36 @@ class Step5ProposalEngine:
             screening_score = _f(a["screening_score"])
             if setup_score is None or screening_score is None:
                 continue  # not analyzable -> counted in analyses_read, no row
+
+            setup_type: str = a.get("setup_type") or "unknown"
+
+            # Unknown setup gate: Normal and Aggressive -> watchlist only.
+            # (Conservative is already blocked in Step 4; any that reach here
+            # are treated the same as Normal for safety.)
+            if setup_type == "unknown" and strategy_name in (
+                "conservative", "normal", "aggressive"
+            ):
+                _wl_sector = a["sector"] if a["sector"] is not None else UNKNOWN_SECTOR
+                _wl_industry = a["industry"] if a["industry"] is not None else UNKNOWN_INDUSTRY
+                scored.append(
+                    {
+                        "analysis_id": a["analysis_id"],
+                        "candidate_id": a["candidate_id"],
+                        "ticker": a["ticker"],
+                        "setup_score": setup_score,
+                        "screening_score": screening_score,
+                        "timing_score": _f(a["timing_score"]) or DEFAULT_TIMING_SCORE,
+                        "estimated_rr": _f(a["estimated_rr"]),
+                        "rr_score": 0.0,
+                        "proposal_score_raw": 0.0,
+                        "sector": _wl_sector,
+                        "industry": _wl_industry,
+                        "watchlist_only": True,
+                        "rejection_reason": f"setup_type={setup_type} — watchlist only",
+                        "disposition": DISPOSITION_WATCHLIST,
+                    }
+                )
+                continue
 
             estimated_rr = _f(a["estimated_rr"])
             timing_raw = _f(a["timing_score"])
@@ -575,11 +621,18 @@ class Step5ProposalEngine:
                     "proposal_score_raw": raw_score,
                     "sector": sector,
                     "industry": industry,
+                    "watchlist_only": False,
+                    "rejection_reason": None,
+                    "disposition": None,  # assigned in step (5) after ranking
                 }
             )
 
         if not scored:
             return []
+
+        # Split watchlist-only items from rankable candidates.
+        watchlist_items = [s for s in scored if s.get("watchlist_only")]
+        rankable = [s for s in scored if not s.get("watchlist_only")]
 
         # --- (3): raw ranking. proposal_score_raw DESC, estimated_rr DESC -- #
         #          (NULL lowest), ticker ASC. 1-based raw_rank.
@@ -588,27 +641,56 @@ class Step5ProposalEngine:
             rr_for_sort = rr if rr is not None else float("-inf")
             return (-item["proposal_score_raw"], -rr_for_sort, item["ticker"])
 
-        scored.sort(key=_raw_sort_key)
-        for idx, item in enumerate(scored, start=1):
+        rankable.sort(key=_raw_sort_key)
+        for idx, item in enumerate(rankable, start=1):
             item["raw_rank"] = idx
             item["in_raw_top_n"] = idx <= top_n
 
-        # --- (4): diversification. ---------------------------------------- #
+        # Watchlist items get NULL ranks — they are not part of the BUY set.
+        for item in watchlist_items:
+            item["raw_rank"] = None
+            item["in_raw_top_n"] = False
+
+        # Re-merge for diversification + payload assembly (watchlist items
+        # skip diversification and are written with rejection_reason set).
+        scored = rankable + watchlist_items
+
+        # --- (4): diversification (rankable only). ------------------------ #
         if cfg["hard_cap_enabled"]:
-            self._apply_hard_cap(scored, cfg)
+            self._apply_hard_cap(rankable, cfg)
         else:
-            self._apply_soft_penalty(scored, cfg)
+            self._apply_soft_penalty(rankable, cfg)
+
+        # Propagate null diversification fields to watchlist items.
+        for item in watchlist_items:
+            item["diversified_rank"] = None
+            item["proposal_score_final"] = item["proposal_score_raw"]
+            item["sector_count_at_selection"] = None
+            item["industry_count_at_selection"] = None
 
         # --- (5): shared selected semantics + final payloads. ------------- #
         rows: list[dict[str, Any]] = []
         for item in scored:
+            is_watchlist = item.get("watchlist_only", False)
             div_rank = item["diversified_rank"]
-            in_div_top_n = div_rank is not None and div_rank <= top_n
+            in_div_top_n = (not is_watchlist) and (div_rank is not None and div_rank <= top_n)
             selected_flag = in_div_top_n
-            selected_top_n = item["in_raw_top_n"] or in_div_top_n
+            selected_top_n = (not is_watchlist) and (item["in_raw_top_n"] or in_div_top_n)
             raw_score = item["proposal_score_raw"]
             final_score = item["proposal_score_final"]
             diversity_penalty = raw_score - final_score
+
+            # Assign final disposition.
+            if is_watchlist:
+                disposition = item.get("disposition", DISPOSITION_WATCHLIST)
+            elif selected_flag:
+                disposition = DISPOSITION_BUY
+            elif item.get("rejection_reason"):
+                # Hard-cap diversification rejection
+                disposition = DISPOSITION_WATCHLIST
+            else:
+                # Ranked but outside top_n
+                disposition = DISPOSITION_WATCHLIST
 
             explanation = {
                 "analysis_id": item["analysis_id"],
@@ -628,6 +710,7 @@ class Step5ProposalEngine:
                 "diversification_mode": (
                     "hard_cap" if cfg["hard_cap_enabled"] else "soft_penalty"
                 ),
+                "final_disposition": disposition,
                 "rejection_reason": item["rejection_reason"],
                 "sector_count_at_selection": item["sector_count_at_selection"],
                 "industry_count_at_selection": item["industry_count_at_selection"],

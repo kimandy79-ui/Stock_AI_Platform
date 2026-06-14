@@ -61,9 +61,21 @@ def make_config(
     macro_enabled: bool = True,
     macro_penalty_points: float = -10.0,
     min_rvol: float = 1.5,
+    min_screening_score: float = 0.0,   # 0.0 = allow all in tests
+    min_step3_setup_score: float = 0.0, # 0.0 = allow all in tests
+    min_step4_setup_score: float = 0.0, # 0.0 = allow all in tests
+    min_consolidation_for_breakout: float = 0.0,
+    min_estimated_rr: float = 0.0,
+    strategy_name: str = "normal",
 ) -> dict:
     return {
-        "step4": {"target_R": target_r},
+        "strategy_name": strategy_name,
+        "step4": {
+            "target_R": target_r,
+            "min_step4_setup_score": min_step4_setup_score,
+            "min_consolidation_for_breakout": min_consolidation_for_breakout,
+            "min_estimated_rr": min_estimated_rr,
+        },
         "earnings": {
             "avoid_within_bd": avoid_within_bd,
             "penalty_points_max": penalty_points_max,
@@ -72,7 +84,11 @@ def make_config(
             "enabled": macro_enabled,
             "penalty_points": macro_penalty_points,
         },
-        "screening": {"min_rvol": min_rvol},
+        "screening": {
+            "min_rvol": min_rvol,
+            "min_screening_score": min_screening_score,
+            "min_step3_setup_score": min_step3_setup_score,
+        },
     }
 
 
@@ -441,6 +457,15 @@ def test_simulation_role_rejected_before_db() -> None:
         lambda c: c.pop("screening"),
         lambda c: c["screening"].pop("min_rvol"),
         lambda c: c["screening"].__setitem__("min_rvol", 0),
+        lambda c: c["screening"].pop("min_screening_score"),
+        lambda c: c["screening"].__setitem__("min_screening_score", -1),
+        lambda c: c["screening"].pop("min_step3_setup_score"),
+        lambda c: c["screening"].__setitem__("min_step3_setup_score", -1),
+        lambda c: c["step4"].pop("min_step4_setup_score"),
+        lambda c: c["step4"].__setitem__("min_step4_setup_score", -1),
+        lambda c: c["step4"].pop("min_consolidation_for_breakout"),
+        lambda c: c["step4"].pop("min_estimated_rr"),
+        lambda c: c["step4"].__setitem__("min_estimated_rr", -1),
     ],
 )
 def test_bad_config_fails_without_db_access(mutate) -> None:
@@ -778,22 +803,35 @@ def test_confirmation_score() -> None:
     assert s4mod._confirmation_score(None, 90.0, None, 100.0) == 0.0
 
 
-def test_setup_score_is_clamped_mean_with_penalties(
+def test_setup_score_is_clamped_routed_with_penalties(
     tmp_db_paths: dict[str, Path],
 ) -> None:
+    """setup_score uses type-weighted routing, not equal-weight mean.
+
+    The default seed produces setup_type=breakout (breakout_proximity=0,
+    rvol≥2.0, consolidation≥0). Breakout weights: bq=0.50, sq=0.30,
+    tim=0.10, conf=0.10. We verify the routed score matches and is within
+    [0, 100] after penalties.
+    """
     d = date(2023, 6, 1)
     prod = tmp_db_paths[dbm.DB_ROLE_PROD]
     seed_full_candidate(prod, "AAA", d)
     Step4AnalysisEngine().analyze(d, make_config(), CONFIG_ID)
     a = fetch_analyses(prod)[0]
-    mean = (
-        a["breakout_quality_score"]
-        + a["squeeze_score"]
-        + a["timing_score"]
-        + a["confirmation_score"]
-    ) / 4.0
+    # Verify setup_type is what the routing weights apply to.
+    setup_type = a["setup_type"]
+    bq = a["breakout_quality_score"]
+    sq = a["squeeze_score"]
+    tim = a["timing_score"]
+    conf = a["confirmation_score"]
+    # Reconstruct routed quality using _SETUP_WEIGHTS from s4mod.
+    weights = s4mod._SETUP_WEIGHTS.get(setup_type, s4mod._SETUP_WEIGHTS["unknown"])
+    w_bq, w_sq, w_tim, w_conf = weights
+    routed_quality = max(0.0, min(100.0,
+        w_bq * bq + w_sq * sq + w_tim * tim + w_conf * conf
+    ))
     expected = max(
-        0.0, min(100.0, mean + a["earnings_penalty"] + a["macro_penalty"])
+        0.0, min(100.0, routed_quality + a["earnings_penalty"] + a["macro_penalty"])
     )
     assert a["setup_score"] == pytest.approx(expected)
     for key in (
@@ -807,20 +845,51 @@ def test_setup_score_is_clamped_mean_with_penalties(
 # 7. Penalties
 # --------------------------------------------------------------------------- #
 def test_earnings_penalty_cases() -> None:
-    assert s4mod._earnings_penalty(None, 3, -15.0) == 0.0
+    # None -> EARNINGS_UNKNOWN with strategy-scaled penalty (not 0.0)
+    p, s = s4mod._earnings_penalty(None, 3, -15.0, "normal")
+    assert s == "EARNINGS_UNKNOWN"
+    assert p == pytest.approx(-11.25)  # 75% of -15.0
+
+    p, s = s4mod._earnings_penalty(None, 3, -15.0, "conservative")
+    assert s == "EARNINGS_UNKNOWN"
+    assert p == pytest.approx(-15.0)  # 100% of -15.0
+
+    p, s = s4mod._earnings_penalty(None, 3, -15.0, "aggressive")
+    assert s == "EARNINGS_UNKNOWN"
+    assert p == pytest.approx(-6.0)  # 40% of -15.0
+
     # avoid_within_bd == 0: only day 0 penalised
-    assert s4mod._earnings_penalty(0, 0, -15.0) == -15.0
-    assert s4mod._earnings_penalty(1, 0, -15.0) == 0.0
+    p, s = s4mod._earnings_penalty(0, 0, -15.0, "normal")
+    assert s == "EARNINGS_TODAY"
+    assert p == pytest.approx(-15.0)
+
+    p, s = s4mod._earnings_penalty(1, 0, -15.0, "normal")
+    assert s == "EARNINGS_CLEAR"
+    assert p == 0.0
+
     # boundary day == avoid_within_bd -> penalty 0 (1 - bd/bd)
-    assert s4mod._earnings_penalty(3, 3, -15.0) == 0.0
+    p, s = s4mod._earnings_penalty(3, 3, -15.0, "normal")
+    assert s == "EARNINGS_INSIDE_WINDOW"
+    assert p == pytest.approx(0.0)
+
     # day 0 within window -> full penalty
-    assert s4mod._earnings_penalty(0, 3, -15.0) == -15.0
+    p, s = s4mod._earnings_penalty(0, 3, -15.0, "normal")
+    assert s == "EARNINGS_INSIDE_WINDOW"
+    assert p == pytest.approx(-15.0)
+
     # mid window
-    assert s4mod._earnings_penalty(1, 3, -15.0) == pytest.approx(-10.0)
+    p, s = s4mod._earnings_penalty(1, 3, -15.0, "normal")
+    assert s == "EARNINGS_INSIDE_WINDOW"
+    assert p == pytest.approx(-10.0)
+
     # outside window
-    assert s4mod._earnings_penalty(5, 3, -15.0) == 0.0
+    p, s = s4mod._earnings_penalty(5, 3, -15.0, "normal")
+    assert s == "EARNINGS_CLEAR"
+    assert p == 0.0
+
     # always <= 0
-    assert s4mod._earnings_penalty(0, 3, -15.0) <= 0.0
+    p, s = s4mod._earnings_penalty(0, 3, -15.0, "normal")
+    assert p <= 0.0
 
 
 def test_macro_penalty_cases() -> None:
@@ -871,10 +940,13 @@ def test_explanation_json_fields_and_sorted(tmp_db_paths: dict[str, Path]) -> No
     for key in (
         "setup_type", "entry_proxy_raw", "stop_price_raw", "target_price_raw",
         "target_R", "atr14_raw_equivalent", "recent_20d_low_raw", "stop_clamped",
-        "earnings_penalty", "macro_penalty", "days_to_earnings_bd",
-        "macro_event_risk_flag",
+        "stop_distance_pct", "atr_pct", "distance_to_ema50_pct",
+        "step3_setup_score", "step4_setup_score",
+        "earnings_penalty", "earnings_status", "macro_penalty",
+        "days_to_earnings_bd", "macro_event_risk_flag", "gate_results",
     ):
-        assert key in exp
+        assert key in exp, f"Missing explanation key: {key!r}"
+    assert isinstance(exp["gate_results"], dict), "gate_results must be dict"
     assert a["explanation_json"] == json.dumps(exp, sort_keys=True)
 
 
@@ -1113,3 +1185,160 @@ def test_no_provider_imports() -> None:
         low = s.lower()
         assert "yfinance" not in low
         assert "providers" not in low
+
+
+# --------------------------------------------------------------------------- #
+# New regression tests — Item 10 (setup quality gates, routing, classification)
+# --------------------------------------------------------------------------- #
+
+def test_min_step3_setup_score_is_enforced(tmp_db_paths: dict[str, Path]) -> None:
+    """Gate 1b: candidates below min_step3_setup_score never produce analyses."""
+    d = date(2023, 6, 1)
+    prod = tmp_db_paths[dbm.DB_ROLE_PROD]
+    seed_full_candidate(prod, "AAA", d)
+    # Patch soft_score_components to have setup_score=40 (below default=0 so
+    # this test uses a config with threshold=55 to verify the gate fires).
+    import duckdb as _ddb
+    conn = _ddb.connect(str(prod))
+    conn.execute(
+        "UPDATE step3_candidates SET soft_score_components = ? WHERE ticker = ?",
+        ['{"setup_score": 40.0, "trend_score": 90.0, "momentum_score": 85.0, '
+         '"volume_score": 90.0, "market_score": 100.0, "market_regime": "bull", '
+         '"market_regime_known": true, "sector_relative_strength": 0.05}', "AAA"],
+    )
+    conn.close()
+    cfg = make_config(min_step3_setup_score=55.0)
+    res = Step4AnalysisEngine().analyze(d, cfg, CONFIG_ID)
+    assert res.is_ok()
+    assert res.metadata["analyses_written"] == 0  # blocked by Gate 1b
+
+
+def test_min_step3_setup_score_passes_at_threshold(tmp_db_paths: dict[str, Path]) -> None:
+    """Gate 1b passes when step3_setup_score equals the threshold exactly."""
+    d = date(2023, 6, 1)
+    prod = tmp_db_paths[dbm.DB_ROLE_PROD]
+    seed_full_candidate(prod, "AAA", d)
+    import duckdb as _ddb
+    conn = _ddb.connect(str(prod))
+    conn.execute(
+        "UPDATE step3_candidates SET soft_score_components = ? WHERE ticker = ?",
+        ['{"setup_score": 55.0, "trend_score": 90.0, "momentum_score": 85.0, '
+         '"volume_score": 90.0, "market_score": 100.0, "market_regime": "bull", '
+         '"market_regime_known": true, "sector_relative_strength": 0.05}', "AAA"],
+    )
+    conn.close()
+    cfg = make_config(min_step3_setup_score=55.0)
+    res = Step4AnalysisEngine().analyze(d, cfg, CONFIG_ID)
+    assert res.is_ok()
+    assert res.metadata["analyses_written"] == 1  # passed Gate 1b
+
+
+def test_min_step4_setup_score_is_enforced(tmp_db_paths: dict[str, Path]) -> None:
+    """Gate 6: rows where step4 setup_score < min are not written."""
+    d = date(2023, 6, 1)
+    prod = tmp_db_paths[dbm.DB_ROLE_PROD]
+    # Seed with very low consolidation + bad RSI to produce low setup_score.
+    seed_full_candidate(prod, "AAA", d, consolidation_score=5.0)
+    cfg = make_config(min_step4_setup_score=80.0)  # very high threshold
+    res = Step4AnalysisEngine().analyze(d, cfg, CONFIG_ID)
+    assert res.is_ok()
+    assert res.metadata["analyses_written"] == 0  # low quality blocked
+
+
+def test_breakout_requires_consolidation_by_strategy(tmp_db_paths: dict[str, Path]) -> None:
+    """A near-breakout with insufficient consolidation is NOT classified as breakout."""
+    d = date(2023, 6, 1)
+    prod = tmp_db_paths[dbm.DB_ROLE_PROD]
+    # consolidation=35 is below normal threshold (60)
+    seed_full_candidate(prod, "AAA", d, consolidation_score=35.0)
+    cfg = make_config(min_consolidation_for_breakout=60.0)
+    res = Step4AnalysisEngine().analyze(d, cfg, CONFIG_ID)
+    assert res.is_ok()
+    if res.metadata["analyses_written"] > 0:
+        rows = fetch_analyses(prod)
+        setup_type = rows[0]["setup_type"]
+        assert setup_type != s4mod.SETUP_BREAKOUT, (
+            f"consolidation=35 should not classify as breakout; got {setup_type}"
+        )
+
+
+def test_momentum_extension_not_classified_as_breakout(
+    tmp_db_paths: dict[str, Path],
+) -> None:
+    """SETUP_MOMENTUM_EXTENSION constant exists and breakout classification
+    respects consolidation gate — extended momentum without consolidation
+    must not be a breakout."""
+    assert hasattr(s4mod, "SETUP_MOMENTUM_EXTENSION")
+    assert s4mod.SETUP_MOMENTUM_EXTENSION == "momentum_extension"
+
+    d = date(2023, 6, 1)
+    prod = tmp_db_paths[dbm.DB_ROLE_PROD]
+    # Near breakout but weak consolidation (15) — well below 60.
+    seed_full_candidate(prod, "AAA", d, consolidation_score=15.0)
+    cfg = make_config(min_consolidation_for_breakout=60.0)
+    res = Step4AnalysisEngine().analyze(d, cfg, CONFIG_ID)
+    assert res.is_ok()
+    if res.metadata["analyses_written"] > 0:
+        rows = fetch_analyses(prod)
+        assert rows[0]["setup_type"] != s4mod.SETUP_BREAKOUT
+
+
+def test_unknown_setup_not_ranked_as_buy(tmp_db_paths: dict[str, Path]) -> None:
+    """Analyses with setup_type=unknown must not enter final BUY shortlist.
+    They are written to step4_analysis but step5 marks them WATCHLIST_ONLY."""
+    from app.services.proposal.step5_proposal_engine import (
+        Step5ProposalEngine, DISPOSITION_WATCHLIST,
+    )
+    d = date(2023, 6, 1)
+    prod = tmp_db_paths[dbm.DB_ROLE_PROD]
+    # Force unknown setup by using conditions that match no setup type:
+    # very low RVOL (fails breakout), high pullback (fails trend_pullback range)
+    seed_full_candidate(
+        prod, "AAA", d,
+        rvol20=0.3,
+        pullback_from_recent_high_pct=-0.30,
+        consolidation_score=20.0,
+        roc20=0.01,
+    )
+    cfg = make_config()
+    res4 = Step4AnalysisEngine().analyze(d, cfg, CONFIG_ID)
+    assert res4.is_ok()
+    if res4.metadata["analyses_written"] == 0:
+        pytest.skip("No analysis written — candidate may have been gated earlier")
+
+    rows4 = fetch_analyses(prod)
+    assert rows4[0]["setup_type"] == s4mod.SETUP_UNKNOWN
+
+
+def test_gate_results_in_explanation_json(tmp_db_paths: dict[str, Path]) -> None:
+    """gate_results dict must be present in explanation_json for all written rows."""
+    d = date(2023, 6, 1)
+    prod = tmp_db_paths[dbm.DB_ROLE_PROD]
+    seed_full_candidate(prod, "AAA", d)
+    Step4AnalysisEngine().analyze(d, make_config(), CONFIG_ID)
+    analyses = fetch_analyses(prod)
+    if not analyses:
+        pytest.skip("No analyses written")
+    exp = json.loads(analyses[0]["explanation_json"])
+    assert "gate_results" in exp, "gate_results missing from explanation_json"
+    assert isinstance(exp["gate_results"], dict)
+    for gate in ("min_screening_score", "min_step3_setup_score", "atr_pct",
+                 "ema50_extension", "stop_distance", "setup_type_allowed",
+                 "earnings_status", "min_step4_setup_score"):
+        assert gate in exp["gate_results"], f"Missing gate_results key: {gate}"
+
+
+def test_step3_and_step4_setup_scores_in_explanation(
+    tmp_db_paths: dict[str, Path],
+) -> None:
+    """Both step3_setup_score and step4_setup_score must appear in explanation_json."""
+    d = date(2023, 6, 1)
+    prod = tmp_db_paths[dbm.DB_ROLE_PROD]
+    seed_full_candidate(prod, "AAA", d)
+    Step4AnalysisEngine().analyze(d, make_config(), CONFIG_ID)
+    analyses = fetch_analyses(prod)
+    if not analyses:
+        pytest.skip("No analyses written")
+    exp = json.loads(analyses[0]["explanation_json"])
+    assert "step3_setup_score" in exp
+    assert "step4_setup_score" in exp

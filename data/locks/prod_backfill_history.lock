@@ -1,1 +1,0 @@
-{"pid": 17248, "started_at": "2026-06-06T23:23:34.870221+00:00", "argv": ["--start-date", "2023-06-05", "--end-date", "2026-06-05", "--tickers-file", "data\\input\\backfill_tickers_common_only.csv", "--batch-size", "10", "--sleep-seconds", "2", "--jitter-seconds", "1"], "cwd": "D:\\Python\\Stock_AI_Platform"}

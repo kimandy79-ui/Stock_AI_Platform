@@ -15,13 +15,13 @@ Step order (``STEP_NAMES``), mirroring ``01d_MODULES_AND_PIPELINE.md`` §70:
 4.  ``validation``                 (critical)
 5.  ``mutation_detection``         (recoverable)
 6.  ``feature_calculation``        (critical)
-7.  ``step3_screening``            (critical, per strategy config)
+7.  ``market_regime_classification`` (recoverable)
+8.  ``step3_screening``            (critical, per strategy config)
 8.  ``step4_analysis``             (critical, per strategy config)
 9.  ``step5_proposals``            (critical, per strategy config)
 10. ``outcome_queue_creation``     (critical, per strategy config)
 11. ``outcome_processing``         (recoverable, per strategy config)
 12. ``dashboard_materialization``  (recoverable; V1 no-op, G-DASHBOARD-MAT)
-13. ``backup``                     (recoverable, best-effort)
 
 Hard boundaries (Module 20): no direct ``duckdb`` import (all DB access flows
 through the injected ``db_manager`` or the approved
@@ -48,15 +48,17 @@ step signatures, ``01c_FORMULAS_AND_CONFIGS`` / :mod:`app.config.settings` for
 from __future__ import annotations
 
 import json
-import shutil
 import time
 import uuid
 from datetime import date, datetime, timedelta
 from typing import Any, Final
 
+from app.config import constants
 from app.config import settings
 from app.database import duckdb_manager
+from app.services.config import config_validator
 from app.utils import logging_config
+from app.utils.db_connection_retry import connect_with_retry
 from app.utils import service_result
 from app.utils.service_result import ServiceResult
 
@@ -84,13 +86,13 @@ STEP_NAMES: Final[tuple[str, ...]] = (
     "validation",
     "mutation_detection",
     "feature_calculation",
+    "market_regime_classification",
     "step3_screening",
     "step4_analysis",
     "step5_proposals",
     "outcome_queue_creation",
     "outcome_processing",
     "dashboard_materialization",
-    "backup",
 )
 
 # Steps that abort the run on failure vs. degrade-and-continue (01d §72).
@@ -110,9 +112,9 @@ RECOVERABLE_STEPS: Final[frozenset[str]] = frozenset(
     {
         "universe_ingestion",
         "mutation_detection",
+        "market_regime_classification",
         "outcome_processing",
         "dashboard_materialization",
-        "backup",
     }
 )
 
@@ -201,6 +203,14 @@ _UPDATE_FAILED: Final[str] = (
     "duration_sec = ?, error_message = ? "
     "WHERE run_id = ?"
 )
+# Config traceability (M21 Config Management Addendum §4). Targets pipeline_runs
+# only; written once the run's strategy/runtime configs are resolved.
+_UPDATE_CONFIG_META: Final[str] = (
+    "UPDATE pipeline_runs "
+    "SET strategy_config_ids_json = ?, runtime_config_ids_json = ?, "
+    "config_snapshot_hash = ? "
+    "WHERE run_id = ?"
+)
 
 # --------------------------------------------------------------------------- #
 # Default strategy configs (G-STRATEGY-CONFIGS).
@@ -235,19 +245,10 @@ _MARKET_REGIME_BLOCK: Final[dict[str, Any]] = {
     "high_risk_vix": 25,
     "extreme_risk_vix": 30,
 }
-_SECTOR_ETF_MAPPING_BLOCK: Final[dict[str, str]] = {
-    "Technology": "XLK",
-    "Financials": "XLF",
-    "Healthcare": "XLV",
-    "Consumer Discretionary": "XLY",
-    "Consumer Staples": "XLP",
-    "Communication Services": "XLC",
-    "Industrials": "XLI",
-    "Energy": "XLE",
-    "Materials": "XLB",
-    "Utilities": "XLU",
-    "Real Estate": "XLRE",
-}
+# Sector -> ETF mapping is sourced from the single canonical map in
+# ``app.config.constants.SECTOR_ETF_MAP`` (M21 Config Management Addendum §8);
+# the previous duplicated literal block here was removed to avoid two
+# independent sector maps.
 _SIMULATION_BLOCK: Final[dict[str, Any]] = {
     "entry_rule": "next_trading_day_open_raw",
     "return_price_type": "adjusted_close",
@@ -274,6 +275,10 @@ def _build_config(
     min_adv: float,
     min_rvol: float,
     min_screening_score: float,
+    min_step3_setup_score: float,
+    min_step4_setup_score: float,
+    min_consolidation_for_breakout: float,
+    min_estimated_rr: float,
     target_r: float,
     sector_max_positions: int,
     industry_max_positions: int,
@@ -293,10 +298,16 @@ def _build_config(
         "screening": {
             "min_rvol": min_rvol,
             "min_screening_score": min_screening_score,
+            "min_step3_setup_score": min_step3_setup_score,
             "require_feature_ready": True,
         },
         "scoring_weights": dict(_SCORING_WEIGHTS_BLOCK),
-        "step4": {"target_R": target_r},
+        "step4": {
+            "target_R": target_r,
+            "min_step4_setup_score": min_step4_setup_score,
+            "min_consolidation_for_breakout": min_consolidation_for_breakout,
+            "min_estimated_rr": min_estimated_rr,
+        },
         "market_regime": dict(_MARKET_REGIME_BLOCK),
         "diversification": {
             "hard_cap_enabled": True,
@@ -307,7 +318,7 @@ def _build_config(
             "industry_penalty_factor": 0.85,
             "penalty_applies_before_cap_only": True,
         },
-        "sector_etf_mapping": dict(_SECTOR_ETF_MAPPING_BLOCK),
+        "sector_etf_mapping": dict(constants.SECTOR_ETF_MAP),
         "simulation": dict(_SIMULATION_BLOCK),
         "macro_event_risk": dict(_MACRO_BLOCK),
         "earnings": {
@@ -320,11 +331,15 @@ def _build_config(
 DEFAULT_STRATEGY_CONFIGS: Final[dict[str, dict]] = {
     "normal": _build_config(
         name="normal",
-        version="normal_v1",
+        version="normal_v2",
         min_price=10,
         min_adv=20_000_000,
         min_rvol=1.5,
         min_screening_score=65,
+        min_step3_setup_score=55.0,
+        min_step4_setup_score=65.0,
+        min_consolidation_for_breakout=60.0,
+        min_estimated_rr=1.8,
         target_r=2.2,
         sector_max_positions=3,
         industry_max_positions=2,
@@ -332,11 +347,15 @@ DEFAULT_STRATEGY_CONFIGS: Final[dict[str, dict]] = {
     ),
     "aggressive": _build_config(
         name="aggressive",
-        version="aggressive_v1",
+        version="aggressive_v2",
         min_price=5,
         min_adv=5_000_000,
         min_rvol=1.2,
         min_screening_score=55,
+        min_step3_setup_score=45.0,
+        min_step4_setup_score=60.0,
+        min_consolidation_for_breakout=40.0,
+        min_estimated_rr=1.5,
         target_r=1.8,
         sector_max_positions=5,
         industry_max_positions=3,
@@ -344,11 +363,15 @@ DEFAULT_STRATEGY_CONFIGS: Final[dict[str, dict]] = {
     ),
     "conservative": _build_config(
         name="conservative",
-        version="conservative_v1",
+        version="conservative_v2",
         min_price=15,
         min_adv=50_000_000,
         min_rvol=1.8,
         min_screening_score=75,
+        min_step3_setup_score=62.0,
+        min_step4_setup_score=75.0,
+        min_consolidation_for_breakout=70.0,
+        min_estimated_rr=2.2,
         target_r=2.8,
         sector_max_positions=2,
         industry_max_positions=1,
@@ -409,9 +432,19 @@ class PipelineOrchestrator:
         proposal_engine: Any | None = None,
         outcome_creator: Any | None = None,
         outcome_processor: Any | None = None,
+        config_service: Any | None = None,
     ) -> None:
         # DB manager: approved default is the centralized duckdb_manager module.
         self._db = db_manager if db_manager is not None else duckdb_manager
+
+        # ConfigService is the runtime source of truth for active strategy
+        # configs (M21 Config Management Addendum §7). Only consulted when the
+        # caller does not pass an explicit ``strategy_configs`` override.
+        if config_service is None:
+            from app.services.config.config_service import ConfigService
+
+            config_service = ConfigService(db_manager=self._db)
+        self._config_service = config_service
 
         # Real default dependencies are constructed here (and only here). Tests
         # inject fakes so these real constructors never run under test.
@@ -462,6 +495,13 @@ class PipelineOrchestrator:
 
             feature_engine = FeatureEngine(db_manager=self._db)
         self._feature_engine = feature_engine
+
+        # Market regime engine — injected after feature_engine, runs before Step 3.
+        if not hasattr(self, '_regime_engine'):
+            from app.services.market_regime.market_regime_engine import (
+                MarketRegimeEngine,
+            )
+            self._regime_engine = MarketRegimeEngine(db_manager=self._db)
 
         if screening_engine is None:
             from app.services.screening.step3_screening import (
@@ -517,15 +557,15 @@ class PipelineOrchestrator:
         """Execute one daily pipeline run; always returns a ``ServiceResult``."""
         started = time.monotonic()
         run_id = run_id if run_id is not None else str(uuid.uuid4())
-        configs = (
-            strategy_configs
-            if strategy_configs is not None
-            else DEFAULT_STRATEGY_CONFIGS
-        )
         log = logging_config.get_logger(__name__, run_id)
 
         # --- Pre-DB validation (must not touch the DB). ---
-        pre_error = self._validate_inputs(run_type, db_role, resume_from, configs)
+        # ``strategy_configs`` may be None (resolve active configs from the DB
+        # via ConfigService after the lifecycle row is written); an explicit
+        # value must be a non-empty dict.
+        pre_error = self._validate_inputs(
+            run_type, db_role, resume_from, strategy_configs
+        )
         if pre_error is not None:
             log.error("pre-db validation failed: %s", pre_error)
             return self._result(
@@ -627,6 +667,54 @@ class PipelineOrchestrator:
                     warnings=[],
                 )
 
+            # --- Resolve strategy configs + persist traceability. ---
+            # Explicit override wins (tests/debug/manual); otherwise load active
+            # configs from ConfigService, seeding defaults if none are active.
+            try:
+                configs, strat_ids, runtime_ids = self._resolve_configs(
+                    strategy_configs, db_role, log
+                )
+            except Exception as exc:  # noqa: BLE001 - config resolution failed
+                error = f"failed to resolve strategy configs: {exc}"
+                log.error(error)
+                duration = time.monotonic() - started
+                try:
+                    self._write(db_role, _UPDATE_FAILED, [duration, error, run_id])
+                except Exception as fexc:  # noqa: BLE001
+                    log.error("failed to finalize after config error: %s", fexc)
+                return self._result(
+                    status=service_result.STATUS_FAILED,
+                    run_id=run_id,
+                    run_date=run_date,
+                    run_type=run_type,
+                    db_role=db_role,
+                    steps_completed=[],
+                    failed_step=None,
+                    error=error,
+                    duration_sec=duration,
+                    warnings=[],
+                )
+
+            snapshot_hash = config_validator.snapshot_hash(
+                {
+                    "strategy_configs_by_id": configs,
+                    "runtime_config_ids": runtime_ids,
+                }
+            )
+            try:
+                self._write(
+                    db_role,
+                    _UPDATE_CONFIG_META,
+                    [
+                        json.dumps(strat_ids),
+                        json.dumps(runtime_ids),
+                        snapshot_hash,
+                        run_id,
+                    ],
+                )
+            except Exception as exc:  # noqa: BLE001 - traceability is best-effort
+                log.warning("failed to persist config traceability: %s", exc)
+
             resume_index = (
                 STEP_NAMES.index(resume_from) if resume_from is not None else 0
             )
@@ -639,6 +727,7 @@ class PipelineOrchestrator:
                 ("validation", self._step_validation),
                 ("mutation_detection", self._step_mutation),
                 ("feature_calculation", self._step_features),
+                ("market_regime_classification", self._step_market_regime),
             )
             for name, func in linear_steps:
                 idx = STEP_NAMES.index(name)
@@ -670,6 +759,7 @@ class PipelineOrchestrator:
                     db_role,
                     run_id,
                     steps_completed,
+                    force_rerun=force_rerun,
                 )
                 # steps_completed already mutated inside _run_strategy_steps.
                 warnings.extend(strat_warnings)
@@ -684,7 +774,6 @@ class PipelineOrchestrator:
             if status != service_result.STATUS_FAILED:
                 tail_steps = (
                     ("dashboard_materialization", self._step_dashboard),
-                    ("backup", self._step_backup),
                 )
                 for name, func in tail_steps:
                     idx = STEP_NAMES.index(name)
@@ -755,9 +844,13 @@ class PipelineOrchestrator:
         run_type: str,
         db_role: str,
         resume_from: str | None,
-        configs: Any,
+        strategy_configs: Any,
     ) -> str | None:
-        """Return an error string if any input is invalid, else ``None``."""
+        """Return an error string if any input is invalid, else ``None``.
+
+        ``strategy_configs`` is optional: ``None`` means "resolve active configs
+        from the DB later"; an explicit value must be a non-empty dict.
+        """
         if run_type not in ALLOWED_RUN_TYPES:
             return (
                 f"invalid run_type {run_type!r}; "
@@ -769,9 +862,94 @@ class PipelineOrchestrator:
             )
         if resume_from is not None and resume_from not in STEP_NAMES:
             return f"invalid resume_from {resume_from!r}; valid: {list(STEP_NAMES)}"
-        if not isinstance(configs, dict) or not configs:
+        if strategy_configs is not None and (
+            not isinstance(strategy_configs, dict) or not strategy_configs
+        ):
             return "strategy_configs must be a non-empty dict"
         return None
+
+    # ------------------------------------------------------------------ #
+    # Strategy config resolution (M21 Config Management Addendum §7).
+    # ------------------------------------------------------------------ #
+    def _resolve_configs(
+        self,
+        strategy_configs: dict[str, dict] | None,
+        db_role: str,
+        log: Any,
+    ) -> tuple[dict[str, dict], list[str], list[str]]:
+        """Resolve the strategy configs the run will use.
+
+        Returns ``(configs_by_id, strategy_config_ids, runtime_config_ids)`` where
+        ``configs_by_id`` is keyed by the identifier that is passed to the Step
+        3/4/5/outcome engines and written as ``strategy_config_id`` in the output
+        tables. ``strategy_config_ids`` is exactly ``list(configs_by_id)`` so the
+        traceability column always matches the ids actually used.
+
+        - If ``strategy_configs`` is provided, it is used verbatim as an explicit
+          override (tests/debug/manual); its keys are the ids used downstream (no
+          DB lookup), so callers control the recorded ``strategy_config_id``.
+        - Otherwise the active strategy configs are loaded from the DB via
+          :class:`ConfigService`, keyed by the real DB ``config_id``; if none are
+          active, defaults are seeded and the active configs are reloaded.
+
+        Raises on a hard failure so the caller can finalize the run as failed.
+        """
+        if strategy_configs is not None:
+            log.info(
+                "using explicit strategy_configs override (%d configs)",
+                len(strategy_configs),
+            )
+            configs_by_id = dict(strategy_configs)
+            return configs_by_id, list(configs_by_id), []
+
+        result = self._config_service.get_active_strategy_configs(db_role)
+        if not result.is_ok():
+            raise RuntimeError(
+                "; ".join(result.errors) or "get_active_strategy_configs failed"
+            )
+        configs_by_id = dict(result.metadata.get("configs_by_id") or {})
+
+        if not configs_by_id:
+            log.info(
+                "no active strategy configs for db_role=%s; seeding defaults",
+                db_role,
+            )
+            seed = self._config_service.seed_default_strategy_configs(db_role)
+            if not seed.is_ok():
+                raise RuntimeError(
+                    "; ".join(seed.errors) or "seed_default_strategy_configs failed"
+                )
+            result = self._config_service.get_active_strategy_configs(db_role)
+            if not result.is_ok():
+                raise RuntimeError(
+                    "; ".join(result.errors)
+                    or "get_active_strategy_configs failed after seeding"
+                )
+            configs_by_id = dict(result.metadata.get("configs_by_id") or {})
+
+        if not configs_by_id:
+            raise RuntimeError(
+                f"no active strategy configs available for db_role={db_role!r} "
+                "after seeding"
+            )
+
+        runtime_ids = self._collect_runtime_config_ids(db_role, log)
+        return configs_by_id, list(configs_by_id), runtime_ids
+
+    def _collect_runtime_config_ids(self, db_role: str, log: Any) -> list[str]:
+        """Best-effort list of active runtime config ids for traceability."""
+        try:
+            listing = self._config_service.list_runtime_configs(db_role)
+        except Exception as exc:  # noqa: BLE001 - traceability is non-fatal
+            log.warning("could not list runtime configs: %s", exc)
+            return []
+        if not listing.is_ok():
+            return []
+        return [
+            v["config_id"]
+            for v in (listing.metadata.get("versions") or [])
+            if v.get("active_flag")
+        ]
 
     # ------------------------------------------------------------------ #
     # Lock protocol.
@@ -956,6 +1134,7 @@ class PipelineOrchestrator:
         db_role: str,
         run_id: str,
         steps_completed: list[str],
+        force_rerun: bool = False,
     ) -> tuple[list[str], str | None, str | None]:
         """Run steps 7-11 in step-major order and record each logical step
         only after **all** configs have completed it.
@@ -1001,7 +1180,8 @@ class PipelineOrchestrator:
             for config_id, config_dict in configs.items():
                 try:
                     result = callers[step_name](
-                        run_date, db_role, run_id, config_id, config_dict, log
+                        run_date, db_role, run_id, config_id, config_dict, log,
+                        force_rerun=force_rerun,
                     )
                 except Exception as exc:  # noqa: BLE001 - never raise from step
                     log.error(
@@ -1101,6 +1281,19 @@ class PipelineOrchestrator:
             run_id=run_id,
         )
 
+    def _step_market_regime(self, run_date: date, db_role: str, run_id: str, log: Any):
+        """Classify market regime for run_date and write to daily_features.
+
+        Recoverable: a failure here logs a warning but does not abort the run.
+        Step 3 screening proceeds with market_score=0 (UNKNOWN) for all tickers.
+        """
+        return self._regime_engine.classify(
+            start_date=run_date,
+            end_date=run_date,
+            db_role=db_role,
+            run_id=run_id,
+        )
+
     def _step_dashboard(self, run_date: date, db_role: str, run_id: str, log: Any):
         log.info(
             "dashboard materialization skipped "
@@ -1110,29 +1303,17 @@ class PipelineOrchestrator:
             status=service_result.STATUS_SUCCESS, run_id=run_id, rows_processed=0
         )
 
-    def _step_backup(self, run_date: date, db_role: str, run_id: str, log: Any):
-        if db_role == DB_ROLE_PROD:
-            src = settings.PROD_DB_PATH
-        else:
-            src = settings.DEBUG_DB_PATH
-        dst = (
-            settings.BACKUPS_DIR
-            / f"{db_role}_{run_date.isoformat()}_{run_id[:8]}.duckdb"
-        )
-        dst.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(src, dst)
-        log.info("backup written: %s", dst)
-        return ServiceResult(
-            status=service_result.STATUS_SUCCESS,
-            run_id=run_id,
-            rows_processed=1,
-            metadata={"backup_path": str(dst)},
-        )
+
 
     # ------------------------------------------------------------------ #
     # Strategy step bodies (one config each).
     # ------------------------------------------------------------------ #
-    def _call_screen(self, run_date, db_role, run_id, config_id, config_dict, log):
+    def _call_screen(
+        self, run_date, db_role, run_id, config_id, config_dict, log,
+        force_rerun: bool = False,
+    ):
+        if force_rerun:
+            self._purge_date(run_date, config_id, db_role, log)
         return self._screening_engine.screen(
             signal_date=run_date,
             strategy_config=config_dict,
@@ -1141,7 +1322,10 @@ class PipelineOrchestrator:
             run_id=run_id,
         )
 
-    def _call_analyze(self, run_date, db_role, run_id, config_id, config_dict, log):
+    def _call_analyze(
+        self, run_date, db_role, run_id, config_id, config_dict, log,
+        force_rerun: bool = False,
+    ):
         return self._analysis_engine.analyze(
             signal_date=run_date,
             strategy_config=config_dict,
@@ -1150,7 +1334,10 @@ class PipelineOrchestrator:
             run_id=run_id,
         )
 
-    def _call_propose(self, run_date, db_role, run_id, config_id, config_dict, log):
+    def _call_propose(
+        self, run_date, db_role, run_id, config_id, config_dict, log,
+        force_rerun: bool = False,
+    ):
         return self._proposal_engine.propose(
             signal_date=run_date,
             strategy_config=config_dict,
@@ -1159,7 +1346,7 @@ class PipelineOrchestrator:
             run_id=run_id,
         )
 
-    def _call_enqueue(self, run_date, db_role, run_id, config_id, config_dict, log):
+    def _call_enqueue(self, run_date, db_role, run_id, config_id, config_dict, log, force_rerun: bool = False):
         return self._outcome_creator.enqueue(
             signal_date=run_date,
             strategy_config_id=config_id,
@@ -1168,13 +1355,91 @@ class PipelineOrchestrator:
             run_id=run_id,
         )
 
-    def _call_process(self, run_date, db_role, run_id, config_id, config_dict, log):
+    def _call_process(self, run_date, db_role, run_id, config_id, config_dict, log, force_rerun: bool = False):
         return self._outcome_processor.process(
             run_date=run_date,
             strategy_config=config_dict,
             db_role=db_role,
             run_id=run_id,
         )
+
+    # ------------------------------------------------------------------ #
+    # Force-rerun: purge existing rows for (signal_date, strategy_config_id).
+    # ------------------------------------------------------------------ #
+    def _purge_date(
+        self,
+        signal_date: "date",
+        strategy_config_id: str,
+        db_role: str,
+        log: Any,
+    ) -> None:
+        """Delete all pipeline output rows for this date + config before rerun.
+
+        Purge order is child-first to avoid FK-like integrity issues:
+          ai_reviews → execution_decisions → signal_outcomes
+          → outcome_tracking_queue → step5_proposals
+          → step4_analysis → step3_candidates
+
+        Each DELETE is a separate connection (single-writer discipline).
+        Errors are logged as warnings but do not abort the purge; the
+        subsequent INSERT from the engines will either overwrite or fail with
+        a clear duplicate-key error.
+        """
+        _PURGE_SQLS: list[tuple[str, list]] = [
+            (
+                "DELETE FROM ai_reviews WHERE proposal_id IN "
+                "(SELECT proposal_id FROM step5_proposals "
+                " WHERE signal_date = ? AND strategy_config_id = ?)",
+                [signal_date, strategy_config_id],
+            ),
+            (
+                "DELETE FROM execution_decisions WHERE proposal_id IN "
+                "(SELECT proposal_id FROM step5_proposals "
+                " WHERE signal_date = ? AND strategy_config_id = ?)",
+                [signal_date, strategy_config_id],
+            ),
+            (
+                "DELETE FROM signal_outcomes WHERE proposal_id IN "
+                "(SELECT proposal_id FROM step5_proposals "
+                " WHERE signal_date = ? AND strategy_config_id = ?)",
+                [signal_date, strategy_config_id],
+            ),
+            (
+                "DELETE FROM outcome_tracking_queue WHERE proposal_id IN "
+                "(SELECT proposal_id FROM step5_proposals "
+                " WHERE signal_date = ? AND strategy_config_id = ?)",
+                [signal_date, strategy_config_id],
+            ),
+            (
+                "DELETE FROM step5_proposals "
+                "WHERE signal_date = ? AND strategy_config_id = ?",
+                [signal_date, strategy_config_id],
+            ),
+            (
+                "DELETE FROM step4_analysis "
+                "WHERE signal_date = ? AND strategy_config_id = ?",
+                [signal_date, strategy_config_id],
+            ),
+            (
+                "DELETE FROM step3_candidates "
+                "WHERE signal_date = ? AND strategy_config_id = ?",
+                [signal_date, strategy_config_id],
+            ),
+        ]
+        log.warning(
+            "force_rerun: purging existing rows for signal_date=%s config=%s",
+            signal_date,
+            strategy_config_id,
+        )
+        for sql, params in _PURGE_SQLS:
+            try:
+                conn = connect_with_retry(db_role, read_only=False)
+                try:
+                    conn.execute(sql, params)
+                finally:
+                    conn.close()
+            except Exception as exc:  # noqa: BLE001
+                log.warning("purge warning (non-fatal): %s", exc)
 
     # ------------------------------------------------------------------ #
     # ServiceResult assembly.

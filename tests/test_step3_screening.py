@@ -664,24 +664,26 @@ def test_market_regime_mapping_all_five(
     assert comps["market_regime_known"] is True
 
 
-def test_unknown_regime_neutral_50_and_audited(tmp_db_paths: dict[str, Path]) -> None:
+def test_unknown_regime_scores_zero_and_audited(tmp_db_paths: dict[str, Path]) -> None:
+    """Unknown market regime scores 0.0 (data gap), not neutral 50."""
     d = date(2023, 6, 1)
     prod = tmp_db_paths[dbm.DB_ROLE_PROD]
     seed_full_passing(prod, "AAA", d, market_regime="mystery")
     Step3ScreeningEngine().screen(d, make_config(), CONFIG_ID)
     comps = json.loads(fetch_candidates(prod)[0]["soft_score_components"])
-    assert comps["market_score"] == pytest.approx(s3mod.MARKET_SCORE_UNKNOWN)
+    assert comps["market_score"] == pytest.approx(s3mod.MARKET_SCORE_UNKNOWN)  # 0.0
     assert comps["market_regime"] == "mystery"
     assert comps["market_regime_known"] is False
 
 
-def test_null_regime_neutral_50(tmp_db_paths: dict[str, Path]) -> None:
+def test_null_regime_scores_zero(tmp_db_paths: dict[str, Path]) -> None:
+    """NULL market regime scores 0.0, not neutral 50."""
     d = date(2023, 6, 1)
     prod = tmp_db_paths[dbm.DB_ROLE_PROD]
     seed_full_passing(prod, "AAA", d, market_regime=None)
     Step3ScreeningEngine().screen(d, make_config(), CONFIG_ID)
     comps = json.loads(fetch_candidates(prod)[0]["soft_score_components"])
-    assert comps["market_score"] == pytest.approx(50.0)
+    assert comps["market_score"] == pytest.approx(s3mod.MARKET_SCORE_UNKNOWN)  # 0.0
     assert comps["market_regime_known"] is False
 
 

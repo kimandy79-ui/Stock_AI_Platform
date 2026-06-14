@@ -101,8 +101,9 @@ _HARD_FILTER_ORDER: Final[tuple[tuple[str, str], ...]] = (
 
 # --------------------------------------------------------------------------- #
 # Market-regime → market sub-score mapping (FORMULAS/61). Any regime value not in
-# this map (including NULL / unknown) scores the neutral fallback 50.0 and is
-# recorded in ``soft_score_components`` (prompt rule).
+# this map (including NULL / unknown) scores 0.0 (not neutral 50.0) and is
+# recorded in ``soft_score_components`` (prompt rule). Unknown market regime
+# is treated as a data gap, not a neutral condition.
 # --------------------------------------------------------------------------- #
 MARKET_SCORE_BY_REGIME: Final[dict[str, float]] = {
     constants.REGIME_BULL: 100.0,
@@ -111,7 +112,7 @@ MARKET_SCORE_BY_REGIME: Final[dict[str, float]] = {
     constants.REGIME_HIGH_RISK: 0.0,
     constants.REGIME_EXTREME_RISK: 0.0,
 }
-MARKET_SCORE_UNKNOWN: Final[float] = 50.0
+MARKET_SCORE_UNKNOWN: Final[float] = 0.0
 
 # distance_to_ema50 ideal band (FORMULAS/61) and the documented linear-taper width
 # used outside the band (gap G-EMA50-TAPER, closed in the spec): the sub-score
@@ -416,7 +417,10 @@ def _volume_score_expr() -> pl.Expr:
 
 
 def _market_score_expr() -> pl.Expr:
-    """Market sub-score from ``market_regime``; unknown / NULL -> neutral 50."""
+    """Market sub-score from ``market_regime``; unknown / NULL -> 0.0 (data gap).
+
+    Unknown regime is not neutral — it is an absent signal and scores 0.
+    """
     expr = pl.col("market_regime")
     out = pl.lit(MARKET_SCORE_UNKNOWN, dtype=pl.Float64)
     for regime, score in MARKET_SCORE_BY_REGIME.items():
