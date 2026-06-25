@@ -1,27 +1,39 @@
-"""Tests for the ConfigService and fresh config schema (M21 Config Mgmt Addendum).
+"""Tests for ConfigService and setup-mode config schema (Phase 1).
 
-These tests exercise the real DuckDB-backed schema and ConfigService against
-temp databases (no real prod/debug/simulation files are touched). The DuckDB
-manager paths are redirected into ``tmp_path`` via the ``settings`` monkeypatch
-fixture, mirroring the other DB-backed test modules.
+Covers:
+- Fresh DB has setup_configs and risk_label_config (not strategy_configs).
+- Seeding is idempotent.
+- Exactly one active setup config per setup_type.
+- Exactly one active risk-label config.
+- Invalid setup_type is rejected.
+- config_hash is stable (deterministic).
+- get_active_setup_config returns the right config.
+- get_active_risk_label_config returns the right config.
+- validate_setup_config / validate_risk_label_config work correctly.
+- assert_universe_config_parity passes when all four configs share universe block.
+- sector_alias_map seeding.
+- ServiceResult contract on all paths.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import pytest
 
-from app.config import constants
+from app.config import constants, settings
 from app.database import duckdb_manager as dbm
 from app.database import schema_manager
-from app.config import settings
 from app.services.config import config_validator as cv
 from app.services.config import default_configs
 from app.services.config.config_service import ConfigService
 from app.utils import service_result
 
 
+# --------------------------------------------------------------------------- #
+# Fixtures
+# --------------------------------------------------------------------------- #
 @pytest.fixture
 def tmp_db_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, Path]:
     duckdb_dir = tmp_path / "duckdb"
@@ -42,13 +54,20 @@ def prod_schema(tmp_db_paths: dict[str, Path]) -> ConfigService:
     return ConfigService(db_manager=dbm)
 
 
+@pytest.fixture
+def seeded_prod(prod_schema: ConfigService) -> ConfigService:
+    svc = prod_schema
+    r = svc.seed_defaults("prod")
+    assert r.is_ok(), r.errors
+    return svc
+
+
 def _columns(role: str, table: str) -> list[str]:
     conn = dbm.connect(role, read_only=True)
     try:
         rows = conn.execute(
             "SELECT column_name FROM information_schema.columns "
-            "WHERE table_schema = 'main' AND table_name = ? "
-            "ORDER BY ordinal_position",
+            "WHERE table_schema = 'main' AND table_name = ? ORDER BY ordinal_position",
             [table],
         ).fetchall()
     finally:
@@ -65,268 +84,377 @@ def _count(role: str, sql: str, params: list | None = None) -> int:
 
 
 # --------------------------------------------------------------------------- #
-# 1. Fresh DB schema includes the config tables / columns.
+# 1. Fresh DB has setup-mode tables (not legacy)
 # --------------------------------------------------------------------------- #
-def test_fresh_schema_has_config_tables(prod_schema: ConfigService) -> None:
+def test_fresh_schema_has_setup_configs_not_strategy_configs(
+    prod_schema: ConfigService,
+) -> None:
     conn = dbm.connect("prod", read_only=True)
     try:
         names = {r[0] for r in conn.execute("SHOW TABLES").fetchall()}
     finally:
         conn.close()
-    assert {
-        "strategy_configs",
-        "runtime_configs",
-        "config_activation_log",
-        "sector_alias_map",
-    } <= names
+    assert "setup_configs" in names
+    assert "risk_label_config" in names
+    # Legacy tables must not exist
+    assert "strategy_configs" not in names
+    assert "runtime_configs" not in names
+    assert "config_activation_log" not in names
 
 
-def test_strategy_configs_has_db_role_and_created_by(
-    prod_schema: ConfigService,
-) -> None:
-    cols = _columns("prod", "strategy_configs")
-    assert "db_role" in cols
-    assert "created_by" in cols
-
-
-def test_pipeline_runs_has_config_traceability_columns(
-    prod_schema: ConfigService,
-) -> None:
-    cols = _columns("prod", "pipeline_runs")
-    assert {
-        "strategy_config_ids_json",
-        "runtime_config_ids_json",
-        "config_snapshot_hash",
-    } <= set(cols)
+def test_setup_configs_has_setup_type_column(prod_schema: ConfigService) -> None:
+    cols = _columns("prod", "setup_configs")
+    assert "setup_type" in cols
+    assert "config_id" in cols
+    assert "active_flag" in cols
+    # No legacy columns
+    assert "strategy_name" not in cols
+    assert "db_role" not in cols
 
 
 # --------------------------------------------------------------------------- #
-# 2. Default strategy config seeding.
+# 2. Seeding
 # --------------------------------------------------------------------------- #
-def test_seed_strategy_configs_creates_three_active(
-    prod_schema: ConfigService,
-) -> None:
-    result = prod_schema.seed_default_strategy_configs("prod")
-    assert result.status == service_result.STATUS_SUCCESS
-    assert result.metadata["seeded"] == 3
-    active = _count(
-        "prod", "SELECT COUNT(*) FROM strategy_configs WHERE active_flag = TRUE"
-    )
-    assert active == 3
-    names = {
-        r[0]
-        for r in dbm.connect("prod", read_only=True).execute(
-            "SELECT strategy_name FROM strategy_configs"
-        ).fetchall()
-    }
-    assert names == {"normal", "aggressive", "conservative"}
+def test_seed_default_setup_configs_inserts_four_rows(seeded_prod: ConfigService) -> None:
+    n = _count("prod", "SELECT COUNT(*) FROM setup_configs")
+    assert n == 4
 
 
-def test_seed_strategy_configs_is_idempotent(prod_schema: ConfigService) -> None:
-    prod_schema.seed_default_strategy_configs("prod")
-    second = prod_schema.seed_default_strategy_configs("prod")
-    # Second seed inserts nothing (deterministic seed id + ON CONFLICT).
-    assert second.metadata["seeded"] == 0
-    assert _count("prod", "SELECT COUNT(*) FROM strategy_configs") == 3
+def test_seed_default_setup_configs_all_four_setup_types(seeded_prod: ConfigService) -> None:
+    conn = dbm.connect("prod", read_only=True)
+    try:
+        rows = conn.execute("SELECT setup_type FROM setup_configs ORDER BY setup_type").fetchall()
+    finally:
+        conn.close()
+    types = {r[0] for r in rows}
+    assert types == set(constants.ALLOWED_SETUP_TYPES)
 
 
-def test_seed_uses_current_default_values(prod_schema: ConfigService) -> None:
-    prod_schema.seed_default_strategy_configs("prod")
-    got = prod_schema.get_active_strategy_configs("prod")
-    defaults = default_configs.get_default_strategy_configs()
-    assert got.metadata["configs"]["normal"]["screening"]["min_rvol"] == (
-        defaults["normal"]["screening"]["min_rvol"]
-    )
+def test_seed_default_risk_label_config_inserts_one_row(seeded_prod: ConfigService) -> None:
+    n = _count("prod", "SELECT COUNT(*) FROM risk_label_config")
+    assert n == 1
 
 
-def test_seed_strategy_accepts_simulation_role(sim_schema: ConfigService) -> None:
-    """simulation is a supported config db_role (M21 review fix #4)."""
-    result = sim_schema.seed_default_strategy_configs("simulation")
-    assert result.is_ok(), result.errors
-    assert result.metadata["seeded"] == 3
+def test_seeding_is_idempotent(prod_schema: ConfigService) -> None:
+    svc = prod_schema
+    r1 = svc.seed_defaults("prod")
+    r2 = svc.seed_defaults("prod")
+    assert r1.is_ok()
+    assert r2.is_ok()
+    # Second seed inserts 0 rows (ON CONFLICT DO NOTHING)
+    assert r2.rows_processed == 0
+    # DB still has exactly 4 setup configs and 1 risk label config
+    assert _count("prod", "SELECT COUNT(*) FROM setup_configs") == 4
+    assert _count("prod", "SELECT COUNT(*) FROM risk_label_config") == 1
 
 
 # --------------------------------------------------------------------------- #
-# 3. Runtime config seeding.
+# 3. Activation constraints
 # --------------------------------------------------------------------------- #
-def test_seed_runtime_configs_creates_expected_types(
-    prod_schema: ConfigService,
-) -> None:
-    result = prod_schema.seed_default_runtime_configs("prod")
-    assert result.metadata["seeded"] == len(cv.ALLOWED_CONFIG_TYPES)
-    types_present = {
-        r[0]
-        for r in dbm.connect("prod", read_only=True).execute(
-            "SELECT config_type FROM runtime_configs WHERE active_flag = TRUE"
-        ).fetchall()
-    }
-    assert types_present == set(cv.ALLOWED_CONFIG_TYPES)
+def test_one_active_setup_config_per_setup_type(seeded_prod: ConfigService) -> None:
+    for setup_type in constants.ALLOWED_SETUP_TYPES:
+        n = _count(
+            "prod",
+            "SELECT COUNT(*) FROM setup_configs WHERE setup_type = ? AND active_flag = TRUE",
+            [setup_type],
+        )
+        assert n == 1, f"Expected 1 active setup config for {setup_type!r}, got {n}"
 
 
-def test_seed_runtime_configs_is_idempotent(prod_schema: ConfigService) -> None:
-    prod_schema.seed_default_runtime_configs("prod")
-    second = prod_schema.seed_default_runtime_configs("prod")
-    assert second.metadata["seeded"] == 0
-    assert _count("prod", "SELECT COUNT(*) FROM runtime_configs") == len(
-        cv.ALLOWED_CONFIG_TYPES
-    )
-
-
-def test_seed_defaults_seeds_all_three_kinds(prod_schema: ConfigService) -> None:
-    result = prod_schema.seed_defaults("prod")
-    assert result.status == service_result.STATUS_SUCCESS
-    assert result.metadata["strategy_seeded"] == 3
-    assert result.metadata["runtime_seeded"] == len(cv.ALLOWED_CONFIG_TYPES)
-    assert result.metadata["sector_alias_seeded"] == len(constants.SECTOR_ALIAS_MAP)
+def test_one_active_risk_label_config(seeded_prod: ConfigService) -> None:
+    n = _count("prod", "SELECT COUNT(*) FROM risk_label_config WHERE active_flag = TRUE")
+    assert n == 1
 
 
 # --------------------------------------------------------------------------- #
-# 4. Config hash determinism.
+# 4. Validation: invalid setup_type is rejected
 # --------------------------------------------------------------------------- #
-def test_config_hash_is_order_independent() -> None:
-    a = {"b": 1, "a": {"y": 2, "x": 1}}
-    b = {"a": {"x": 1, "y": 2}, "b": 1}
-    assert cv.deterministic_hash(a) == cv.deterministic_hash(b)
+def test_get_active_setup_config_invalid_type_fails(prod_schema: ConfigService) -> None:
+    svc = prod_schema
+    result = svc.get_active_setup_config("prod", "aggressive")  # legacy strategy name
+    assert result.status == service_result.STATUS_FAILED
+    assert result.errors
 
 
-def test_config_hash_changes_with_payload() -> None:
-    a = {"a": 1}
-    b = {"a": 2}
-    assert cv.deterministic_hash(a) != cv.deterministic_hash(b)
+def test_get_active_setup_config_legacy_name_fails(prod_schema: ConfigService) -> None:
+    for bad in ("normal", "conservative", "trend_pullback", "volatility_squeeze"):
+        result = prod_schema.get_active_setup_config("prod", bad)
+        assert result.status == service_result.STATUS_FAILED, f"Expected failure for {bad!r}"
 
 
-# --------------------------------------------------------------------------- #
-# 5. Versioning + activation + rollback.
-# --------------------------------------------------------------------------- #
-def test_create_activate_and_rollback(prod_schema: ConfigService) -> None:
-    prod_schema.seed_default_strategy_configs("prod")
-    # The seeded normal config id is deterministic.
-    seed_id = "seed_strategy_prod_normal_v1"
-
-    created = prod_schema.create_strategy_config_version(
-        "prod", "normal", {"screening": {"min_rvol": 9.0}}, activate=True
-    )
-    assert created.is_ok(), created.errors
-    new_id = created.metadata["config_id"]
-
-    # Exactly one active 'normal' config, and it is the new one.
-    active_id = dbm.connect("prod", read_only=True).execute(
-        "SELECT config_id FROM strategy_configs "
-        "WHERE strategy_name = 'normal' AND active_flag = TRUE"
-    ).fetchone()[0]
-    assert active_id == new_id
-
-    # Rollback: re-activate the seeded version.
-    rolled = prod_schema.activate_strategy_config(
-        seed_id, "prod", reason="rollback"
-    )
-    assert rolled.is_ok(), rolled.errors
-    active_id = dbm.connect("prod", read_only=True).execute(
-        "SELECT config_id FROM strategy_configs "
-        "WHERE strategy_name = 'normal' AND active_flag = TRUE"
-    ).fetchone()[0]
-    assert active_id == seed_id
-
-    # Activation log captured both activations (create+activate, rollback).
-    log_rows = _count(
-        "prod",
-        "SELECT COUNT(*) FROM config_activation_log WHERE config_id IN (?, ?)",
-        [new_id, seed_id],
-    )
-    assert log_rows >= 2
-
-
-def test_get_active_runtime_config_returns_payload(
-    prod_schema: ConfigService,
-) -> None:
-    prod_schema.seed_default_runtime_configs("prod")
-    result = prod_schema.get_active_runtime_config("prod", "pipeline")
-    assert result.is_ok(), result.errors
-    assert "lock_stale_seconds" in result.metadata["config_json"]
-
-
-def test_activate_unknown_config_fails(prod_schema: ConfigService) -> None:
-    result = prod_schema.activate_strategy_config("does-not-exist", "prod")
+def test_seed_with_invalid_db_role_fails(prod_schema: ConfigService) -> None:
+    result = prod_schema.seed_default_setup_configs("bad_role")
     assert result.status == service_result.STATUS_FAILED
 
 
 # --------------------------------------------------------------------------- #
-# 6. config_activation_log semantics (fix #3).
+# 5. Config hash is stable (deterministic)
 # --------------------------------------------------------------------------- #
-def test_activation_log_stores_strategy_type_and_profile_name(
-    prod_schema: ConfigService,
-) -> None:
-    """config_type must be 'strategy'; profile_name must be the strategy name."""
-    prod_schema.seed_default_strategy_configs("prod")
-    prod_schema.activate_strategy_config(
-        "seed_strategy_prod_normal_v1", "prod", reason="test"
-    )
+def test_config_hash_is_deterministic() -> None:
+    cfg = {"setup_type": "breakout", "min_rvol": 1.5, "min_rr": 1.8}
+    h1 = cv.deterministic_hash(cfg)
+    h2 = cv.deterministic_hash(cfg)
+    assert h1 == h2
+    assert len(h1) == 64  # SHA-256 hex
+
+
+def test_config_hash_differs_on_content_change() -> None:
+    cfg1 = {"min_rvol": 1.5}
+    cfg2 = {"min_rvol": 2.0}
+    assert cv.deterministic_hash(cfg1) != cv.deterministic_hash(cfg2)
+
+
+def test_config_hash_key_order_independent() -> None:
+    cfg_a = {"b": 2, "a": 1}
+    cfg_b = {"a": 1, "b": 2}
+    assert cv.deterministic_hash(cfg_a) == cv.deterministic_hash(cfg_b)
+
+
+def test_seeded_configs_have_config_hash(seeded_prod: ConfigService) -> None:
     conn = dbm.connect("prod", read_only=True)
     try:
-        row = conn.execute(
-            "SELECT config_type, profile_name FROM config_activation_log "
-            "WHERE config_id = 'seed_strategy_prod_normal_v1' LIMIT 1"
-        ).fetchone()
+        rows = conn.execute(
+            "SELECT config_hash FROM setup_configs WHERE config_hash IS NULL"
+        ).fetchall()
     finally:
         conn.close()
-    assert row is not None
-    assert row[0] == "strategy", f"config_type was {row[0]!r}, expected 'strategy'"
-    assert row[1] == "normal", f"profile_name was {row[1]!r}, expected 'normal'"
-
-
-def test_create_activate_log_semantics(prod_schema: ConfigService) -> None:
-    result = prod_schema.create_strategy_config_version(
-        "prod", "aggressive", {"screening": {"min_rvol": 2.5}}, activate=True
-    )
-    assert result.is_ok(), result.errors
-    new_id = result.metadata["config_id"]
-    conn = dbm.connect("prod", read_only=True)
-    try:
-        row = conn.execute(
-            "SELECT config_type, profile_name FROM config_activation_log "
-            "WHERE config_id = ? LIMIT 1",
-            [new_id],
-        ).fetchone()
-    finally:
-        conn.close()
-    assert row is not None
-    assert row[0] == "strategy"
-    assert row[1] == "aggressive"
+    assert len(rows) == 0  # all rows have a hash
 
 
 # --------------------------------------------------------------------------- #
-# 7. Simulation db_role config support (fix #4).
+# 6. get_active_setup_config reads
 # --------------------------------------------------------------------------- #
-@pytest.fixture
-def sim_schema(tmp_db_paths: dict[str, Path]) -> ConfigService:
-    from app.database import schema_manager as sm
+def test_get_active_setup_config_returns_correct_type(seeded_prod: ConfigService) -> None:
+    for setup_type in constants.ALLOWED_SETUP_TYPES:
+        result = seeded_prod.get_active_setup_config("prod", setup_type)
+        assert result.is_ok(), f"{setup_type}: {result.errors}"
+        assert result.metadata["setup_type"] == setup_type
+        assert "config_json" in result.metadata
+        cfg = result.metadata["config_json"]
+        assert isinstance(cfg, dict)
+        assert cfg.get("setup_type") == setup_type
 
-    result = sm.apply_simulation_schema()
+
+def test_get_all_active_setup_configs_returns_four(seeded_prod: ConfigService) -> None:
+    result = seeded_prod.get_all_active_setup_configs("prod")
+    assert result.is_ok()
+    assert result.rows_processed == 4
+    configs = result.metadata["configs_by_type"]
+    assert set(configs.keys()) == set(constants.ALLOWED_SETUP_TYPES)
+
+
+# --------------------------------------------------------------------------- #
+# 7. get_active_risk_label_config reads
+# --------------------------------------------------------------------------- #
+def test_get_active_risk_label_config_returns_config(seeded_prod: ConfigService) -> None:
+    result = seeded_prod.get_active_risk_label_config("prod")
+    assert result.is_ok()
+    cfg = result.metadata["config_json"]
+    assert isinstance(cfg, dict)
+    assert "factor_weights" in cfg
+    assert "thresholds" in cfg
+    assert "buy_rules" in cfg
+    assert "ranking" in cfg
+
+
+def test_get_active_risk_label_config_no_config_fails(prod_schema: ConfigService) -> None:
+    # Not seeded yet — should fail
+    result = prod_schema.get_active_risk_label_config("prod")
+    assert result.status == service_result.STATUS_FAILED
+
+
+# --------------------------------------------------------------------------- #
+# 8. validate_setup_config
+# --------------------------------------------------------------------------- #
+def test_validate_setup_config_valid_breakout(prod_schema: ConfigService) -> None:
+    cfg = default_configs.get_default_setup_configs()["breakout"]
+    result = prod_schema.validate_setup_config(cfg)
+    assert result.is_ok()
+    assert "config_hash" in result.metadata
+
+
+def test_validate_setup_config_invalid_setup_type_fails(prod_schema: ConfigService) -> None:
+    cfg = {"setup_type": "aggressive", "scoring_weights": {"a": 1.0}}
+    result = prod_schema.validate_setup_config(cfg)
+    assert result.status == service_result.STATUS_FAILED
+
+
+def test_validate_setup_config_bad_weights_sum_fails(prod_schema: ConfigService) -> None:
+    cfg = {
+        "setup_type": "breakout",
+        "scoring_weights": {"a": 0.5, "b": 0.3},  # sum = 0.8
+    }
+    result = prod_schema.validate_setup_config(cfg)
+    assert result.status == service_result.STATUS_FAILED
+
+
+def test_validate_setup_config_good_weights_sum_passes(prod_schema: ConfigService) -> None:
+    cfg = {
+        "setup_type": "pullback",
+        "scoring_weights": {"a": 0.5, "b": 0.5},
+    }
+    result = prod_schema.validate_setup_config(cfg)
+    assert result.is_ok()
+
+
+# --------------------------------------------------------------------------- #
+# 9. validate_risk_label_config
+# --------------------------------------------------------------------------- #
+def test_validate_risk_label_config_valid(prod_schema: ConfigService) -> None:
+    cfg = default_configs.get_default_risk_label_config()
+    result = prod_schema.validate_risk_label_config(cfg)
+    assert result.is_ok()
+
+
+def test_validate_risk_label_config_bad_weights_fails(prod_schema: ConfigService) -> None:
+    cfg = {
+        "factor_weights": {"stop_distance_pct": 0.5, "atr_pct": 0.3},  # sum = 0.8
+        "thresholds": {"low_max": 33, "med_max": 66},
+    }
+    result = prod_schema.validate_risk_label_config(cfg)
+    assert result.status == service_result.STATUS_FAILED
+
+
+# --------------------------------------------------------------------------- #
+# 10. Universe config parity
+# --------------------------------------------------------------------------- #
+def test_universe_config_parity_passes_on_default_seeds(seeded_prod: ConfigService) -> None:
+    result = seeded_prod.assert_universe_config_parity("prod")
     assert result.is_ok(), result.errors
-    return ConfigService(db_manager=dbm)
 
 
-def test_simulation_schema_has_config_tables(sim_schema: ConfigService) -> None:
-    conn = dbm.connect("simulation", read_only=True)
-    try:
-        names = {r[0] for r in conn.execute("SHOW TABLES").fetchall()}
-    finally:
-        conn.close()
-    assert {"strategy_configs", "runtime_configs", "config_activation_log",
-            "sector_alias_map"} <= names
+# --------------------------------------------------------------------------- #
+# 11. Sector alias seeding
+# --------------------------------------------------------------------------- #
+def test_seed_sector_alias_map_inserts_rows(prod_schema: ConfigService) -> None:
+    result = prod_schema.seed_sector_alias_map("prod")
+    assert result.is_ok()
+    n = _count("prod", "SELECT COUNT(*) FROM sector_alias_map")
+    assert n > 0
 
 
-def test_seed_defaults_for_simulation(sim_schema: ConfigService) -> None:
-    result = sim_schema.seed_defaults("simulation")
+def test_seed_sector_alias_map_is_idempotent(prod_schema: ConfigService) -> None:
+    prod_schema.seed_sector_alias_map("prod")
+    prod_schema.seed_sector_alias_map("prod")
+    n = _count("prod", "SELECT COUNT(*) FROM sector_alias_map")
+    assert n == len(constants.SECTOR_ALIAS_MAP)
+
+
+# --------------------------------------------------------------------------- #
+# 12. seed_defaults convenience
+# --------------------------------------------------------------------------- #
+def test_seed_defaults_all_succeed(prod_schema: ConfigService) -> None:
+    result = prod_schema.seed_defaults("prod")
     assert result.is_ok(), result.errors
-    assert result.metadata["strategy_seeded"] == 3
-    assert result.metadata["runtime_seeded"] > 0
+    assert result.metadata["setup_seeded"] == 4
+    assert result.metadata["risk_label_seeded"] == 1
     assert result.metadata["sector_alias_seeded"] > 0
 
 
-def test_seed_simulation_is_idempotent(sim_schema: ConfigService) -> None:
-    sim_schema.seed_defaults("simulation")
-    second = sim_schema.seed_defaults("simulation")
-    assert second.is_ok()
-    assert second.metadata["strategy_seeded"] == 0
-    assert second.metadata["runtime_seeded"] == 0
+# --------------------------------------------------------------------------- #
+# 13. ServiceResult contract
+# --------------------------------------------------------------------------- #
+def test_seed_setup_configs_returns_service_result(prod_schema: ConfigService) -> None:
+    result = prod_schema.seed_default_setup_configs("prod")
+    assert result.has_valid_status()
+    assert result.run_id
+
+
+def test_get_active_setup_config_returns_service_result(seeded_prod: ConfigService) -> None:
+    result = seeded_prod.get_active_setup_config("prod", "breakout")
+    assert result.has_valid_status()
+    assert isinstance(result.rows_processed, int)
+
+
+# --------------------------------------------------------------------------- #
+# 14. config_validator module
+# --------------------------------------------------------------------------- #
+def test_allowed_setup_types_match_constants() -> None:
+    assert set(cv.ALLOWED_SETUP_TYPES) == set(constants.ALLOWED_SETUP_TYPES)
+
+
+def test_validate_setup_type_valid() -> None:
+    for st in constants.ALLOWED_SETUP_TYPES:
+        assert cv.validate_setup_type(st) == st
+
+
+def test_validate_setup_type_rejects_legacy() -> None:
+    for bad in ("normal", "aggressive", "conservative", "trend_pullback",
+                "volatility_squeeze", "trend_resume", "high_tight_flag", "unknown"):
+        with pytest.raises(cv.ConfigValidationError):
+            cv.validate_setup_type(bad)
+
+
+def test_validate_db_role_valid() -> None:
+    for role in ("prod", "debug", "simulation"):
+        assert cv.validate_db_role(role) == role
+
+
+def test_validate_db_role_rejects_bad() -> None:
+    with pytest.raises(cv.ConfigValidationError):
+        cv.validate_db_role("nope")
+
+
+# --------------------------------------------------------------------------- #
+# 15. default_configs module
+# --------------------------------------------------------------------------- #
+def test_default_setup_configs_four_keys() -> None:
+    cfgs = default_configs.get_default_setup_configs()
+    assert set(cfgs.keys()) == set(constants.ALLOWED_SETUP_TYPES)
+
+
+def test_default_setup_config_universe_blocks_identical() -> None:
+    """All four universe blocks must be identical (AD-22.23 / 01d Module 13)."""
+    cfgs = default_configs.get_default_setup_configs()
+    blocks = [cv.canonical_json(c["universe"]) for c in cfgs.values()]
+    assert len(set(blocks)) == 1, "universe blocks differ across setup configs"
+
+
+def test_default_setup_config_scoring_weights_sum_to_one() -> None:
+    cfgs = default_configs.get_default_setup_configs()
+    for setup_type, cfg in cfgs.items():
+        weights = cfg.get("scoring_weights", {})
+        total = sum(weights.values())
+        assert abs(total - 1.0) < 1e-6, (
+            f"{setup_type} scoring_weights sum {total} != 1.0"
+        )
+
+
+def test_default_risk_label_config_factor_weights_sum_to_one() -> None:
+    cfg = default_configs.get_default_risk_label_config()
+    weights = cfg.get("factor_weights", {})
+    total = sum(weights.values())
+    assert abs(total - 1.0) < 1e-6, f"factor_weights sum {total} != 1.0"
+
+
+def test_default_setup_configs_feature_schema_version() -> None:
+    cfgs = default_configs.get_default_setup_configs()
+    for setup_type, cfg in cfgs.items():
+        fsv = cfg.get("features", {}).get("feature_schema_version")
+        assert fsv == constants.FEATURE_SCHEMA_VERSION, (
+            f"{setup_type}: feature_schema_version {fsv!r} != {constants.FEATURE_SCHEMA_VERSION!r}"
+        )
+
+
+def test_default_risk_label_config_top_n() -> None:
+    cfg = default_configs.get_default_risk_label_config()
+    top_n = cfg.get("ranking", {}).get("top_n")
+    assert top_n == 20
+
+
+def test_pullback_rvol_is_hard_false() -> None:
+    """pullback must never hard-reject on low RVOL (AD-22.23)."""
+    cfgs = default_configs.get_default_setup_configs()
+    assert cfgs["pullback"]["validation"]["rvol_is_hard"] is False
+
+
+def test_consolidation_base_rvol_not_required() -> None:
+    """consolidation_base: RVOL not required (AD-22.23)."""
+    cfgs = default_configs.get_default_setup_configs()
+    assert cfgs["consolidation_base"]["validation"]["rvol_required"] is False
+
+
+def test_breakout_rvol_is_hard_true() -> None:
+    """breakout: RVOL is a hard gate (AD-22.23)."""
+    cfgs = default_configs.get_default_setup_configs()
+    assert cfgs["breakout"]["validation"]["rvol_is_hard"] is True

@@ -7,7 +7,7 @@ network, or orchestrator import ever occurs.
 
 Key design decision captured here
 -----------------------------------
-``_ScopedStep3ScreeningProxy.screen()`` calls the real engine with the
+``_ScopedStep3UniversalProxy.screen()`` calls the real engine with the
 **standard Step3ScreeningEngine.screen() signature** — no ``tickers`` kwarg is
 added to the public API.  Ticker filtering is applied inside the real engine at
 the private ``_read()`` level via a dynamic subclass created by the default
@@ -42,16 +42,18 @@ from app.services.debug.debug_mode import (
     SamplingProvider,
     _NoOpStepEngine,
     _ScopedFeatureEngine,
-    _ScopedStep3ScreeningProxy,
+    _ScopedStep3UniversalProxy,
     _needs_feature_scope,
     _needs_step3_scope,
+    CANONICAL_SETUP_TYPES,
 )
 
 RUN_DATE = date(2025, 6, 2)
 FAKE_CONFIGS = {
-    "normal":       {"strategy_name": "normal"},
-    "aggressive":   {"strategy_name": "aggressive"},
-    "conservative": {"strategy_name": "conservative"},
+    "breakout":              {"config_id": "setup_breakout_v1"},
+    "pullback":              {"config_id": "setup_pullback_v1"},
+    "trend_continuation":    {"config_id": "setup_trend_continuation_v1"},
+    "consolidation_base":    {"config_id": "setup_consolidation_base_v1"},
 }
 
 
@@ -136,12 +138,12 @@ class FakeScopedFeatureEngine:
 
 
 class FakeScopedStep3Engine:
-    """Records selected_tickers; mimics _ScopedStep3ScreeningProxy interface."""
+    """Records selected_tickers; mimics _ScopedStep3UniversalProxy interface."""
 
     def __init__(self, tickers: list[str]) -> None:
         self.selected_tickers = list(tickers)
 
-    def screen(self, signal_date, strategy_config, strategy_config_id, db_role, run_id=None):
+    def run(self, signal_date, setup_config_id, setup_config, db_role, run_id=None):
         return ServiceResult(service_result.STATUS_SUCCESS, run_id or "s3")
 
 
@@ -157,7 +159,7 @@ def make_controller(provider=None, *, configs=FAKE_CONFIGS):
         db_manager=object(),
         provider=provider if provider is not None else FakeProvider(["AAA"]),
         orchestrator_factory=FakeOrchestrator,
-        strategy_configs=configs,
+        setup_configs=configs,
         scoped_feature_engine_factory=lambda db, tickers: FakeScopedFeatureEngine(tickers),
         scoped_screening_engine_factory=lambda db, tickers: FakeScopedStep3Engine(tickers),
     )
@@ -169,7 +171,7 @@ def _plan(**overrides):
         sample_count=20,
         start_step=STEP_NAMES[0],
         end_step=STEP_NAMES[-1],
-        strategy_names=("normal",),
+        setup_types=("breakout", "pullback", "trend_continuation", "consolidation_base"),
     )
     base.update(overrides)
     return DebugRunPlan(**base)
@@ -269,64 +271,65 @@ def test_scoped_feature_engine_exposes_selected_tickers():
 
 
 # --------------------------------------------------------------------------- #
-# _ScopedStep3ScreeningProxy — unit tests.
+# _ScopedStep3UniversalProxy — unit tests.
 # Verify the proxy delegates to the real engine with the STANDARD Step3
 # signature (no tickers kwarg added to the public API).
 # --------------------------------------------------------------------------- #
 class _FakeRealStep3Engine:
-    """Mimics Step3ScreeningEngine.screen() with its exact public signature."""
+    """Mimics Step3UniversalEligibilityEngine.run() with its setup-mode signature."""
 
     def __init__(self):
         self.calls: list[dict] = []
 
-    def screen(
+    def run(
         self,
         signal_date,
-        strategy_config,
-        strategy_config_id,
+        setup_config_id,
+        setup_config,
         db_role,
         run_id=None,
     ):
         self.calls.append({
             "signal_date": signal_date,
-            "strategy_config": strategy_config,
-            "strategy_config_id": strategy_config_id,
+            "setup_config_id": setup_config_id,
+            "setup_config": setup_config,
             "db_role": db_role,
             "run_id": run_id,
         })
         return ServiceResult(service_result.STATUS_SUCCESS, "s3")
 
 
-def test_scoped_step3_proxy_delegates_with_standard_api():
-    """proxy.screen() forwards args with the unmodified Step3 public signature."""
+def test_scoped_step3_proxy_delegates_with_setup_mode_api():
+    """proxy.run() forwards args with the setup-mode Step3 signature."""
     real = _FakeRealStep3Engine()
-    proxy = _ScopedStep3ScreeningProxy(real, ["AAPL", "MSFT"])
-    proxy.screen(
+    proxy = _ScopedStep3UniversalProxy(real, ["AAPL", "MSFT"])
+    proxy.run(
         signal_date=RUN_DATE,
-        strategy_config={"k": "v"},
-        strategy_config_id="normal",
+        setup_config_id="setup_breakout_v1",
+        setup_config={"k": "v"},
         db_role="debug",
         run_id="t",
     )
     call = real.calls[-1]
     assert call["signal_date"] == RUN_DATE
-    assert call["strategy_config"] == {"k": "v"}
-    assert call["strategy_config_id"] == "normal"
+    assert call["setup_config_id"] == "setup_breakout_v1"
+    assert call["setup_config"] == {"k": "v"}
     assert call["db_role"] == "debug"
     assert call["run_id"] == "t"
-    # No 'tickers' key — the standard Step3 public API is unmodified.
-    assert "tickers" not in call
+    # No legacy strategy_config / strategy_config_id kwargs.
+    assert "strategy_config" not in call
+    assert "strategy_config_id" not in call
 
 
 def test_scoped_step3_proxy_exposes_selected_tickers():
-    proxy = _ScopedStep3ScreeningProxy(object(), ["NVDA", "AMD"])
+    proxy = _ScopedStep3UniversalProxy(object(), ["NVDA", "AMD"])
     assert proxy.selected_tickers == ["NVDA", "AMD"]
 
 
 def test_scoped_step3_proxy_returns_real_engine_result():
     real = _FakeRealStep3Engine()
-    proxy = _ScopedStep3ScreeningProxy(real, ["A"])
-    result = proxy.screen(RUN_DATE, {}, "n", "debug")
+    proxy = _ScopedStep3UniversalProxy(real, ["A"])
+    result = proxy.run(RUN_DATE, "setup_breakout_v1", {}, "debug")
     assert result.status == service_result.STATUS_SUCCESS
 
 
@@ -390,8 +393,8 @@ def test_inverted_step_range_rejected():
     assert FakeOrchestrator.instances == []
 
 
-def test_empty_strategy_names_rejected():
-    assert make_controller().run(_plan(strategy_names=())).status == service_result.STATUS_FAILED
+def test_empty_setup_types_rejected():
+    assert make_controller().run(_plan(setup_types=())).status == service_result.STATUS_FAILED
 
 
 def test_unknown_preset_rejected():
@@ -400,8 +403,8 @@ def test_unknown_preset_rejected():
     assert FakeOrchestrator.instances == []
 
 
-def test_unknown_strategy_rejected():
-    assert make_controller().run(_plan(strategy_names=("ghost",))).status == service_result.STATUS_FAILED
+def test_invalid_setup_type_rejected():
+    assert make_controller().run(_plan(setup_types=("ghost",))).status == service_result.STATUS_FAILED
 
 
 def test_oversized_watchlist_rejected():
@@ -457,11 +460,11 @@ def test_indicator_validation_bridge_steps_are_noops():
     init = FakeOrchestrator.instances[-1].init_kwargs
     for kwarg in ("ingestion_engine", "validation_engine", "mutation_engine"):
         assert isinstance(init[kwarg], _NoOpStepEngine), kwarg
-    assert isinstance(init["screening_engine"], _NoOpStepEngine)  # after end
+    assert isinstance(init["eligibility_engine"], _NoOpStepEngine)  # step3 after end
 
 
 # --------------------------------------------------------------------------- #
-# Ticker-scope — config_tuning_test (step3_screening start).
+# Ticker-scope — config_tuning_test (step3_universal_eligibility start).
 # The Step3 engine must be FakeScopedStep3Engine (from the injected factory)
 # with the sampled ticker list, proving it evaluates only those tickers instead
 # of all daily_features_current rows.
@@ -472,7 +475,7 @@ def test_config_tuning_injects_scoped_step3_engine():
     controller = make_controller(provider=prov)
     controller.run_preset("config_tuning_test", RUN_DATE)
 
-    s3 = FakeOrchestrator.instances[-1].init_kwargs["screening_engine"]
+    s3 = FakeOrchestrator.instances[-1].init_kwargs["eligibility_engine"]
     assert isinstance(s3, FakeScopedStep3Engine), type(s3)
     assert len(s3.selected_tickers) == 500             # preset cap
     assert s3.selected_tickers == sorted(s3.selected_tickers)
@@ -483,7 +486,7 @@ def test_config_tuning_step3_tickers_scoped_not_all_db():
     prov = FakeProvider([f"S{i}" for i in range(10)])
     controller = make_controller(provider=prov)
     controller.run_preset("config_tuning_test", RUN_DATE)
-    s3 = FakeOrchestrator.instances[-1].init_kwargs["screening_engine"]
+    s3 = FakeOrchestrator.instances[-1].init_kwargs["eligibility_engine"]
     assert len(s3.selected_tickers) == 10
     assert set(s3.selected_tickers) == {f"S{i}" for i in range(10)}
 
@@ -494,8 +497,8 @@ def test_config_tuning_step3_tickers_are_deterministic():
     c2 = make_controller(provider=FakeProvider(syms[:]))
     c1.run_preset("config_tuning_test", RUN_DATE, sample_count=5)
     c2.run_preset("config_tuning_test", RUN_DATE, sample_count=5)
-    t1 = FakeOrchestrator.instances[-2].init_kwargs["screening_engine"].selected_tickers
-    t2 = FakeOrchestrator.instances[-1].init_kwargs["screening_engine"].selected_tickers
+    t1 = FakeOrchestrator.instances[-2].init_kwargs["eligibility_engine"].selected_tickers
+    t2 = FakeOrchestrator.instances[-1].init_kwargs["eligibility_engine"].selected_tickers
     assert t1 == t2
 
 
@@ -506,8 +509,8 @@ def test_config_tuning_bridge_steps_are_noops():
     for kwarg in ("ingestion_engine", "validation_engine",
                   "mutation_engine", "feature_engine"):
         assert isinstance(init[kwarg], _NoOpStepEngine), kwarg
-    # Step4, Step5 are in range — real engines.
-    assert init["analysis_engine"] is None
+    # Step4 (setup_validation) and Step5 are in range — real engines (None = orchestrator default).
+    assert init["setup_validation_engine"] is None
     assert init["proposal_engine"] is None
 
 
@@ -516,7 +519,7 @@ def test_config_tuning_selected_tickers_capped():
     prov = FakeProvider([f"T{i:03d}" for i in range(600)])
     controller = make_controller(provider=prov)
     controller.run_preset("config_tuning_test", RUN_DATE)
-    s3 = FakeOrchestrator.instances[-1].init_kwargs["screening_engine"]
+    s3 = FakeOrchestrator.instances[-1].init_kwargs["eligibility_engine"]
     assert len(s3.selected_tickers) == 500
 
 
@@ -530,7 +533,7 @@ def test_full_pipeline_no_scoped_engines():
         controller.run_preset(name, RUN_DATE)
         init = FakeOrchestrator.instances[-1].init_kwargs
         assert init["feature_engine"] is None, name
-        assert init["screening_engine"] is None, name
+        assert init["eligibility_engine"] is None, name
 
 
 # --------------------------------------------------------------------------- #
@@ -632,73 +635,115 @@ def test_metadata_watchlist_recorded():
 
 
 # --------------------------------------------------------------------------- #
-# Config id fix (M21 review fix #1)
+# Setup-mode config service integration (replaces legacy strategy-config tests)
 # --------------------------------------------------------------------------- #
-class FakeConfigSvcDebug:
-    """Minimal ConfigService fake: returns real DB-style config ids."""
+class FakeConfigSvcSetupMode:
+    """Minimal ConfigService fake returning setup-mode DB-style config ids."""
 
-    def get_active_strategy_configs(self, db_role):
+    def get_all_active_setup_configs(self, db_role):
         from app.utils.service_result import ServiceResult
         from app.utils import service_result as sr
         return ServiceResult(
             sr.STATUS_SUCCESS,
             "r",
             metadata={
-                "configs": {"normal": {"k": 1}},
-                "configs_by_strategy": {"normal": {"k": 1}},
-                "configs_by_id": {"seed_strategy_debug_normal_v1": {"k": 1}},
-                "config_ids_by_strategy": {"normal": "seed_strategy_debug_normal_v1"},
-                "config_ids": ["seed_strategy_debug_normal_v1"],
+                "configs_by_type": {
+                    "breakout":           {"config_id": "setup_breakout_v1"},
+                    "pullback":           {"config_id": "setup_pullback_v1"},
+                    "trend_continuation": {"config_id": "setup_trend_continuation_v1"},
+                    "consolidation_base": {"config_id": "setup_consolidation_base_v1"},
+                },
+                "configs_by_id": {
+                    "setup_breakout_v1":           {"config_id": "setup_breakout_v1"},
+                    "setup_pullback_v1":           {"config_id": "setup_pullback_v1"},
+                    "setup_trend_continuation_v1": {"config_id": "setup_trend_continuation_v1"},
+                    "setup_consolidation_base_v1": {"config_id": "setup_consolidation_base_v1"},
+                },
             },
         )
 
-    def seed_default_strategy_configs(self, db_role):
+    def seed_default_setup_configs(self, db_role):
         from app.utils.service_result import ServiceResult
         from app.utils import service_result as sr
         return ServiceResult(sr.STATUS_SUCCESS, "r", metadata={"seeded": 0})
 
 
-def test_debug_selected_strategy_uses_real_config_id() -> None:
-    """Configs passed to orchestrator must be keyed by real DB config_id (fix #1)."""
-    received_keys: list[str] = []
-
-    class _CapturingOrchestrator:
-        def __init__(self, **kwargs):
-            self._kw = kwargs
-            self._received = None
-
-        def run(self, **kwargs):
-            self._received = kwargs.get("strategy_configs", {})
-            received_keys.extend(self._received.keys())
-            from app.utils.service_result import ServiceResult
-            from app.utils import service_result as sr
-            return ServiceResult(
-                sr.STATUS_SUCCESS,
-                "r",
-                metadata={
-                    "steps_completed": [],
-                    "warnings": [],
-                    "run_id": "r",
-                    "run_date": str(RUN_DATE),
-                    "run_type": "debug",
-                    "db_role": "debug",
-                    "failed_step": None,
-                    "error": None,
-                },
-            )
-
+def test_setup_config_resolver_uses_db_configs() -> None:
+    """_resolve_setup_configs loads from DB when no injection provided."""
     controller = DebugModeController(
         db_manager=object(),
         provider=FakeProvider(["AAA"]),
-        orchestrator_factory=_CapturingOrchestrator,
+        orchestrator_factory=FakeOrchestrator,
         scoped_feature_engine_factory=lambda db, t: FakeScopedFeatureEngine(t),
         scoped_screening_engine_factory=lambda db, t: FakeScopedStep3Engine(t),
-        config_service=FakeConfigSvcDebug(),
+        config_service=FakeConfigSvcSetupMode(),
     )
-    plan = _plan(strategy_names=("normal",))
+    result = controller._resolve_setup_configs(
+        ("breakout", "pullback")
+    )
+    assert isinstance(result, dict), result
+    assert "breakout" in result
+    assert "pullback" in result
+    assert "trend_continuation" not in result  # not requested
+
+
+def test_setup_config_resolver_unknown_type_returns_error() -> None:
+    """_resolve_setup_configs returns error string for unknown setup_type."""
+    controller = DebugModeController(
+        db_manager=object(),
+        provider=FakeProvider(["AAA"]),
+        orchestrator_factory=FakeOrchestrator,
+        scoped_feature_engine_factory=lambda db, t: FakeScopedFeatureEngine(t),
+        scoped_screening_engine_factory=lambda db, t: FakeScopedStep3Engine(t),
+        config_service=FakeConfigSvcSetupMode(),
+    )
+    result = controller._resolve_setup_configs(("ghost_strategy",))
+    assert isinstance(result, str)
+    assert "ghost_strategy" in result
+
+
+def test_orchestrator_receives_no_setup_configs_param() -> None:
+    """orchestrator.run() is called without setup_configs= (self-loads from DB)."""
+    received_run_kwargs: dict = {}
+
+    class _CapturingOrchestrator:
+        def __init__(self, **kwargs):
+            pass
+
+        def run(self, **kwargs):
+            received_run_kwargs.update(kwargs)
+            from app.utils.service_result import ServiceResult
+            from app.utils import service_result as sr
+            return ServiceResult(sr.STATUS_SUCCESS, "r", metadata={})
+
+    controller = make_controller(
+        provider=FakeProvider(["AAA"]),
+    )
+    # Replace orchestrator factory with capturing version
+    controller._orchestrator_factory = _CapturingOrchestrator
+    plan = _plan(setup_types=("breakout",))
     result = controller.run(plan)
     assert result.is_ok(), result.errors
-    # The key passed to the orchestrator must be the real DB config_id.
-    assert received_keys == ["seed_strategy_debug_normal_v1"], (
-        f"expected real config_id, got {received_keys}"
+    # orchestrator.run() must NOT receive strategy_configs or setup_configs —
+    # the orchestrator self-loads from DB.
+    assert "strategy_configs" not in received_run_kwargs
+    assert "setup_configs" not in received_run_kwargs
+
+
+def test_consolidation_base_setup_type_accepted() -> None:
+    """consolidation_base is a valid setup type (not conservative_consolidation)."""
+    result = make_controller().run(_plan(setup_types=("consolidation_base",)))
+    assert result.is_ok(), result.errors
+    dbg = result.metadata["debug"]
+    assert "consolidation_base" in dbg["setup_types"]
+
+
+def test_debug_metadata_records_setup_types() -> None:
+    """debug metadata must record setup_types, not strategy_names."""
+    result = make_controller().run(
+        _plan(setup_types=("breakout", "trend_continuation"))
     )
+    dbg = result.metadata["debug"]
+    assert "setup_types" in dbg
+    assert set(dbg["setup_types"]) == {"breakout", "trend_continuation"}
+    assert "strategy_names" not in dbg

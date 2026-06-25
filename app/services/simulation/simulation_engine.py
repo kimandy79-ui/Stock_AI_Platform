@@ -266,48 +266,52 @@ _INSERT_SIM_FOLD: Final[str] = (
 
 _INSERT_SIM_STEP3: Final[str] = (
     "INSERT INTO sim_step3_candidates "
-    "(candidate_id, sim_run_id, fold_id, strategy_config_id, ticker, "
-    " signal_date, screening_score, passed_hard_filters, "
-    " hard_filter_fail_reasons, soft_score_components, created_at) "
-    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CAST(now() AS TIMESTAMP))"
+    "(candidate_id, sim_run_id, fold_id, ticker, signal_date, "
+    " eligibility_score, passed_eligibility, routing_status, "
+    " routing_fail_reason, eligibility_fail_reasons, routed_setup_types, "
+    " created_at) "
+    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CAST(now() AS TIMESTAMP))"
 )
 
 _INSERT_SIM_STEP4: Final[str] = (
     "INSERT INTO sim_step4_analysis "
-    "(analysis_id, candidate_id, sim_run_id, fold_id, strategy_config_id, "
-    " ticker, signal_date, setup_type, setup_score, estimated_rr, "
-    " stop_price_raw, target_price_raw, created_at) "
-    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CAST(now() AS TIMESTAMP))"
+    "(analysis_id, candidate_id, sim_run_id, fold_id, setup_config_id, "
+    " ticker, signal_date, setup_type, setup_score, setup_passed, "
+    " estimated_rr, target_is_structural, stop_price_raw, target_price_raw, "
+    " created_at) "
+    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CAST(now() AS TIMESTAMP))"
 )
 
 _INSERT_SIM_STEP5: Final[str] = (
     "INSERT INTO sim_step5_proposals "
-    "(proposal_id, sim_run_id, fold_id, strategy_config_id, ticker, "
-    " signal_date, proposal_score_raw, diversity_penalty, "
-    " proposal_score_final, rank_position, selected_top_n, raw_rank, "
-    " diversified_rank, in_raw_top_n, in_diversified_top_n, "
-    " diversification_applied, rejection_reason, created_at) "
-    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
+    "(proposal_id, sim_run_id, fold_id, setup_config_id, ticker, "
+    " signal_date, setup_type, setup_score, risk_label, disposition, "
+    " proposal_score_raw, diversity_penalty, proposal_score_final, "
+    " raw_rank, diversified_rank, in_raw_top_n, in_diversified_top_n, "
+    " diversification_applied, selected_top_n, selected_flag, "
+    " rejection_reason, created_at) "
+    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
     " CAST(now() AS TIMESTAMP))"
 )
 
 _INSERT_SIM_OUTCOME: Final[str] = (
     "INSERT INTO sim_signal_outcomes "
     "(outcome_id, sim_run_id, fold_id, proposal_id, ticker, "
-    " strategy_config_id, signal_date, entry_date, entry_price_raw, "
-    " entry_price_sim, return_5bd_pct, return_10bd_pct, return_20bd_pct, "
+    " setup_config_id, setup_type, risk_label, signal_date, entry_date, "
+    " entry_price_raw, entry_price_sim, stop_price_raw, target_price_raw, "
+    " list_membership, return_5bd_pct, return_10bd_pct, return_20bd_pct, "
     " return_40bd_pct, mfe_40bd_pct, mae_40bd_pct, realized_r_multiple, "
-    " list_membership, cross_fold_outcome, outcome_status, calculated_at) "
-    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
-    " CAST(now() AS TIMESTAMP))"
+    " cross_fold_outcome, outcome_status, calculated_at) "
+    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
+    " ?, ?, CAST(now() AS TIMESTAMP))"
 )
 
 _INSERT_SIM_COMPARISON: Final[str] = (
     "INSERT INTO sim_config_comparisons "
-    "(comparison_id, sim_run_id, config_id, horizon_bd, expectancy, win_rate, "
-    " avg_win, avg_loss, profit_factor, max_drawdown_pct, "
-    " resolved_outcomes_pct, list_type, created_at) "
-    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CAST(now() AS TIMESTAMP))"
+    "(comparison_id, sim_run_id, config_id, setup_type, risk_label, "
+    " horizon_bd, expectancy, win_rate, avg_win, avg_loss, profit_factor, "
+    " max_drawdown_pct, resolved_outcomes_pct, list_type, created_at) "
+    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CAST(now() AS TIMESTAMP))"
 )
 
 
@@ -488,19 +492,31 @@ def select_config_for_fold(
 # --------------------------------------------------------------------------- #
 # Simulation engine.
 # --------------------------------------------------------------------------- #
+# Sentinel returned by _run_with_connection when replay is not yet supported.
+_REPLAY_UNSUPPORTED: Final[str] = (
+    "UNSUPPORTED: setup-mode simulation replay (step3_universal_eligibility / "
+    "step4_setup_validation_engine) is not yet implemented in SimulationEngine. "
+    "The engine accepts mode/config validation and writes sim_runs metadata, "
+    "but returns failed before any replay. "
+    "Legacy step3_screening / step4_analysis_engine are NOT executed."
+)
+
+
 class SimulationEngine:
-    """Replay Step 3/4/5 + outcomes for a date range into ``sim_*`` tables.
+    """Setup-mode simulation engine (replay phase: pending).
+
+    Validation, walk-forward fold planning, metric computation, and config
+    comparison helpers are fully functional.  The replay phase
+    (``_replay_date`` / ``_run_with_connection`` past DB init) is guarded and
+    returns a clear ``failed`` ServiceResult rather than executing the legacy
+    ``step3_screening`` / ``step4_analysis_engine`` path.
 
     The optional ``db_manager`` argument exists only for test injection; when
     ``None`` the approved :mod:`app.database.duckdb_manager` is used.
     """
 
     def __init__(self, db_manager: _DbManagerLike | None = None) -> None:
-        # ``db_manager`` and the frozen Step 3/4/5 engines are resolved lazily so
-        # constructing a ``SimulationEngine`` (e.g. to exercise validation) never
-        # pulls in ``duckdb`` / ``polars``. ``None`` -> approved duckdb_manager.
         self._db_override: _DbManagerLike | None = db_manager
-        self._engines_cache: dict[str, Any] | None = None
 
     def _db(self) -> Any:
         """Resolve the DB manager (injected override or the approved manager)."""
@@ -510,29 +526,13 @@ class SimulationEngine:
 
         return duckdb_manager
 
-    def _engines(self) -> dict[str, Any]:
-        """Lazily import + cache the frozen Step 3/4/5 engines and modules."""
-        if self._engines_cache is None:
-            from app.services.analysis import step4_analysis_engine as step4
-            from app.services.analysis.step4_analysis_engine import (
-                Step4AnalysisEngine,
-            )
-            from app.services.outcomes import outcome_queue as oq
-            from app.services.proposal.step5_proposal_engine import (
-                Step5ProposalEngine,
-            )
-            from app.services.screening import step3_screening as step3
-            from app.services.screening.step3_screening import Step3ScreeningEngine
-
-            self._engines_cache = {
-                "step3": step3,
-                "step4": step4,
-                "oq": oq,
-                "eng3": Step3ScreeningEngine(),
-                "eng4": Step4AnalysisEngine(),
-                "eng5": Step5ProposalEngine(),
-            }
-        return self._engines_cache
+    def _slippage_bps(self, config: dict) -> float:
+        """Extract and validate slippage_bps from a setup config dict."""
+        from app.services.outcomes.outcome_queue import _validate_config, _ConfigError
+        try:
+            return _validate_config(config)
+        except _ConfigError as exc:
+            raise _ValidationError(str(exc)) from exc
 
     # ------------------------------------------------------------------ #
     # Public API.
@@ -544,7 +544,7 @@ class SimulationEngine:
         start_date: date,
         end_date: date,
         config_ids: list[str],
-        strategy_configs: dict[str, dict],
+        setup_configs: dict[str, dict],
         db_role: str = "simulation",
         run_id: str | None = None,
     ) -> ServiceResult:
@@ -569,7 +569,7 @@ class SimulationEngine:
 
         # --- pre-DB validation (no I/O). ---------------------------------- #
         try:
-            self._validate(mode, start_date, end_date, config_ids, strategy_configs, db_role)
+            self._validate(mode, start_date, end_date, config_ids, setup_configs, db_role)
         except _ValidationError as exc:
             log.error("simulation run failed validation: %s", exc)
             return self._failed_no_run(run_id, mode, sim_name, start_iso, end_iso, config_ids, str(exc))
@@ -594,7 +594,7 @@ class SimulationEngine:
                 start_date=start_date,
                 end_date=end_date,
                 config_ids=config_ids,
-                strategy_configs=strategy_configs,
+                setup_configs=setup_configs,
             )
         finally:
             connection.close()
@@ -608,7 +608,7 @@ class SimulationEngine:
         start_date: date,
         end_date: date,
         config_ids: list[str],
-        strategy_configs: dict[str, dict],
+        setup_configs: dict[str, dict],
         db_role: str,
     ) -> None:
         """Validate every pre-DB precondition, raising :class:`_ValidationError`."""
@@ -623,12 +623,12 @@ class SimulationEngine:
             )
         if not config_ids:
             raise _ValidationError("config_ids must be non-empty")
-        if not isinstance(strategy_configs, dict):
-            raise _ValidationError("strategy_configs must be a dict")
+        if not isinstance(setup_configs, dict):
+            raise _ValidationError("setup_configs must be a dict")
         for cid in config_ids:
-            if cid not in strategy_configs:
+            if cid not in setup_configs:
                 raise _ValidationError(
-                    f"config_id {cid!r} has no entry in strategy_configs"
+                    f"config_id {cid!r} has no entry in setup_configs"
                 )
         if start_date > end_date:
             raise _ValidationError(
@@ -650,7 +650,7 @@ class SimulationEngine:
         start_date: date,
         end_date: date,
         config_ids: list[str],
-        strategy_configs: dict[str, dict],
+        setup_configs: dict[str, dict],
     ) -> ServiceResult:
         start_iso = start_date.isoformat()
         end_iso = end_date.isoformat()
@@ -685,7 +685,13 @@ class SimulationEngine:
             folds_count = len(folds)
             fold_ids = {f["fold_number"]: str(uuid.uuid4()) for f in folds}
 
-            # --- all replay / write work in one transaction. ----------------- #
+            # ── Replay guard (setup-mode engines not yet wired) ────────────── #
+            # Legacy step3_screening / step4_analysis_engine must NOT execute.
+            # Return failed before any replay work; sim_run row status → failed.
+            connection.execute(_UPDATE_SIM_RUN_FAILED, [_REPLAY_UNSUPPORTED, run_id])
+            raise _ValidationError(_REPLAY_UNSUPPORTED)
+
+            # --- all replay / write work in one transaction. ----------------- #  # noqa: unreachable
             connection.execute("BEGIN TRANSACTION")
             tx_started = True
 
@@ -698,9 +704,8 @@ class SimulationEngine:
             all_outcomes: list[dict[str, Any]] = []
 
             for config_id in config_ids:
-                config = strategy_configs[config_id]
-                parsed = self._parse_all_configs(config)
-                slippage_bps = self._engines()["oq"]._validate_config(config)
+                config = setup_configs[config_id]
+                slippage_bps = self._slippage_bps(config)
                 sector_industry = self._sector_industry_map(connection)
 
                 for sim_date in sim_dates:
@@ -713,7 +718,7 @@ class SimulationEngine:
                         fold_id=fold_id,
                         config_id=config_id,
                         config=config,
-                        parsed=parsed,
+                        parsed={},
                         sim_date=sim_date,
                         feature_version=feature_version,
                         sector_industry=sector_industry,
@@ -802,15 +807,11 @@ class SimulationEngine:
         )
 
     # ------------------------------------------------------------------ #
-    # Config parsing (reuses frozen parsers; fail fast inside the run).
+    # Config validation helpers.
     # ------------------------------------------------------------------ #
-    def _parse_all_configs(self, config: dict) -> dict[str, Any]:
-        """Validate + extract the Step 3/4/5 config blocks via frozen parsers."""
-        eng = self._engines()
-        s3 = eng["eng3"]._parse_config(config)  # (min_price, min_adv, min_rvol, weights)
-        s4 = eng["eng4"]._parse_config(config)
-        s5 = eng["eng5"]._parse_config(config)
-        return {"s3": s3, "s4": s4, "s5": s5}
+    # _parse_all_configs removed: it imported legacy step3_screening /
+    # step4_analysis_engine engines which must not run in setup-mode.
+    # Config-level validation is now done by _slippage_bps() only.
 
     # ------------------------------------------------------------------ #
     # Read helpers.
@@ -836,7 +837,7 @@ class SimulationEngine:
         return None
 
     # ------------------------------------------------------------------ #
-    # Per-date Step 3/4/5 replay (reuses frozen scoring; writes sim tables).
+    # Per-date Step 3/4/5 replay — UNSUPPORTED in current release.
     # ------------------------------------------------------------------ #
     def _replay_date(
         self,
@@ -851,164 +852,18 @@ class SimulationEngine:
         feature_version: str | None,
         sector_industry: dict[str, tuple[Any, Any]],
     ) -> dict[str, Any]:
-        """Replay one (config, sim_date) into the sim tables; return summary."""
-        empty = {
-            "step3_rows": 0,
-            "step4_rows": 0,
-            "step5_rows": 0,
-            "proposals": [],
-            "stop_by_ticker": {},
-        }
-        if feature_version is None:
-            return empty
+        """Stub — setup-mode replay not yet implemented.
 
-        import polars as pl
+        Legacy ``step3_screening`` / ``step4_analysis_engine`` must not be
+        called.  The replay guard in ``_run_with_connection`` prevents this
+        method from being reached; this stub exists only for static analysis
+        and test inspection.
+        """
+        raise _ValidationError(_REPLAY_UNSUPPORTED)
 
-        eng = self._engines()
-        step3 = eng["step3"]
-        eng3 = eng["eng3"]
-        eng4 = eng["eng4"]
-        eng5 = eng["eng5"]
+        # _read_step4_inputs removed: it called legacy step4_analysis_engine.
 
-        # --- Step 3: screen the sim-scoped feature frame. ----------------- #
-        min_price, min_adv, min_rvol, weights = parsed["s3"]
-        screening_rows = connection.execute(
-            _SELECT_SCREENING_INPUT, [sim_date, sim_date, sim_date, feature_version]
-        ).fetchall()
-        if not screening_rows:
-            return empty
-
-        frame = pl.DataFrame(screening_rows, schema=step3._INPUT_SCHEMA, orient="row")
-        scored = eng3._evaluate(frame, min_price, min_adv, min_rvol, weights)
-        s3_rows = eng3._build_rows(scored, run_id, config_id)
-
-        screening_by_candidate: dict[str, float | None] = {}
-        for r in s3_rows:
-            screening_by_candidate[r["candidate_id"]] = r["screening_score"]
-            connection.execute(
-                _INSERT_SIM_STEP3,
-                [
-                    r["candidate_id"], run_id, fold_id, config_id, r["ticker"],
-                    r["signal_date"], r["screening_score"], r["passed"],
-                    r["hard_filter_fail_reasons"], r["soft_score_components"],
-                ],
-            )
-
-        passed = [
-            {"candidate_id": r["candidate_id"], "ticker": r["ticker"]}
-            for r in s3_rows
-            if r["passed"]
-        ]
-        if not passed:
-            return {**empty, "step3_rows": len(s3_rows)}
-
-        # --- Step 4: setup analysis on passing candidates. ---------------- #
-        feature_by_ticker, recent_lows, history_ok = self._read_step4_inputs(
-            connection, passed, sim_date, feature_version
-        )
-        s4_rows = eng4._build_rows(
-            passed, feature_by_ticker, recent_lows, history_ok,
-            parsed["s4"], run_id, config_id, sim_date,
-        )
-        stop_by_ticker: dict[str, float | None] = {}
-        for r in s4_rows:
-            stop_by_ticker[r["ticker"]] = _f(r["stop_price_raw"])
-            connection.execute(
-                _INSERT_SIM_STEP4,
-                [
-                    r["analysis_id"], r["candidate_id"], run_id, fold_id, config_id,
-                    r["ticker"], r["signal_date"], r["setup_type"], r["setup_score"],
-                    r["estimated_rr"], r["stop_price_raw"], r["target_price_raw"],
-                ],
-            )
-
-        if not s4_rows:
-            return {**empty, "step3_rows": len(s3_rows)}
-
-        # --- Step 5: proposal scoring / ranking / diversification. -------- #
-        analyses = []
-        for r in s4_rows:
-            sector, industry = sector_industry.get(r["ticker"], (None, None))
-            analyses.append(
-                {
-                    "analysis_id": r["analysis_id"],
-                    "candidate_id": r["candidate_id"],
-                    "ticker": r["ticker"],
-                    "setup_score": r["setup_score"],
-                    "timing_score": r["timing_score"],
-                    "estimated_rr": r["estimated_rr"],
-                    "screening_score": screening_by_candidate.get(r["candidate_id"]),
-                    "sector": sector,
-                    "industry": industry,
-                }
-            )
-        s5_rows = eng5._build_rows(
-            analyses, parsed["s5"], run_id, config_id, sim_date
-        )
-        for r in s5_rows:
-            connection.execute(
-                _INSERT_SIM_STEP5,
-                [
-                    r["proposal_id"], run_id, fold_id, config_id, r["ticker"],
-                    r["signal_date"], r["proposal_score_raw"], r["diversity_penalty"],
-                    r["proposal_score_final"], r["rank_position"], r["selected_top_n"],
-                    r["raw_rank"], r["diversified_rank"], r["in_raw_top_n"],
-                    r["in_diversified_top_n"], r["diversification_applied"],
-                    r["rejection_reason"],
-                ],
-            )
-
-        return {
-            "step3_rows": len(s3_rows),
-            "step4_rows": len(s4_rows),
-            "step5_rows": len(s5_rows),
-            "proposals": s5_rows,
-            "stop_by_ticker": stop_by_ticker,
-        }
-
-    def _read_step4_inputs(
-        self,
-        connection: Any,
-        passed: list[dict[str, Any]],
-        sim_date: date,
-        feature_version: str | None,
-    ) -> tuple[dict[str, dict[str, Any]], dict[str, float | None], dict[str, bool]]:
-        """Read the Step 4 feature/price/low/history inputs (sim-scoped)."""
-        step4 = self._engines()["step4"]
-        tickers = {c["ticker"] for c in passed}
-        fp_rows = connection.execute(
-            _SELECT_FEATURES_PRICES,
-            [sim_date, sim_date, sim_date, feature_version],
-        ).fetchall()
-        fp_cols = (
-            "ticker", "ema20", "ema50", "ema200", "ema_alignment_score",
-            "rsi14", "roc20", "rvol20", "atr14", "breakout_proximity",
-            "pullback_from_recent_high_pct", "consolidation_score",
-            "sector_relative_strength", "days_to_earnings_bd",
-            "macro_event_risk_flag", "close_raw", "close_adj",
-            "open_raw", "high_raw", "low_raw",
-        )
-        feature_by_ticker: dict[str, dict[str, Any]] = {}
-        for raw in fp_rows:
-            record = dict(zip(fp_cols, raw))
-            if record["ticker"] in tickers:
-                feature_by_ticker[record["ticker"]] = record
-
-        recent_lows: dict[str, float | None] = {}
-        history_ok: dict[str, bool] = {}
-        for ticker in tickers:
-            low_row = connection.execute(
-                _SELECT_RECENT_20D_LOW, [ticker, sim_date]
-            ).fetchone()
-            recent_lows[ticker] = _f(low_row[0]) if low_row else None
-            prior_rows = connection.execute(
-                _SELECT_PRIOR_10,
-                [sim_date, feature_version, ticker, sim_date],
-            ).fetchall()
-            history_ok[ticker] = step4._trend_resume_history_ok(prior_rows)
-        return feature_by_ticker, recent_lows, history_ok
-
-    # ------------------------------------------------------------------ #
+        # ------------------------------------------------------------------ #
     # Outcomes (Module 16 §64 rules adapted to simulation tables).
     # ------------------------------------------------------------------ #
     def _build_outcomes(
@@ -1077,11 +932,16 @@ class SimulationEngine:
                     "fold_id": fold_id,
                     "proposal_id": p["proposal_id"],
                     "ticker": ticker,
-                    "strategy_config_id": config_id,
+                    "setup_config_id": config_id,
+                    "setup_type": p.get("setup_type"),
+                    "risk_label": p.get("risk_label"),
                     "signal_date": sim_date,
                     "entry_date": entry_date,
                     "entry_price_raw": entry_price_raw,
                     "entry_price_sim": entry_price_sim,
+                    "stop_price_raw": stop_by_ticker.get(ticker),
+                    "target_price_raw": p.get("target_price_raw"),
+                    "list_membership": membership,
                     "return_5bd_pct": returns[5],
                     "return_10bd_pct": returns[10],
                     "return_20bd_pct": returns[20],
@@ -1089,7 +949,6 @@ class SimulationEngine:
                     "mfe_40bd_pct": mfe_40,
                     "mae_40bd_pct": mae_40,
                     "realized_r_multiple": realized_r,
-                    "list_membership": membership,
                     "cross_fold_outcome": cross_fold,
                     "outcome_status": status,
                 }
@@ -1100,11 +959,15 @@ class SimulationEngine:
     def _outcome_params(o: dict[str, Any]) -> list[Any]:
         return [
             o["outcome_id"], o["sim_run_id"], o["fold_id"], o["proposal_id"],
-            o["ticker"], o["strategy_config_id"], o["signal_date"], o["entry_date"],
-            o["entry_price_raw"], o["entry_price_sim"], o["return_5bd_pct"],
-            o["return_10bd_pct"], o["return_20bd_pct"], o["return_40bd_pct"],
+            o["ticker"], o["setup_config_id"], o["setup_type"], o["risk_label"],
+            o["signal_date"], o["entry_date"],
+            o["entry_price_raw"], o["entry_price_sim"],
+            o["stop_price_raw"], o["target_price_raw"],
+            o["list_membership"],
+            o["return_5bd_pct"], o["return_10bd_pct"],
+            o["return_20bd_pct"], o["return_40bd_pct"],
             o["mfe_40bd_pct"], o["mae_40bd_pct"], o["realized_r_multiple"],
-            o["list_membership"], o["cross_fold_outcome"], o["outcome_status"],
+            o["cross_fold_outcome"], o["outcome_status"],
         ]
 
     @staticmethod
@@ -1204,7 +1067,7 @@ class SimulationEngine:
                 continue
             if o["list_membership"] not in (LIST_DIVERSIFIED_ONLY, LIST_BOTH):
                 continue
-            by_config.setdefault(o["strategy_config_id"], []).append(
+            by_config.setdefault(o["setup_config_id"], []).append(
                 (o["signal_date"], o["return_40bd_pct"])
             )
         metrics: dict[str, dict[str, float | None]] = {}
@@ -1247,7 +1110,7 @@ class SimulationEngine:
                 group = sorted(
                     (
                         o for o in relevant
-                        if o["strategy_config_id"] == config_id
+                        if o["setup_config_id"] == config_id
                         and o["list_membership"] in memberships
                     ),
                     key=lambda o: o["signal_date"],
@@ -1258,7 +1121,9 @@ class SimulationEngine:
                     connection.execute(
                         _INSERT_SIM_COMPARISON,
                         [
-                            str(uuid.uuid4()), run_id, config_id, horizon,
+                            str(uuid.uuid4()), run_id, config_id,
+                            None, None,  # setup_type, risk_label: aggregate comparison row
+                            horizon,
                             m["expectancy"], m["win_rate"], m["avg_win"],
                             m["avg_loss"], m["profit_factor"], m["max_drawdown_pct"],
                             m["resolved_outcomes_pct"], list_type,

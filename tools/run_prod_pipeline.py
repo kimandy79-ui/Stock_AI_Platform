@@ -114,7 +114,33 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         default=None,
         help="Optional step name to resume from (must be a valid STEP_NAME).",
     )
+    parser.add_argument(
+        "--skip-earnings-refresh",
+        action="store_true",
+        dest="skip_earnings_refresh",
+        help="Skip the pre-pipeline earnings_calendar refresh (useful when offline or already refreshed).",
+    )
     return parser.parse_args(argv)
+
+
+def _refresh_earnings(skip: bool) -> None:
+    """Best-effort earnings_calendar refresh before the pipeline runs.
+
+    Failures are logged as warnings and never abort the pipeline — the feature
+    engine will simply use whatever data is already in earnings_calendar.
+    """
+    if skip:
+        logger.info("earnings refresh skipped (--skip-earnings-refresh)")
+        return
+    try:
+        import tools.backfill_earnings_calendar as _bec
+        exit_code = _bec.run(db_role="prod", tickers=None)
+        if exit_code == 0:
+            logger.info("earnings_calendar refresh complete")
+        else:
+            logger.warning("earnings_calendar refresh finished with errors — pipeline will continue")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("earnings_calendar refresh failed (%s) — pipeline will continue", exc)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -125,6 +151,8 @@ def main(argv: list[str] | None = None) -> int:
         f"Starting prod pipeline: run_date={args.run_date} run_type={args.run_type} "
         f"force_rerun={args.force_rerun} resume_from={args.resume_from} db_role=prod"
     )
+
+    _refresh_earnings(skip=getattr(args, "skip_earnings_refresh", False))
 
     try:
         orchestrator = _build_orchestrator()

@@ -835,6 +835,45 @@ class Backfiller:
         if schema_err is not None:
             return self._result(STATUS_FAILED, run_id, errors=[schema_err])
 
+        # 1b. TRADING-DATE GUARD: compute expected NYSE dates immediately after
+        #     schema check and before ANY write (universe snapshot, benchmark
+        #     load, stock ingestion, downstream modules).
+        #     A non-trading date requested in isolation is rejected cleanly.
+        #     A mixed range (some trading + some non-trading) proceeds using
+        #     only the trading dates.
+        try:
+            _guard_expected = self._get_expected_dates(start_date, end_date)
+        except RuntimeError as _cal_err:
+            return self._result(
+                STATUS_FAILED,
+                run_id,
+                errors=[str(_cal_err)],
+                metadata={
+                    "mode": MODE_BACKFILL,
+                    "start_date": start_date.isoformat(),
+                    "end_date": end_date.isoformat(),
+                    "skipped_reason": "calendar_unavailable",
+                },
+            )
+        if not _guard_expected:
+            msg = (
+                "No NYSE trading dates in requested range "
+                f"({start_date} – {end_date}); no DB writes performed."
+            )
+            print(f"WARNING: {msg}")
+            return self._result(
+                STATUS_SUCCESS_WITH_WARNINGS,
+                run_id,
+                warnings=[msg],
+                metadata={
+                    "mode": MODE_BACKFILL,
+                    "start_date": start_date.isoformat(),
+                    "end_date": end_date.isoformat(),
+                    "trading_dates": 0,
+                    "skipped_reason": "no_trading_dates",
+                },
+            )
+
         # 2. Universe snapshot for end_date.
         #    Source of truth is the --tickers-file when provided; otherwise we
         #    leave ticker_master untouched and rely on whatever is already there.
@@ -976,7 +1015,16 @@ class Backfiller:
         batches: list  = []
 
         if resume:
-            expected_dates = self._get_expected_dates(start_date, end_date)
+            try:
+                expected_dates = self._get_expected_dates(start_date, end_date)
+            except RuntimeError as _cal_err:
+                return self._result(
+                    STATUS_FAILED,
+                    run_id,
+                    errors=[str(_cal_err)],
+                    warnings=warnings,
+                    metadata={"mode": MODE_BACKFILL, "skipped_reason": "calendar_unavailable"},
+                )
             gc.collect()
 
             if not expected_dates:
@@ -1058,6 +1106,20 @@ class Backfiller:
                     errors=["all price-backfill batches failed"],
                     warnings=warnings, metadata={"price_rows_written": price_rows})
 
+        # 6b. Defensive cleanup: delete any daily_prices rows whose date is in
+        #     [start, end] but is NOT a NYSE trading day.  Providers can
+        #     occasionally return rows for weekends/holidays; remove them before
+        #     downstream modules see non-trading-day data.
+        if not dry_run:
+            _deleted = self._delete_non_trading_rows(
+                start_date, end_date, _guard_expected
+            )
+            if _deleted:
+                warnings.append(
+                    f"Deleted {_deleted} non-trading-date rows from daily_prices "
+                    f"({start_date} – {end_date})."
+                )
+
         # 7. Range-wide validation / mutation / features / regime.
         if run_validation:
             res = self._validation_engine.validate(
@@ -1111,10 +1173,18 @@ class Backfiller:
 
         # Optional: hand off to the normal daily pipeline for the final date.
         if run_daily_pipeline_after:
-            print(f"Running normal daily pipeline for {end_date} after backfill...")
-            daily = self._run_daily_pipeline(end_date)
-            if not self._ok(daily):
-                warnings.append(f"post-backfill daily pipeline failed: {self._errs(daily)}")
+            if end_date in frozenset(_guard_expected):
+                print(f"Running normal daily pipeline for {end_date} after backfill...")
+                daily = self._run_daily_pipeline(end_date)
+                if not self._ok(daily):
+                    warnings.append(f"post-backfill daily pipeline failed: {self._errs(daily)}")
+            else:
+                _skip_msg = (
+                    f"--run-daily-pipeline-after skipped: {end_date} is not a "
+                    "NYSE trading day."
+                )
+                warnings.append(_skip_msg)
+                print(f"WARNING: {_skip_msg}")
 
         status = STATUS_SUCCESS_WITH_WARNINGS if warnings else STATUS_SUCCESS
         if resume:
@@ -1396,6 +1466,40 @@ class Backfiller:
         if schema_err:
             return self._result(STATUS_FAILED, run_id, errors=[schema_err])
 
+        # TRADING-DATE GUARD: reject non-trading ranges before any DB write.
+        try:
+            _guard_expected_full = self._get_expected_dates(start_date, end_date)
+        except RuntimeError as _cal_err:
+            return self._result(
+                STATUS_FAILED,
+                run_id,
+                errors=[str(_cal_err)],
+                metadata={
+                    "mode": MODE_FULL_COMPLETENESS,
+                    "start_date": start_date.isoformat(),
+                    "end_date": end_date.isoformat(),
+                    "skipped_reason": "calendar_unavailable",
+                },
+            )
+        if not _guard_expected_full:
+            msg = (
+                "No NYSE trading dates in requested range "
+                f"({start_date} – {end_date}); no DB writes performed."
+            )
+            print(f"WARNING: {msg}")
+            return self._result(
+                STATUS_SUCCESS_WITH_WARNINGS,
+                run_id,
+                warnings=[msg],
+                metadata={
+                    "mode": MODE_FULL_COMPLETENESS,
+                    "start_date": start_date.isoformat(),
+                    "end_date": end_date.isoformat(),
+                    "trading_dates": 0,
+                    "skipped_reason": "no_trading_dates",
+                },
+            )
+
         # Universe from file (if provided).
         if not dry_run and tickers_file is not None:
             try:
@@ -1438,11 +1542,8 @@ class Backfiller:
             warnings.extend(self._prefixed("benchmark", bench))
             gc.collect()
 
-        # Build expected trading dates once for the range.
-        expected_dates = self._get_expected_dates(start_date, end_date)
-        if not expected_dates:
-            return self._result(STATUS_FAILED, run_id,
-                errors=["no NYSE trading dates in the requested range"])
+        # Build expected trading dates for the range (already confirmed non-empty by guard).
+        expected_dates = _guard_expected_full
 
         print(f"Active tickers: {len(active)}  Expected trading days: {len(expected_dates)}")
 
@@ -1521,6 +1622,17 @@ class Backfiller:
             repair_end   = max(mr.end   for mr in all_affected)
         else:
             repair_start, repair_end = start_date, end_date
+
+        # Cleanup: remove any non-trading-day rows that ingestion may have written.
+        if not dry_run:
+            _del_full = self._delete_non_trading_rows(
+                start_date, end_date, expected_dates
+            )
+            if _del_full:
+                warnings.append(
+                    f"Deleted {_del_full} non-trading-date rows from daily_prices "
+                    f"({start_date} – {end_date})."
+                )
 
         # Downstream over the repaired range.
         warnings.extend(self._run_downstream(
@@ -1638,7 +1750,16 @@ class Backfiller:
                 metadata={"status": DASHBOARD_STATUS_ERROR, "mode": MODE_SAMPLE_COMPLETENESS,
                           "error": schema_err})
 
-        expected_dates = self._get_expected_dates(start_date, end_date)
+        try:
+            expected_dates = self._get_expected_dates(start_date, end_date)
+        except RuntimeError as _cal_err:
+            return self._result(
+                STATUS_FAILED, run_id,
+                errors=[str(_cal_err)],
+                metadata={"status": DASHBOARD_STATUS_ERROR,
+                          "mode": MODE_SAMPLE_COMPLETENESS,
+                          "skipped_reason": "calendar_unavailable"},
+            )
         if not expected_dates:
             return self._result(STATUS_FAILED, run_id,
                 errors=["no NYSE trading dates in range"],
@@ -1719,6 +1840,16 @@ class Backfiller:
         )
         warnings.extend(repair_warnings)
 
+        # Cleanup: remove any non-trading-day rows that ingestion may have written.
+        _del_sample = self._delete_non_trading_rows(
+            start_date, end_date, expected_dates
+        )
+        if _del_sample:
+            warnings.append(
+                f"Deleted {_del_sample} non-trading-date rows from daily_prices "
+                f"({start_date} – {end_date})."
+            )
+
         # Run downstream modules over the repaired date range.
         # Validation is always on by default; mutation/features/regime are opt-in
         # to keep sample mode lightweight for dashboard startup.
@@ -1758,20 +1889,23 @@ class Backfiller:
     def _get_expected_dates(
         self, start_date: datetime.date, end_date: datetime.date
     ) -> list[datetime.date]:
-        """Return the list of NYSE trading dates in [start, end] via trading_calendar."""
+        """Return the list of NYSE trading dates in [start, end] via trading_calendar.
+
+        Raises :class:`RuntimeError` if ``app.utils.trading_calendar`` cannot be
+        imported or raises any exception.  A weekday-only fallback is explicitly
+        forbidden: it silently treats NYSE holidays as trading days and causes
+        backfill to repair dates such as Memorial Day and Juneteenth.
+        """
         try:
             from app.utils.trading_calendar import trading_days_between
             return trading_days_between(start_date, end_date)
-        except Exception as exc:  # noqa: BLE001 — dep may be absent in test env
-            logger.warning("trading_calendar unavailable (%s); using weekday fallback", exc)
-            # Weekday-only fallback (no holiday exclusion).
-            out: list[datetime.date] = []
-            cur = start_date
-            while cur <= end_date:
-                if cur.weekday() < 5:
-                    out.append(cur)
-                cur += datetime.timedelta(days=1)
-            return out
+        except Exception as exc:
+            raise RuntimeError(
+                f"trading_calendar unavailable — cannot determine NYSE trading dates "
+                f"for {start_date} to {end_date}. "
+                f"Fix app/utils/trading_calendar.py before running the backfill tool. "
+                f"Original error: {exc}"
+            ) from exc
 
     def _check_completeness_bulk(
         self,
@@ -2028,6 +2162,58 @@ class Backfiller:
                 self._sleep(sleep_seconds + self._jitter(jitter_seconds))
 
         return total_rows, all_warnings
+
+    def _delete_non_trading_rows(
+        self,
+        start_date: datetime.date,
+        end_date: datetime.date,
+        expected_dates: list[datetime.date],
+    ) -> int:
+        """Delete any daily_prices rows whose date falls in [start, end] but is
+        not a NYSE trading day.
+
+        Returns the number of rows deleted.  Any error is logged and swallowed
+        so this cleanup step never fails a wider operation.
+        """
+        if not expected_dates:
+            return 0
+        expected_set: frozenset[datetime.date] = frozenset(expected_dates)
+        try:
+            conn = self._db.connect(DB_ROLE_PROD, read_only=False)
+            try:
+                # Fetch date + row count so we can return the number of rows
+                # deleted (not just the number of distinct bad dates).
+                rows = conn.execute(
+                    "SELECT date, COUNT(*) FROM daily_prices "
+                    "WHERE date >= ? AND date <= ? "
+                    "GROUP BY date",
+                    [start_date, end_date],
+                ).fetchall()
+                non_trading: list[datetime.date] = []
+                deleted_count = 0
+                for raw_date, cnt in rows:
+                    d = _normalize_date(raw_date)
+                    if d not in expected_set:
+                        non_trading.append(d)
+                        deleted_count += int(cnt or 0)
+                if not non_trading:
+                    return 0
+                placeholders = ", ".join(["?"] * len(non_trading))
+                conn.execute(
+                    f"DELETE FROM daily_prices WHERE date IN ({placeholders})",
+                    non_trading,
+                )
+                logger.warning(
+                    "Deleted %d non-trading-date rows from daily_prices: %s",
+                    deleted_count,
+                    [str(d) for d in sorted(non_trading)],
+                )
+                return deleted_count
+            finally:
+                conn.close()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("_delete_non_trading_rows failed (non-fatal): %s", exc)
+            return 0
 
     def _run_downstream(
         self,

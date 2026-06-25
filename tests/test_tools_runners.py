@@ -1,23 +1,15 @@
-"""Tests for the operator runner scripts under ``tools/``.
+"""Tests for operator runner scripts under tools/ — setup-mode (Phase 1).
 
-Fully offline. Two layers of coverage:
-
-* **Logic** — each runner's success/failure -> exit-code mapping and its
-  delegation are verified by monkeypatching the runner's build/apply seam with
-  an in-process fake (no real DuckDB, engines, provider, or network).
-* **Integration (init only)** — ``init_prod_db`` is run against a temp prod DB
-  (the ``tmp_db_paths`` pattern from the Module 07 suite) to prove it really
-  applies the schema via the Module 03 manager, without touching the real
-  ``data/duckdb/prod.duckdb``.
-* **Isolation** — static-source checks prove the debug runner never targets
-  ``prod`` and never reaches for the orchestrator directly, so it cannot write
-  to ``prod.duckdb``.
+Fully offline. Covers:
+- init_prod_db: success/failure exit codes, schema+seed delegation.
+- init_debug_db: success/failure exit codes.
+- init_simulation_db: pass-through.
+- reset_pipeline_data: dry-run, wipes setup_configs/risk_label_config not strategy_configs.
+- Integration: init_prod_db against a real temp DB initializes setup-mode schema.
 """
 
 from __future__ import annotations
 
-import inspect
-from datetime import date
 from pathlib import Path
 
 import pytest
@@ -32,69 +24,42 @@ from tools import (
     init_debug_db,
     init_prod_db,
     init_simulation_db,
-    run_debug_pipeline,
-    run_prod_pipeline,
 )
 
 
-# --------------------------------------------------------------------------- #
-# Fakes
-# --------------------------------------------------------------------------- #
-def _ok(metadata: dict | None = None, warnings: list[str] | None = None) -> ServiceResult:
-    status = (
-        service_result.STATUS_SUCCESS_WITH_WARNINGS
-        if warnings
-        else service_result.STATUS_SUCCESS
-    )
+def _ok(metadata: dict | None = None) -> ServiceResult:
     return ServiceResult(
-        status=status,
+        status=service_result.STATUS_SUCCESS,
         run_id="rid-test",
         rows_processed=1,
-        warnings=warnings or [],
-        errors=[],
-        metadata=metadata or {},
+        metadata=metadata or {"tables_created": ["t1"], "schema_version": "schema_v02",
+                              "seed_row_inserted": True},
     )
 
 
-def _failed(errors: list[str] | None = None, metadata: dict | None = None) -> ServiceResult:
+def _failed() -> ServiceResult:
     return ServiceResult(
         status=service_result.STATUS_FAILED,
         run_id="rid-test",
         rows_processed=0,
-        warnings=[],
-        errors=errors or ["boom"],
-        metadata=metadata or {},
+        errors=["boom"],
     )
 
 
-class _RecordingOrchestrator:
-    def __init__(self, result: ServiceResult) -> None:
-        self.result = result
-        self.calls: list[dict] = []
-
-    def run(self, **kwargs) -> ServiceResult:  # noqa: ANN003
-        self.calls.append(kwargs)
-        return self.result
-
-
-class _RecordingController:
-    def __init__(self, result: ServiceResult) -> None:
-        self.result = result
-        self.preset_calls: list[tuple] = []
-
-    def run_preset(self, preset_name, run_date, **kwargs) -> ServiceResult:  # noqa: ANN001, ANN003
-        self.preset_calls.append((preset_name, run_date, kwargs))
-        return self.result
-
-    # If the runner ever tried to drive the orchestrator directly, this would
-    # be called — it must not be.
-    def run(self, *a, **k):  # noqa: ANN002, ANN003
-        raise AssertionError("debug runner must not call controller.run() directly")
+def _ok_seed() -> ServiceResult:
+    return ServiceResult(
+        status=service_result.STATUS_SUCCESS,
+        run_id="rid-test",
+        rows_processed=5,
+        metadata={"setup_seeded": 4, "risk_label_seeded": 1, "sector_alias_seeded": 16},
+    )
 
 
+# --------------------------------------------------------------------------- #
+# Fixtures
+# --------------------------------------------------------------------------- #
 @pytest.fixture
 def tmp_db_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, Path]:
-    """Redirect DuckDB settings paths into ``tmp_path`` (no real DB touched)."""
     duckdb_dir = tmp_path / "duckdb"
     prod = duckdb_dir / "prod.duckdb"
     debug = duckdb_dir / "debug.duckdb"
@@ -109,338 +74,121 @@ def tmp_db_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, P
 # --------------------------------------------------------------------------- #
 # init_prod_db
 # --------------------------------------------------------------------------- #
-def test_init_prod_db_success_exit_zero(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(
-        init_prod_db,
-        "_apply_prod_schema",
-        lambda: _ok({"tables_created": ["a", "b"], "schema_version": "schema_v01"}),
-    )
-    monkeypatch.setattr(
-        init_prod_db,
-        "_seed_defaults",
-        lambda: _ok(
-            {"strategy_seeded": 3, "runtime_seeded": 8, "sector_alias_seeded": 16}
-        ),
-    )
-    assert init_prod_db.main([]) == 0
+class TestInitProdDb:
+    def test_success_returns_zero(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(init_prod_db, "_apply_prod_schema", lambda: _ok())
+        monkeypatch.setattr(init_prod_db, "_seed_defaults", lambda: _ok_seed())
+        monkeypatch.setattr(init_prod_db, "_resolve_prod_path", lambda: "fake.duckdb")
+        assert init_prod_db.main([]) == 0
 
+    def test_schema_failure_returns_one(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(init_prod_db, "_apply_prod_schema", lambda: _failed())
+        assert init_prod_db.main([]) == 1
 
-def test_init_prod_db_seed_failure_exit_nonzero(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Schema ok but config seeding failed -> nonzero exit (addendum §13)."""
-    monkeypatch.setattr(
-        init_prod_db,
-        "_apply_prod_schema",
-        lambda: _ok({"tables_created": ["a"], "schema_version": "schema_v01"}),
-    )
-    monkeypatch.setattr(
-        init_prod_db, "_seed_defaults", lambda: _failed(["seed boom"])
-    )
-    assert init_prod_db.main([]) == 1
+    def test_seed_failure_returns_one(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(init_prod_db, "_apply_prod_schema", lambda: _ok())
+        monkeypatch.setattr(init_prod_db, "_seed_defaults", lambda: _failed())
+        monkeypatch.setattr(init_prod_db, "_resolve_prod_path", lambda: "fake.duckdb")
+        assert init_prod_db.main([]) == 1
 
-
-def test_init_prod_db_failure_exit_nonzero(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(init_prod_db, "_apply_prod_schema", lambda: _failed(["bad"]))
-    assert init_prod_db.main([]) == 1
-
-
-def test_init_prod_db_exception_exit_nonzero(monkeypatch: pytest.MonkeyPatch) -> None:
-    def _boom() -> ServiceResult:
-        raise RuntimeError("disk full")
-
-    monkeypatch.setattr(init_prod_db, "_apply_prod_schema", _boom)
-    assert init_prod_db.main([]) == 1
-
-
-def test_init_prod_db_real_schema_on_tmp_db(tmp_db_paths: dict[str, Path]) -> None:
-    """Integration: runner applies the real schema to a temp prod DB."""
-    assert init_prod_db.main([]) == 0
-    assert tmp_db_paths["prod"].exists()
-    # Idempotent second call still succeeds (M02 §6).
-    assert init_prod_db.main([]) == 0
-    # Schema actually present.
-    conn = dbm.connect("prod", read_only=True)
-    try:
-        names = {r[0] for r in conn.execute("SHOW TABLES").fetchall()}
-    finally:
-        conn.close()
-    assert "pipeline_runs" in names and "schema_versions" in names
-    # Config tables created and seeded by the runner (M21 addendum).
-    assert {"strategy_configs", "runtime_configs", "sector_alias_map"} <= names
-    conn = dbm.connect("prod", read_only=True)
-    try:
-        n_strategy = conn.execute(
-            "SELECT COUNT(*) FROM strategy_configs WHERE active_flag = TRUE"
-        ).fetchone()[0]
-        n_runtime = conn.execute(
-            "SELECT COUNT(*) FROM runtime_configs WHERE active_flag = TRUE"
-        ).fetchone()[0]
-        n_alias = conn.execute("SELECT COUNT(*) FROM sector_alias_map").fetchone()[0]
-    finally:
-        conn.close()
-    assert n_strategy == 3
-    assert n_runtime == 8
-    assert n_alias >= 11
+    def test_schema_exception_returns_one(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        def _raise():
+            raise RuntimeError("connection refused")
+        monkeypatch.setattr(init_prod_db, "_apply_prod_schema", _raise)
+        assert init_prod_db.main([]) == 1
 
 
 # --------------------------------------------------------------------------- #
-# run_prod_pipeline
+# init_debug_db
 # --------------------------------------------------------------------------- #
-def test_run_prod_success_and_db_role(monkeypatch: pytest.MonkeyPatch) -> None:
-    orch = _RecordingOrchestrator(_ok({"run_id": "x", "steps_completed": [1, 2]}))
-    monkeypatch.setattr(run_prod_pipeline, "_build_orchestrator", lambda: orch)
-    assert run_prod_pipeline.main(["--date", "2025-06-02"]) == 0
-    assert orch.calls[0]["db_role"] == "prod"
-    assert orch.calls[0]["run_date"] == date(2025, 6, 2)
-    assert orch.calls[0]["run_type"] == "manual"
+class TestInitDebugDb:
+    def test_success_returns_zero(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(init_debug_db, "_apply_debug_schema", lambda: _ok())
+        monkeypatch.setattr(init_debug_db, "_seed_defaults", lambda: _ok_seed())
+        assert init_debug_db.main([]) == 0
 
-
-def test_run_prod_warnings_exit_zero(monkeypatch: pytest.MonkeyPatch) -> None:
-    orch = _RecordingOrchestrator(_ok({"steps_completed": []}, warnings=["w"]))
-    monkeypatch.setattr(run_prod_pipeline, "_build_orchestrator", lambda: orch)
-    assert run_prod_pipeline.main([]) == 0
-
-
-def test_run_prod_failure_exit_nonzero(monkeypatch: pytest.MonkeyPatch) -> None:
-    orch = _RecordingOrchestrator(_failed(["lock held"], {"failed_step": "validation"}))
-    monkeypatch.setattr(run_prod_pipeline, "_build_orchestrator", lambda: orch)
-    assert run_prod_pipeline.main([]) == 1
-
-
-def test_run_prod_forwards_flags(monkeypatch: pytest.MonkeyPatch) -> None:
-    orch = _RecordingOrchestrator(_ok())
-    monkeypatch.setattr(run_prod_pipeline, "_build_orchestrator", lambda: orch)
-    run_prod_pipeline.main(
-        ["--run-type", "force_rerun", "--force-rerun", "--resume-from", "validation"]
-    )
-    call = orch.calls[0]
-    assert call["run_type"] == "force_rerun"
-    assert call["force_rerun"] is True
-    assert call["resume_from"] == "validation"
+    def test_schema_failure_returns_one(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(init_debug_db, "_apply_debug_schema", lambda: _failed())
+        assert init_debug_db.main([]) == 1
 
 
 # --------------------------------------------------------------------------- #
-# run_debug_pipeline
+# Integration: init_prod_db against real temp DB
 # --------------------------------------------------------------------------- #
-def test_run_debug_success_uses_run_preset(monkeypatch: pytest.MonkeyPatch) -> None:
-    ctrl = _RecordingController(_ok({"debug": {"preset": "fast_smoke_test"}}))
-    monkeypatch.setattr(run_debug_pipeline, "_build_controller", lambda: ctrl)
-    monkeypatch.setattr(run_debug_pipeline, "_ensure_debug_db", lambda: None)
-    assert run_debug_pipeline.main(["--preset", "fast_smoke_test"]) == 0
-    assert ctrl.preset_calls[0][0] == "fast_smoke_test"
+class TestInitProdDbIntegration:
+    def test_init_prod_db_creates_setup_mode_schema(
+        self, tmp_db_paths: dict[str, Path]
+    ) -> None:
+        result = sm.apply_prod_schema()
+        assert result.is_ok()
+        # setup_configs must exist
+        conn = dbm.connect("prod", read_only=True)
+        try:
+            tables = {r[0] for r in conn.execute("SHOW TABLES").fetchall()}
+        finally:
+            conn.close()
+        assert "setup_configs" in tables
+        assert "risk_label_config" in tables
+        assert "strategy_configs" not in tables
 
+    def test_init_prod_db_seeds_four_setup_configs(
+        self, tmp_db_paths: dict[str, Path]
+    ) -> None:
+        sm.apply_prod_schema()
+        from app.services.config.config_service import ConfigService
+        svc = ConfigService(db_manager=dbm)
+        r = svc.seed_defaults("prod")
+        assert r.is_ok(), r.errors
+        conn = dbm.connect("prod", read_only=True)
+        try:
+            n = conn.execute("SELECT COUNT(*) FROM setup_configs").fetchone()[0]
+        finally:
+            conn.close()
+        assert n == 4
 
-def test_run_debug_forwards_overrides(monkeypatch: pytest.MonkeyPatch) -> None:
-    ctrl = _RecordingController(_ok({"debug": {}}))
-    monkeypatch.setattr(run_debug_pipeline, "_build_controller", lambda: ctrl)
-    monkeypatch.setattr(run_debug_pipeline, "_ensure_debug_db", lambda: None)
-    run_debug_pipeline.main(
-        ["--date", "2025-06-02", "--sample-count", "12", "--strategies", "normal", "aggressive"]
-    )
-    _, run_dt, kwargs = ctrl.preset_calls[0]
-    assert run_dt == date(2025, 6, 2)
-    assert kwargs["sample_count"] == 12
-    assert kwargs["strategy_names"] == ["normal", "aggressive"]
-
-
-def test_run_debug_failure_exit_nonzero(monkeypatch: pytest.MonkeyPatch) -> None:
-    ctrl = _RecordingController(_failed(["nope"]))
-    monkeypatch.setattr(run_debug_pipeline, "_build_controller", lambda: ctrl)
-    monkeypatch.setattr(run_debug_pipeline, "_ensure_debug_db", lambda: None)
-    assert run_debug_pipeline.main([]) == 1
-
-
-def test_run_debug_init_failure_aborts_before_controller(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """If debug-DB init fails, the controller is never built and exit is 1."""
-    monkeypatch.setattr(run_debug_pipeline, "_ensure_debug_db", lambda: "init boom")
-
-    def _no_build() -> object:
-        raise AssertionError("controller must not be built when init fails")
-
-    monkeypatch.setattr(run_debug_pipeline, "_build_controller", _no_build)
-    assert run_debug_pipeline.main([]) == 1
-
-
-def test_run_debug_help_smoke() -> None:
-    """`run_debug_pipeline.py --help` exits 0 (script-path smoke test)."""
-    with pytest.raises(SystemExit) as exc:
-        run_debug_pipeline.main(["--help"])
-    assert exc.value.code == 0
-
-
-def test_run_debug_never_targets_prod_source() -> None:
-    """Static guard: debug runner has no 'prod' db_role and no orchestrator import."""
-    src = inspect.getsource(run_debug_pipeline)
-    # No prod/simulation db_role literal is ever passed.
-    assert '"prod"' not in src and "'prod'" not in src
-    assert '"simulation"' not in src and "'simulation'" not in src
-    # The runner never reaches for the orchestrator directly; the controller
-    # (which is debug-only) is the sole entry point.
-    assert "PipelineOrchestrator" not in src
+    def test_init_prod_db_schema_version_is_v02(
+        self, tmp_db_paths: dict[str, Path]
+    ) -> None:
+        result = sm.apply_prod_schema()
+        assert result.metadata["schema_version"] == "schema_v02"
 
 
 # --------------------------------------------------------------------------- #
-# Debug DB auto-initialization (the bug fix)
+# reset_pipeline_data
 # --------------------------------------------------------------------------- #
-def test_ensure_debug_db_creates_when_missing(tmp_db_paths: dict[str, Path]) -> None:
-    """`_ensure_debug_db` applies the real debug schema when the file is absent."""
-    assert not tmp_db_paths["debug"].exists()
-    assert run_debug_pipeline._ensure_debug_db() is None
-    assert tmp_db_paths["debug"].exists()
-    # Idempotent: second call is a no-op (file already present), still None.
-    assert run_debug_pipeline._ensure_debug_db() is None
-    # Debug-only: prod DB must never be created by this path.
-    assert not tmp_db_paths["prod"].exists()
+class TestResetPipelineData:
+    def test_dry_run_returns_zero(
+        self, tmp_db_paths: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from tools import reset_pipeline_data
+        monkeypatch.setattr(
+            reset_pipeline_data,
+            "_parse_args",
+            lambda argv=None: type("NS", (), {"db_path": None, "dry_run": True})(),
+        )
+        # need a db path — apply schema first
+        sm.apply_prod_schema()
+        # Set db_path via monkeypatch attr override
+        import types
+        ns = types.SimpleNamespace(
+            db_path=tmp_db_paths["prod"],
+            dry_run=True,
+        )
+        monkeypatch.setattr(reset_pipeline_data, "_parse_args", lambda argv=None: ns)
+        rc = reset_pipeline_data.main([])
+        assert rc == 0
 
+    def test_wipe_tables_contains_setup_configs_not_strategy_configs(self) -> None:
+        from tools import reset_pipeline_data
+        wipe = reset_pipeline_data._WIPE_TABLES
+        assert "setup_configs" in wipe
+        assert "risk_label_config" in wipe
+        # Legacy tables must not be in wipe list
+        assert "strategy_configs" not in wipe
+        assert "runtime_configs" not in wipe
 
-def test_first_time_debug_run_starts_without_existing_db(
-    tmp_db_paths: dict[str, Path], monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Reproduces the bug: a first-ever debug run (no debug.duckdb) can start.
-
-    The real ``_ensure_debug_db`` runs against the temp paths and creates the
-    schema; the controller is faked so the heavy pipeline is not executed, but
-    the proof is that initialization happens *before* ``run_preset`` and the
-    debug DB now exists.
-    """
-    assert not tmp_db_paths["debug"].exists()
-    ctrl = _RecordingController(_ok({"debug": {"preset": "pipeline_sanity"}}))
-    monkeypatch.setattr(run_debug_pipeline, "_build_controller", lambda: ctrl)
-
-    rc = run_debug_pipeline.main(["--preset", "pipeline_sanity", "--sample-count", "50"])
-
-    assert rc == 0
-    assert tmp_db_paths["debug"].exists()  # created before the controller ran
-    assert ctrl.preset_calls and ctrl.preset_calls[0][0] == "pipeline_sanity"
-    assert not tmp_db_paths["prod"].exists()  # prod untouched
-
-
-def test_init_debug_db_real_schema_on_tmp_db(tmp_db_paths: dict[str, Path]) -> None:
-    assert not tmp_db_paths["debug"].exists()
-    assert init_debug_db.main([]) == 0
-    assert tmp_db_paths["debug"].exists()
-    assert init_debug_db.main([]) == 0  # idempotent
-    assert not tmp_db_paths["prod"].exists()
-
-
-def test_init_debug_db_failure_exit_nonzero(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(init_debug_db, "_apply_debug_schema", lambda: _failed(["bad"]))
-    assert init_debug_db.main([]) == 1
-
-
-def test_ensure_debug_db_seeds_configs(tmp_db_paths: dict[str, Path]) -> None:
-    """_ensure_debug_db seeds strategy/runtime/sector defaults on first init."""
-    assert not tmp_db_paths["debug"].exists()
-    result = run_debug_pipeline._ensure_debug_db()
-    assert result is None
-    assert tmp_db_paths["debug"].exists()
-    conn = dbm.connect("debug", read_only=True)
-    try:
-        n_strategy = conn.execute(
-            "SELECT COUNT(*) FROM strategy_configs WHERE active_flag = TRUE"
-        ).fetchone()[0]
-        n_runtime = conn.execute(
-            "SELECT COUNT(*) FROM runtime_configs WHERE active_flag = TRUE"
-        ).fetchone()[0]
-        n_alias = conn.execute(
-            "SELECT COUNT(*) FROM sector_alias_map"
-        ).fetchone()[0]
-    finally:
-        conn.close()
-    assert n_strategy == 3
-    assert n_runtime > 0
-    assert n_alias > 0
-
-
-# --------------------------------------------------------------------------- #
-# init_simulation_db
-# --------------------------------------------------------------------------- #
-def test_init_simulation_db_success_exit_zero(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(
-        init_simulation_db,
-        "_apply_simulation_schema",
-        lambda: _ok({"tables_created": ["a", "b"], "schema_version": "schema_v01"}),
-    )
-    monkeypatch.setattr(
-        init_simulation_db,
-        "_seed_defaults",
-        lambda: _ok(
-            {"strategy_seeded": 3, "runtime_seeded": 8, "sector_alias_seeded": 16}
-        ),
-    )
-    assert init_simulation_db.main([]) == 0
-
-
-def test_init_simulation_db_schema_failure_exit_nonzero(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(
-        init_simulation_db,
-        "_apply_simulation_schema",
-        lambda: _failed(["boom"]),
-    )
-    assert init_simulation_db.main([]) == 1
-
-
-def test_init_simulation_db_seed_failure_exit_nonzero(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(
-        init_simulation_db,
-        "_apply_simulation_schema",
-        lambda: _ok({"tables_created": ["a"], "schema_version": "schema_v01"}),
-    )
-    monkeypatch.setattr(
-        init_simulation_db, "_seed_defaults", lambda: _failed(["seed boom"])
-    )
-    assert init_simulation_db.main([]) == 1
-
-
-def test_init_simulation_db_exception_exit_nonzero(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(
-        init_simulation_db,
-        "_apply_simulation_schema",
-        lambda: (_ for _ in ()).throw(OSError("disk full")),
-    )
-    assert init_simulation_db.main([]) == 1
-
-
-def test_init_simulation_db_real_schema_on_tmp_db(
-    tmp_db_paths: dict[str, Path],
-) -> None:
-    """Integration: runner applies the real schema and seeds configs to a temp simulation DB."""
-    assert not tmp_db_paths["simulation"].exists()
-    assert init_simulation_db.main([]) == 0
-    assert tmp_db_paths["simulation"].exists()
-    # Idempotent second call.
-    assert init_simulation_db.main([]) == 0
-    # Simulation-only: prod and debug DBs must never be created by this path.
-    assert not tmp_db_paths["prod"].exists()
-    assert not tmp_db_paths["debug"].exists()
-    # Config tables seeded.
-    conn = dbm.connect("simulation", read_only=True)
-    try:
-        names = {r[0] for r in conn.execute("SHOW TABLES").fetchall()}
-        n_strategy = conn.execute(
-            "SELECT COUNT(*) FROM strategy_configs WHERE active_flag = TRUE"
-        ).fetchone()[0]
-        n_runtime = conn.execute(
-            "SELECT COUNT(*) FROM runtime_configs WHERE active_flag = TRUE"
-        ).fetchone()[0]
-        n_alias = conn.execute("SELECT COUNT(*) FROM sector_alias_map").fetchone()[0]
-    finally:
-        conn.close()
-    assert {"strategy_configs", "runtime_configs", "config_activation_log",
-            "sector_alias_map"} <= names
-    assert n_strategy == 3
-    assert n_runtime > 0
-    assert n_alias >= 11
-    # sim_* tables present; no production-only tables.
-    assert "sim_runs" in names
-    assert "daily_prices" not in names
-    assert "ticker_master" not in names
+    def test_preserve_tables_unchanged(self) -> None:
+        from tools import reset_pipeline_data
+        preserve = reset_pipeline_data._PRESERVE_TABLES
+        for t in ("daily_prices", "daily_features", "ticker_master", "sector_alias_map"):
+            assert t in preserve

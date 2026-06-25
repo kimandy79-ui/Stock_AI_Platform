@@ -14,14 +14,18 @@ Given an injected :class:`~app.providers.provider_interface.MarketDataProvider`
 and an inclusive ``[start_date, end_date]`` range, it:
 
 - loads exactly ``constants.REQUIRED_BENCHMARK_SYMBOLS`` (SPY/QQQ → benchmark,
-  ``^VIX`` → index, sector SPDRs → etf);
+  ``^VIX`` → index, sector and industry ETFs → etf); the ETF universe spans
+  all 11 broad SPDR sector ETFs plus ~53 industry-specific ETFs defined in
+  ``constants.INDUSTRY_ETF_MAP`` — ~67 symbols total;
 - fetches price bars only through the Module 04 provider interface
   (``get_price_history`` → ``metadata['bars']`` → ``list[PriceBar]``);
 - upserts the bars into ``daily_prices`` keyed by ``(ticker, date)``;
 - upserts each loaded symbol into ``ticker_master`` without clobbering
   Module-06-owned fields;
 - seeds ``sector_etf_map`` from ``constants.SECTOR_ETF_MAP`` with insert-or-ignore
-  semantics (never updating existing rows);
+  semantics (never updating existing rows); note that ``SECTOR_ETF_MAP``
+  covers the 11 canonical sector→ETF entries only — industry-level lookups
+  use ``constants.INDUSTRY_ETF_MAP`` directly (no DB seeding required);
 - returns a :class:`~app.utils.service_result.ServiceResult`.
 
 Out of scope (owned elsewhere)
@@ -160,9 +164,9 @@ _UPSERT_DAILY_PRICE: Final[str] = (
 def _classify_symbol_type(ticker: str) -> str:
     """Return the locked ``symbol_type`` for a required benchmark ``ticker``.
 
-    ``^VIX`` → ``index``; ``SPY``/``QQQ`` → ``benchmark``; sector SPDRs → ``etf``.
-    Any unexpected member of ``REQUIRED_BENCHMARK_SYMBOLS`` defaults to ``etf``
-    (defensive; the constant currently contains only the three classes above).
+    ``^VIX`` → ``index``; ``SPY``/``QQQ`` → ``benchmark``; all sector and
+    industry ETFs → ``etf``. Any unexpected member of
+    ``REQUIRED_BENCHMARK_SYMBOLS`` defaults to ``etf`` (defensive).
     """
     if ticker == constants.BENCHMARK_VIX:
         return constants.SYMBOL_TYPE_INDEX

@@ -1,55 +1,42 @@
-"""Module 11 — Feature Engine.
+"""Module 11 — Feature Engine (features_v02).
 
-Computes ``daily_features`` rows from already-ingested, validated and
-mutation-checked ``daily_prices`` data. It runs **after** Module 10
-(Mutation Detector) and **before** Module 12 (Market Regime Engine).
+Computes ``daily_features`` rows (schema version ``features_v02``) from already-
+ingested, validated, and mutation-checked ``daily_prices`` data.  Runs after
+Module 10 (Mutation Detector) and before Module 12 (Market Regime Engine).
 
-Contract source of truth: ``M11_FEATURE_ENGINE_SPEC.md`` (which is itself
-derived from the frozen split Project Files — ``01c_FORMULAS_AND_CONFIGS.md``
-for formulas, ``01b_SCHEMA_AND_DATA.md`` for the ``daily_features`` schema,
-``01d_MODULES_AND_PIPELINE.md`` for the pipeline position and
-``02b_ARCHITECTURE_DECISIONS.md`` for the Polars-first / feature-cutoff /
+Contract source of truth: ``M11_FEATURE_ENGINE_SPEC.md`` (derived from the
+frozen split Project Files — ``01c_FORMULAS_AND_CONFIGS.md`` for formulas,
+``01b_SCHEMA_AND_DATA.md`` for the ``daily_features`` schema,
+``01d_MODULES_AND_PIPELINE.md`` for the pipeline position, and
+``02b_ARCHITECTURE_DECISIONS.md`` for Polars-first / feature-cutoff /
 raw-vs-adjusted / schema-version decisions).
 
-Scope (what this module does)
------------------------------
-For an inclusive ``[start_date, end_date]`` range, for the selected tickers it:
+Phase 2 migration (setup-mode): all ``features_v02`` structural columns are
+now computed.  New columns added over the ``features_v01`` baseline:
 
-- reads only ``daily_prices`` rows whose ``data_quality_status == 'ok'``
-  (the data-quality boundary), including enough warmup history before
-  ``start_date`` to satisfy the longest required lookback (252 trading days);
-- anchors every ticker on its ``feature_cutoff_date`` — the latest eligible
-  ``daily_prices.date`` within the requested range — and writes exactly one
-  ``daily_features`` row per processed ticker at ``feature_date =
-  feature_cutoff_date`` (never outside the requested range, never using a row
-  after the cutoff: no look-ahead);
-- computes the price indicators from **adjusted** prices and the volume
-  features from **raw** volume, strictly per the frozen formulas, using Polars
-  vectorised rolling / grouped / window expressions (no per-ticker Python
-  indicator loops);
-- sets ``feature_ready = TRUE`` only when every required indicator is non-null;
-- upserts on ``(ticker, feature_date, feature_schema_version)`` (insert-or-
-  update), refreshing ``calculated_at`` on every write, in a single
-  transaction; and
-- returns a :class:`~app.utils.service_result.ServiceResult`.
+    ema20_slope, ema50_slope
+    atr_compression_score
+    pullback_depth_pct
+    swing_high, swing_low
+    support_level, resistance_level, next_resistance_level
+    base_high, base_low, range_width_pct, range_duration, range_tightness_score
+    volume_dry_up_score, volume_expansion_score
+    relative_strength_vs_spy
 
-Out of scope / open gaps (owned elsewhere or undefined in frozen sources)
--------------------------------------------------------------------------
-- ``market_regime`` is left ``NULL``: the frozen sources define VIX risk
-  thresholds and a regime priority but **no** explicit inline bull / bear /
-  neutral classification formula, and the regime is owned by Module 12. Open
-  gap ``G-REGIME`` (see spec). It is an optional column and does not block
-  readiness.
+Scope
+-----
+- Reads ``daily_prices`` (``data_quality_status = 'ok'``) plus warmup history.
+- Writes exactly one ``daily_features`` row per processed ticker at its
+  ``feature_cutoff_date`` via upsert on
+  ``(ticker, feature_date, feature_schema_version)``.
+- All indicators anchored on ``feature_cutoff_date`` — no look-ahead.
+- ``market_regime`` is left NULL (owned by Module 12, open gap G-REGIME).
 - ``days_to_earnings_bd`` / ``earnings_confidence`` / ``macro_event_risk_flag``
-  fall back to ``NULL`` / ``NULL`` / ``FALSE``: no feature-engine population
-  rule for these is defined in the frozen sources and no strategy config is
-  passed to this module's API. Open gaps ``G-EARN`` / ``G-MACRO`` (see spec).
-  They are optional columns and do not block readiness.
+  fall back to NULL / NULL / FALSE (open gaps G-EARN / G-MACRO).
 
 This module never calls providers, never imports ``duckdb`` directly, never
-uses ``ATTACH`` / DDL / schema changes, never writes ``daily_prices`` or any
-ticker / universe / sector / repair / rebuild / simulation / step / proposal /
-outcome / AI / execution table, and never uses ``print()``.
+uses ``ATTACH`` / DDL / schema changes, never writes any table other than
+``daily_features``, and never uses ``print()``.
 """
 
 from __future__ import annotations
@@ -66,48 +53,54 @@ from app.database import duckdb_manager
 from app.utils import logging_config
 from app.utils import service_result
 from app.utils.service_result import ServiceResult
+from app.utils.trading_calendar import trading_days_between
 
 
 # --------------------------------------------------------------------------- #
-# Roles this module is allowed to target.
+# Allowed DB roles
 # --------------------------------------------------------------------------- #
-# ``simulation`` is a valid duckdb_manager role but is *forbidden* here: Module
-# 11 never writes to ``simulation.duckdb``. Only ``prod`` / ``debug`` are
-# accepted; any other value yields a ``failed`` result with no reads/writes.
 DB_ROLE_PROD: Final[str] = duckdb_manager.DB_ROLE_PROD
 DB_ROLE_DEBUG: Final[str] = duckdb_manager.DB_ROLE_DEBUG
 ALLOWED_DB_ROLES: Final[tuple[str, ...]] = (DB_ROLE_PROD, DB_ROLE_DEBUG)
 
-# data_quality_status value that gates eligibility (SCHEMA_SPEC.md §5). Module
-# 11 consumes only rows Module 09 left/escalated as ``ok``.
 STATUS_OK: Final[str] = "ok"
 
-# Warmup: how many calendar days before ``start_date`` to read so the longest
-# required lookback (the 252-trading-day 52-week-high window) is always fully
-# covered. 252 trading days is ~353 calendar days; 420 gives a comfortable
-# holiday/closure buffer. See spec assumption A-WARMUP.
+# Warmup: calendar days before start_date to cover 252-td lookback.
+# 252 trading days ≈ 353 calendar days; 420 gives a holiday buffer.
 LOOKBACK_WARMUP_CALENDAR_DAYS: Final[int] = 420
 
-# Minimum number of trading bars (rows up to and including the cutoff) required
-# for the longest required lookback (52-week high). Readiness is enforced
-# structurally by per-indicator ``min_samples`` windows; this constant is the
-# binding lower bound and is documented for clarity / tests. See spec.
+# Minimum trading bars required for the longest lookback (52-week high).
 REQUIRED_MIN_BARS: Final[int] = 252
 
-# Per-indicator minimum bars for the recursive (EWM-based) indicators, used to
-# null out immature values that an EWM would otherwise emit from the first bar.
-# Rolling / shift indicators are gated by their own ``min_samples`` instead.
+# Per-indicator EWM minimum bars.
 _MIN_BARS_EMA20: Final[int] = 20
 _MIN_BARS_EMA50: Final[int] = 50
 _MIN_BARS_EMA200: Final[int] = 200
-_MIN_BARS_RSI14: Final[int] = 15  # 14 deltas + 1 seed row
-_MIN_BARS_ATR14: Final[int] = 15  # 14 true ranges + 1 prior-close row
+_MIN_BARS_RSI14: Final[int] = 15
+_MIN_BARS_ATR14: Final[int] = 15
 
-# Wilder smoothing factor for RSI14 / ATR14 (recursive EWM, adjust=False).
+# Wilder smoothing factor for RSI14 / ATR14.
 _WILDER_ALPHA_14: Final[float] = 1.0 / 14.0
 
-# Required indicator columns: ``feature_ready`` is TRUE only when all are
-# non-null (frozen Module 11 readiness list).
+# --------------------------------------------------------------------------- #
+# Pivot confirmation window (both sides) for swing high/low.
+# A bar is a confirmed pivot if its high/low is strictly better than the
+# _PIVOT_CONFIRM_BARS bars immediately before AND after it.
+# --------------------------------------------------------------------------- #
+_PIVOT_CONFIRM_BARS: Final[int] = 2
+_SWING_LOOKBACK: Final[int] = 20  # bars scanned to find confirmed pivots
+
+# Consolidation base: maximum true range relative to median true range.
+_BASE_RANGE_MAX_MULTIPLE: Final[float] = 1.5
+_BASE_MAX_DURATION: Final[int] = 60  # maximum bars in a base window
+
+# ATR compression: comparison window (bars).
+_ATR_COMPRESSION_LOOKBACK: Final[int] = 60
+
+
+# --------------------------------------------------------------------------- #
+# Required / optional feature columns
+# --------------------------------------------------------------------------- #
 REQUIRED_FEATURE_COLUMNS: Final[tuple[str, ...]] = (
     "ema20",
     "ema50",
@@ -126,8 +119,8 @@ REQUIRED_FEATURE_COLUMNS: Final[tuple[str, ...]] = (
     "consolidation_score",
 )
 
-# Optional / context columns that never block readiness.
 OPTIONAL_FEATURE_COLUMNS: Final[tuple[str, ...]] = (
+    # v01 optional
     "distance_to_ema20_pct",
     "distance_to_ema50_pct",
     "distance_to_ema200_pct",
@@ -136,9 +129,29 @@ OPTIONAL_FEATURE_COLUMNS: Final[tuple[str, ...]] = (
     "days_to_earnings_bd",
     "earnings_confidence",
     "macro_event_risk_flag",
+    # v02 new (all optional — NULL when insufficient history)
+    "ema20_slope",
+    "ema50_slope",
+    "atr_compression_score",
+    "pullback_depth_pct",
+    "swing_high",
+    "swing_low",
+    "support_level",
+    "resistance_level",
+    "next_resistance_level",
+    "base_high",
+    "base_low",
+    "range_width_pct",
+    "range_duration",
+    "range_tightness_score",
+    "volume_dry_up_score",
+    "volume_expansion_score",
+    "relative_strength_vs_spy",
 )
 
-# The exact metadata key set returned on every return path.
+# --------------------------------------------------------------------------- #
+# Metadata keys
+# --------------------------------------------------------------------------- #
 METADATA_KEYS: Final[tuple[str, ...]] = (
     "db_role",
     "start_date",
@@ -153,21 +166,22 @@ METADATA_KEYS: Final[tuple[str, ...]] = (
     "feature_not_ready_count",
 )
 
-# Full ordered column list for ``daily_features`` (SCHEMA_SPEC.md §3 /
-# ``01b_SCHEMA_AND_DATA.md``). ``calculated_at`` is set via SQL ``now()`` and is
-# not parameterised. NOTE: the frozen ``daily_features`` schema has **no**
-# ``created_at`` column — only ``calculated_at`` — so there is nothing to
-# preserve on conflict (resolved conflict R-CREATED_AT in the spec).
+# --------------------------------------------------------------------------- #
+# DB column list for the upsert — must match daily_features DDL order exactly
+# --------------------------------------------------------------------------- #
 _FEATURE_PARAM_COLUMNS: Final[tuple[str, ...]] = (
     "ticker",
     "feature_date",
     "feature_cutoff_date",
     "feature_schema_version",
     "feature_ready",
+    # v01 columns
     "ema20",
     "ema50",
     "ema200",
     "ema_alignment_score",
+    "ema20_slope",
+    "ema50_slope",
     "distance_to_ema20_pct",
     "distance_to_ema50_pct",
     "distance_to_ema200_pct",
@@ -175,13 +189,30 @@ _FEATURE_PARAM_COLUMNS: Final[tuple[str, ...]] = (
     "roc20",
     "atr14",
     "atr_pct",
+    "atr_compression_score",
     "rvol20",
     "avg_volume_20d",
     "avg_dollar_volume_20d",
     "distance_from_52w_high_pct",
     "pullback_from_recent_high_pct",
+    "pullback_depth_pct",
     "breakout_proximity",
     "consolidation_score",
+    # v02 structural
+    "swing_high",
+    "swing_low",
+    "support_level",
+    "resistance_level",
+    "next_resistance_level",
+    "base_high",
+    "base_low",
+    "range_width_pct",
+    "range_duration",
+    "range_tightness_score",
+    "volume_dry_up_score",
+    "volume_expansion_score",
+    "relative_strength_vs_spy",
+    # context / open-gap columns
     "sector_relative_strength",
     "market_regime",
     "days_to_earnings_bd",
@@ -189,21 +220,13 @@ _FEATURE_PARAM_COLUMNS: Final[tuple[str, ...]] = (
     "macro_event_risk_flag",
 )
 
-# Non-key columns updated on conflict (everything except the three key columns,
-# plus the SQL-set ``calculated_at``).
 _KEY_COLUMNS: Final[frozenset[str]] = frozenset(
     {"ticker", "feature_date", "feature_schema_version"}
 )
 
 
-class _DbManagerLike(Protocol):
-    """Minimal hook the engine needs from the DB manager (for test injection)."""
-
-    def connect(self, db_role: str, read_only: bool = ...) -> Any: ...
-
-
 # --------------------------------------------------------------------------- #
-# SQL (operates only on existing tables; no DDL).
+# SQL
 # --------------------------------------------------------------------------- #
 _SELECT_DISTINCT_ELIGIBLE_TICKERS: Final[str] = (
     "SELECT DISTINCT ticker FROM daily_prices "
@@ -211,8 +234,11 @@ _SELECT_DISTINCT_ELIGIBLE_TICKERS: Final[str] = (
     "ORDER BY ticker"
 )
 
+# Fetch high_raw / low_raw alongside adjusted columns so true-range computation
+# in structural helpers has both raw and adjusted OHLC available.
 _SELECT_PRICE_COLUMNS: Final[str] = (
-    "SELECT ticker, date, close_raw, close_adj, high_adj, low_adj, volume_raw "
+    "SELECT ticker, date, close_raw, high_raw, low_raw, "
+    "close_adj, high_adj, low_adj, volume_raw "
     "FROM daily_prices "
     "WHERE data_quality_status = ? AND date >= ? AND date <= ? "
     "AND ticker IN ({placeholders}) "
@@ -223,8 +249,27 @@ _SELECT_SECTORS: Final[str] = (
     "SELECT ticker, sector FROM ticker_master WHERE ticker IN ({placeholders})"
 )
 
-# Existence probe used to classify inserts vs conflict-updates for the run's
-# rows (run inside the write transaction, before the upserts).
+# Earnings: fetch all future/recent entries for the batch; filter per-ticker after load.
+_SELECT_EARNINGS: Final[str] = (
+    "SELECT ticker, earnings_date, confidence FROM earnings_calendar "
+    "WHERE ticker IN ({placeholders}) ORDER BY ticker, earnings_date"
+)
+
+
+def _bd_to_earnings(cutoff: date, earnings_date: date) -> int | None:
+    """Business days from cutoff (exclusive) to earnings_date (inclusive).
+
+    Returns None if earnings_date < cutoff (already happened).
+    Returns 0 if earnings_date == cutoff (same day).
+    Uses NYSE trading sessions via trading_days_between.
+    """
+    if earnings_date < cutoff:
+        return None
+    if earnings_date == cutoff:
+        return 0
+    sessions = trading_days_between(cutoff + timedelta(days=1), earnings_date)
+    return len(sessions)
+
 _SELECT_EXISTING_KEYS: Final[str] = (
     "SELECT ticker, feature_date FROM daily_features "
     "WHERE feature_schema_version = ? AND ticker IN ({placeholders})"
@@ -232,12 +277,6 @@ _SELECT_EXISTING_KEYS: Final[str] = (
 
 
 def _build_upsert_sql() -> str:
-    """Build the ``INSERT ... ON CONFLICT DO UPDATE`` statement for one row.
-
-    ``calculated_at`` is the only column not parameterised; it is set with the
-    DB clock on both insert and conflict-update so reruns refresh it. The key
-    columns are excluded from the ``DO UPDATE SET`` clause.
-    """
     cols = list(_FEATURE_PARAM_COLUMNS)
     placeholders = ", ".join("?" for _ in cols)
     col_list = ", ".join(cols)
@@ -255,154 +294,294 @@ _UPSERT_FEATURE_ROW: Final[str] = _build_upsert_sql()
 
 
 # --------------------------------------------------------------------------- #
-# Polars compute helpers.
+# Helpers
 # --------------------------------------------------------------------------- #
 def _sanitize(value: Any) -> Any:
-    """Map NaN / +-inf floats to ``None`` so they never reach the DB or skew
-    readiness (an infinite value is not a valid indicator and must not count as
-    "available").
-    """
+    """Map NaN / ±inf floats to None so they never reach the DB."""
     if isinstance(value, float) and (math.isnan(value) or math.isinf(value)):
         return None
     return value
 
 
-def _compute_features(prices: pl.DataFrame) -> pl.DataFrame:
-    """Return a per-(ticker, date) feature frame computed from ``prices``.
+# --------------------------------------------------------------------------- #
+# Structural feature helpers (operate on a single ticker's price history)
+# --------------------------------------------------------------------------- #
+def _true_ranges(
+    highs: list[float | None],
+    lows: list[float | None],
+    closes: list[float | None],
+) -> list[float]:
+    """Return per-bar true range using the full ATR formula.
 
-    ``prices`` must contain the columns selected by :data:`_SELECT_PRICE_COLUMNS`
-    for **all** loaded tickers (target tickers plus any sector ETFs) and be
-    pre-sorted by ``(ticker, date)``. All indicators are vectorised per ticker
-    via Polars window (``.over("ticker")``) / rolling expressions — no
-    per-ticker Python loops. Immature recursive (EWM) values are nulled below
-    their minimum-bar count; rolling / shift indicators are gated by
-    ``min_samples`` (so insufficient history naturally yields ``NULL``).
+    TR_i = max(high_i - low_i, |high_i - close_{i-1}|, |low_i - close_{i-1}|).
+    For bar 0 (no previous close) we fall back to high - low.
+    Uses adjusted OHLC per the v02 base-detection spec.
+
+    Bars where any of high/low/close is None yield TR=0.0 (treated as
+    non-qualifying in base detection via the median threshold).
     """
-    ticker = pl.col("ticker")
+    n = len(highs)
+    trs: list[float] = []
+    for i in range(n):
+        h = highs[i]
+        lo = lows[i]
+        c = closes[i]
+        if h is None or lo is None or c is None:
+            trs.append(0.0)
+            continue
+        hl = h - lo
+        if i == 0:
+            trs.append(hl)
+        else:
+            prev_c = closes[i - 1]
+            if prev_c is None:
+                trs.append(hl)
+            else:
+                trs.append(max(hl, abs(h - prev_c), abs(lo - prev_c)))
+    return trs
 
-    # Stage A: primitives that other expressions depend on (per-ticker).
-    frame = prices.with_columns(
-        pl.col("date").cum_count().over("ticker").alias("bar_index"),
-        pl.col("close_adj").shift(1).over("ticker").alias("_prev_close_adj"),
-        pl.col("close_adj").diff().over("ticker").alias("_delta"),
-        pl.col("close_adj").shift(20).over("ticker").alias("_close_adj_lag20"),
-        (pl.col("close_raw") * pl.col("volume_raw")).alias("_dollar"),
-        (pl.col("high_adj") - pl.col("low_adj")).alias("_range_hl"),
-    )
 
-    # Stage B: EMAs (close_adj), Wilder gain/loss inputs, true range.
-    frame = frame.with_columns(
-        pl.col("close_adj").ewm_mean(span=20, adjust=False).over("ticker").alias("_ema20_raw"),
-        pl.col("close_adj").ewm_mean(span=50, adjust=False).over("ticker").alias("_ema50_raw"),
-        pl.col("close_adj").ewm_mean(span=200, adjust=False).over("ticker").alias("_ema200_raw"),
-        pl.when(pl.col("_delta") > 0)
-        .then(pl.col("_delta"))
-        .otherwise(0.0)
-        .fill_null(0.0)
-        .alias("_gain"),
-        pl.when(pl.col("_delta") < 0)
-        .then(-pl.col("_delta"))
-        .otherwise(0.0)
-        .fill_null(0.0)
-        .alias("_loss"),
-        pl.max_horizontal(
-            pl.col("high_adj") - pl.col("low_adj"),
-            (pl.col("high_adj") - pl.col("_prev_close_adj")).abs(),
-            (pl.col("low_adj") - pl.col("_prev_close_adj")).abs(),
-        ).alias("_tr"),
-        pl.col("volume_raw").shift(1).over("ticker").alias("_vol_lag1"),
-        pl.col("_dollar").shift(1).over("ticker").alias("_dollar_lag1"),
-        pl.col("close_adj").rolling_max(window_size=20, min_samples=20).over("ticker").alias("_high20"),
-        pl.col("close_adj").rolling_max(window_size=252, min_samples=252).over("ticker").alias("_high252"),
-        pl.col("_range_hl").rolling_mean(window_size=10, min_samples=10).over("ticker").alias("_range_mean10"),
-        pl.col("_range_hl").rolling_mean(window_size=60, min_samples=60).over("ticker").alias("_range_mean60"),
-        pl.col("volume_raw").rolling_mean(window_size=10, min_samples=10).over("ticker").alias("_vol_mean10"),
-        pl.col("volume_raw").rolling_mean(window_size=60, min_samples=60).over("ticker").alias("_vol_mean60"),
-    )
+def _compute_swing_pivots(
+    ticker_df: pl.DataFrame,
+    k: int = _PIVOT_CONFIRM_BARS,
+    lookback: int = _SWING_LOOKBACK,
+) -> tuple[list[float], list[float]]:
+    """Return (swing_highs, swing_lows) lists for one ticker's price series.
 
-    # Stage C: Wilder averages, ATR14 (masked), prior-20 volume means.
-    frame = frame.with_columns(
-        pl.col("_gain").ewm_mean(alpha=_WILDER_ALPHA_14, adjust=False).over("ticker").alias("_avg_gain"),
-        pl.col("_loss").ewm_mean(alpha=_WILDER_ALPHA_14, adjust=False).over("ticker").alias("_avg_loss"),
-        pl.when(pl.col("bar_index") >= _MIN_BARS_ATR14)
-        .then(pl.col("_tr").ewm_mean(alpha=_WILDER_ALPHA_14, adjust=False).over("ticker"))
-        .otherwise(None)
-        .alias("atr14"),
-        # avg_*_20d use the prior 20 trading days (t-20..t-1), matching the
-        # RVOL20 denominator definition in the frozen formulas.
-        pl.col("_vol_lag1").rolling_mean(window_size=20, min_samples=20).over("ticker").alias("avg_volume_20d"),
-        pl.col("_dollar_lag1").rolling_mean(window_size=20, min_samples=20).over("ticker").alias("avg_dollar_volume_20d"),
-    )
+    Collects ALL confirmed pivot highs and lows within the last ``lookback``
+    confirmable bars (working backward from the most recent confirmable bar).
+    A bar at index ``i`` is a confirmed pivot high if its ``high_adj`` is
+    strictly greater than each of the ``k`` bars before it AND each of the
+    ``k`` bars after it.  Swing lows use ``low_adj`` with strictly less-than.
 
-    # Stage D: masked EMAs and the ATR14 60-day mean for consolidation.
-    frame = frame.with_columns(
-        pl.when(pl.col("bar_index") >= _MIN_BARS_EMA20).then(pl.col("_ema20_raw")).otherwise(None).alias("ema20"),
-        pl.when(pl.col("bar_index") >= _MIN_BARS_EMA50).then(pl.col("_ema50_raw")).otherwise(None).alias("ema50"),
-        pl.when(pl.col("bar_index") >= _MIN_BARS_EMA200).then(pl.col("_ema200_raw")).otherwise(None).alias("ema200"),
-        pl.col("atr14").rolling_mean(window_size=60, min_samples=60).over("ticker").alias("_atr_mean60"),
-    )
+    Returns lists ordered most-recent first.  Empty list when no confirmed
+    pivot exists (or fewer than ``2*k + 1`` bars available).
 
-    # Stage E: derived indicators built on the columns above.
-    rsi_rs = pl.col("_avg_gain") / pl.col("_avg_loss")
-    frame = frame.with_columns(
-        # RSI14 (Wilder via recursive EWM). avg_loss == 0 -> RSI 100.
-        pl.when(pl.col("bar_index") >= _MIN_BARS_RSI14)
-        .then(
-            pl.when(pl.col("_avg_loss") == 0)
-            .then(100.0)
-            .otherwise(100.0 - 100.0 / (1.0 + rsi_rs))
+    Bars with None highs or lows are skipped as pivot candidates and treated
+    as non-qualifying neighbours (they cannot confirm a pivot).
+    """
+    n = len(ticker_df)
+    if n < 2 * k + 1:
+        return ([], [])
+
+    highs: list[float | None] = ticker_df["high_adj"].to_list()
+    lows: list[float | None] = ticker_df["low_adj"].to_list()
+
+    last_confirmable = n - k - 1
+    search_start = max(k, n - lookback - k)
+
+    swing_highs: list[float] = []
+    swing_lows: list[float] = []
+
+    for i in range(last_confirmable, search_start - 1, -1):
+        h = highs[i]
+        l = lows[i]  # noqa: E741
+
+        # Skip pivot candidate bars with None values
+        if h is None or l is None:
+            continue
+
+        # Pivot high check — neighbours with None cannot satisfy strict inequality
+        before_ok = all(
+            highs[j] is not None and highs[j] < h  # type: ignore[operator]
+            for j in range(i - k, i)
         )
-        .otherwise(None)
-        .alias("rsi14"),
-        (pl.col("close_adj") / pl.col("_close_adj_lag20") - 1.0).alias("roc20"),
-        (pl.col("volume_raw") / pl.col("avg_volume_20d")).alias("rvol20"),
-        (pl.col("close_adj") / pl.col("_high252") - 1.0).alias("distance_from_52w_high_pct"),
-        (pl.col("close_adj") / pl.col("_high20") - 1.0).alias("pullback_from_recent_high_pct"),
-    )
-
-    frame = frame.with_columns(
-        (pl.col("atr14") / pl.col("close_adj")).alias("atr_pct"),
-        ((pl.col("close_adj") - pl.col("_high20")) / pl.col("atr14")).alias("breakout_proximity"),
-        (pl.col("close_adj") / pl.col("ema20") - 1.0).alias("distance_to_ema20_pct"),
-        (pl.col("close_adj") / pl.col("ema50") - 1.0).alias("distance_to_ema50_pct"),
-        (pl.col("close_adj") / pl.col("ema200") - 1.0).alias("distance_to_ema200_pct"),
-        # EMA alignment score (null if any EMA is null).
-        pl.when(pl.col("ema20").is_null() | pl.col("ema50").is_null() | pl.col("ema200").is_null())
-        .then(None)
-        .when((pl.col("ema20") > pl.col("ema50")) & (pl.col("ema50") > pl.col("ema200")))
-        .then(100.0)
-        .when(pl.col("close_adj") > pl.col("ema200"))
-        .then(50.0)
-        .otherwise(0.0)
-        .alias("ema_alignment_score"),
-    )
-
-    # Consolidation score: three contraction terms, each clipped to <= 1.
-    atr_contraction = 1.0 - (pl.col("atr14") / pl.col("_atr_mean60")).clip(upper_bound=1.0)
-    range_contraction = 1.0 - (pl.col("_range_mean10") / pl.col("_range_mean60")).clip(upper_bound=1.0)
-    volume_contraction = 1.0 - (pl.col("_vol_mean10") / pl.col("_vol_mean60")).clip(upper_bound=1.0)
-    frame = frame.with_columns(
-        (
-            100.0
-            * (0.4 * atr_contraction + 0.4 * range_contraction + 0.2 * volume_contraction)
+        after_ok = all(
+            highs[j] is not None and highs[j] < h  # type: ignore[operator]
+            for j in range(i + 1, i + k + 1)
         )
-        .clip(lower_bound=0.0, upper_bound=100.0)
-        .alias("consolidation_score"),
+        if before_ok and after_ok:
+            swing_highs.append(h)
+
+        # Pivot low check
+        before_low_ok = all(
+            lows[j] is not None and lows[j] > l  # type: ignore[operator]
+            for j in range(i - k, i)
+        )
+        after_low_ok = all(
+            lows[j] is not None and lows[j] > l  # type: ignore[operator]
+            for j in range(i + 1, i + k + 1)
+        )
+        if before_low_ok and after_low_ok:
+            swing_lows.append(l)
+
+    return (swing_highs, swing_lows)
+
+
+def _compute_support_resistance(
+    close_adj: float | None,
+    swing_highs: list[float],
+    swing_lows: list[float],
+    ema50: float | None,
+    high20: float | None,
+    high252: float | None,
+) -> tuple[float | None, float | None, float | None]:
+    """Derive support, resistance, next_resistance from structural level lists.
+
+    Rules (all on adjusted basis; raw conversion deferred to Step 4):
+
+    support_level:
+        Nearest swing_low strictly below close_adj (i.e. largest qualifying
+        swing low).  Fallback: ema50.
+
+    resistance_level:
+        Nearest swing_high strictly above close_adj (i.e. smallest qualifying
+        swing high).  Fallback: max(high_adj, prior 20 td).
+
+    next_resistance_level:
+        Next swing_high strictly above resistance_level (i.e. smallest swing
+        high > resistance).  Fallback: 52-week high if > resistance.
+
+    Returns (support_level, resistance_level, next_resistance_level).
+    All may be None when inputs are insufficient.
+    """
+    if close_adj is None:
+        return (None, None, None)
+
+    # --- support: largest swing_low below close ---
+    candidates_below = [sl for sl in swing_lows if sl < close_adj]
+    support: float | None = max(candidates_below) if candidates_below else None
+    if support is None and ema50 is not None:
+        support = ema50
+
+    # --- resistance: smallest swing_high above close ---
+    candidates_above = [sh for sh in swing_highs if sh > close_adj]
+    resistance: float | None = min(candidates_above) if candidates_above else None
+    if resistance is None and high20 is not None:
+        resistance = high20
+
+    # --- next_resistance: smallest swing_high strictly above resistance ---
+    next_resistance: float | None = None
+    if resistance is not None:
+        above_resistance = [sh for sh in swing_highs if sh > resistance]
+        if above_resistance:
+            next_resistance = min(above_resistance)
+        elif high252 is not None and high252 > resistance:
+            next_resistance = high252
+
+    return (support, resistance, next_resistance)
+
+
+def _compute_base(
+    ticker_df: pl.DataFrame,
+) -> tuple[float | None, float | None, int | None, float | None, float | None]:
+    """Compute base_high, base_low, range_duration, range_width_pct, range_tightness_score.
+
+    Algorithm:
+    1. Compute per-bar true range (full ATR formula: max of hl, |h-prev_c|,
+       |l-prev_c|) on adjusted prices.
+    2. Derive the reference threshold: median true range over the prior 60 bars
+       (bars n-61 .. n-2, i.e. not including the cutoff bar) × 1.5.
+    3. Within the last 60 bars (bars n-60 .. n-1), find the *longest*
+       contiguous window of bars whose true range ≤ threshold.  The window is
+       not required to end at the cutoff bar, supporting detection of a base
+       that the price has partially broken out of.
+    4. If the longest qualifying run is ≥ 2 bars, compute:
+       - base_high = max(high_adj) over the window
+       - base_low  = min(low_adj)  over the window
+       - range_width_pct = (base_high - base_low) / base_low
+       - range_tightness_score = 100 × (1 - min(range_width_pct / 0.20, 1))
+
+    Requires ≥ 60 bars.  Returns all-None on insufficient data or no run ≥ 2.
+    Bars with any None in high_adj/low_adj/close_adj are treated as
+    non-qualifying (TR=0.0 but excluded from base_high/base_low computation).
+    """
+    n = len(ticker_df)
+    if n < 60:
+        return (None, None, None, None, None)
+
+    highs: list[float | None] = ticker_df["high_adj"].to_list()
+    lows: list[float | None] = ticker_df["low_adj"].to_list()
+    closes: list[float | None] = ticker_df["close_adj"].to_list()
+
+    trs = _true_ranges(highs, lows, closes)
+
+    # Reference median TR: bars n-61 .. n-2 (60 bars before the cutoff bar)
+    ref_start = max(0, n - 61)
+    ref_end = n - 1  # exclusive
+    # Exclude TR=0 sentinel values (from None bars) from the median
+    reference_trs = sorted(tr for tr in trs[ref_start:ref_end] if tr > 0.0)
+    if not reference_trs:
+        return (None, None, None, None, None)
+    mid = len(reference_trs) // 2
+    median_tr = (
+        reference_trs[mid]
+        if len(reference_trs) % 2 == 1
+        else (reference_trs[mid - 1] + reference_trs[mid]) / 2.0
+    )
+    if median_tr <= 0:
+        return (None, None, None, None, None)
+
+    threshold = _BASE_RANGE_MAX_MULTIPLE * median_tr
+
+    # Search the last _BASE_MAX_DURATION bars for the longest qualifying run.
+    search_start_idx = max(0, n - _BASE_MAX_DURATION)
+    # Build qualifying mask; bars with TR=0 (None sentinel) are non-qualifying
+    qualifying = [
+        trs[i] > 0.0 and trs[i] <= threshold
+        for i in range(search_start_idx, n)
+    ]
+
+    # Find longest contiguous True run
+    best_start: int | None = None
+    best_len = 0
+    cur_start: int | None = None
+    cur_len = 0
+    for offset, q in enumerate(qualifying):
+        if q:
+            if cur_start is None:
+                cur_start = offset
+                cur_len = 1
+            else:
+                cur_len += 1
+            if cur_len > best_len:
+                best_len = cur_len
+                best_start = cur_start
+        else:
+            cur_start = None
+            cur_len = 0
+
+    if best_start is None or best_len < 2:
+        return (None, None, None, None, None)
+
+    # Map back to absolute indices
+    abs_start = search_start_idx + best_start
+    abs_end = abs_start + best_len  # exclusive
+
+    # Only use bars with valid (non-None) OHLC values
+    valid_highs = [h for h in highs[abs_start:abs_end] if h is not None]
+    valid_lows = [lo for lo in lows[abs_start:abs_end] if lo is not None]
+    if not valid_highs or not valid_lows:
+        return (None, None, None, None, None)
+
+    base_high = max(valid_highs)
+    base_low = min(valid_lows)
+
+    if base_low <= 0:
+        return (None, None, None, None, None)
+
+    range_width_pct = (base_high - base_low) / base_low
+    range_tightness_score = float(
+        max(0.0, min(100.0, 100.0 * (1.0 - min(range_width_pct / 0.20, 1.0))))
     )
 
-    return frame
+    return (base_high, base_low, best_len, range_width_pct, range_tightness_score)
+
+
+class _DbManagerLike(Protocol):
+    """Minimal interface the engine needs from the DB manager."""
+
+    def connect(self, db_role: str, read_only: bool = ...) -> Any: ...
 
 
 # --------------------------------------------------------------------------- #
-# Feature engine.
+# Feature engine
 # --------------------------------------------------------------------------- #
 class FeatureEngine:
     """Compute and upsert ``daily_features`` rows for a date range.
 
-    The engine is effectively stateless; the optional ``db_manager`` constructor
-    argument exists only so tests can inject a fake/wrapping manager. When it is
-    ``None`` the real :mod:`app.database.duckdb_manager` is used, which is the
-    single approved DB entry point (no arbitrary paths, no ``ATTACH``).
+    Stateless; ``db_manager=None`` uses the real :mod:`app.database.duckdb_manager`.
+    Tests inject a fake manager to avoid touching real DB files.
     """
 
     def __init__(self, db_manager: _DbManagerLike | None = None) -> None:
@@ -411,7 +590,7 @@ class FeatureEngine:
         )
 
     # ------------------------------------------------------------------ #
-    # Public API (EXACT signature — do not vary).
+    # Public API
     # ------------------------------------------------------------------ #
     def calculate(
         self,
@@ -421,28 +600,7 @@ class FeatureEngine:
         db_role: str = "prod",
         run_id: str | None = None,
     ) -> ServiceResult:
-        """Compute ``daily_features`` for ``[start_date, end_date]``.
-
-        Parameters
-        ----------
-        start_date, end_date:
-            Inclusive range applied to ``daily_prices.date`` for the cutoff.
-        tickers:
-            ``None`` processes all distinct tickers with eligible rows in range;
-            an explicit list processes only those (requested tickers without
-            eligible rows are counted as skipped).
-        db_role:
-            ``"prod"`` or ``"debug"`` only. Any other value (including
-            ``"simulation"``) returns ``failed`` before any DB read/write.
-        run_id:
-            A fresh ``uuid4`` is minted when ``None``.
-
-        Returns
-        -------
-        ServiceResult
-            ``rows_processed`` equals ``metadata["tickers_processed"]`` on every
-            return path. ``metadata`` carries exactly :data:`METADATA_KEYS`.
-        """
+        """Compute ``daily_features`` for ``[start_date, end_date]``."""
         run_id = run_id if run_id is not None else str(uuid.uuid4())
         log = logging_config.get_logger(__name__, run_id)
 
@@ -452,13 +610,10 @@ class FeatureEngine:
 
         log.info(
             "calculate start db_role=%s start_date=%s end_date=%s tickers=%s",
-            db_role,
-            start_iso,
-            end_iso,
+            db_role, start_iso, end_iso,
             "all" if tickers is None else len(tickers),
         )
 
-        # --- db_role guard: prod/debug only, never simulation. No I/O. ----- #
         if db_role not in ALLOWED_DB_ROLES:
             message = (
                 f"Unsupported db_role {db_role!r}. "
@@ -467,17 +622,15 @@ class FeatureEngine:
             log.error("calculate failed: %s", message)
             return self._failed(run_id, message, db_role, start_iso, end_iso, tickers_requested)
 
-        # --- date-range guard: fail before any DB access. ------------------ #
         if start_date > end_date:
             message = f"Invalid date range: start_date {start_iso} > end_date {end_iso}."
             log.error("calculate failed: %s", message)
             return self._failed(run_id, message, db_role, start_iso, end_iso, tickers_requested)
 
-        # --- read phase (read-only): selection, sectors, price rows. ------- #
         warmup_start = start_date - timedelta(days=LOOKBACK_WARMUP_CALENDAR_DAYS)
         try:
             read = self._read(db_role, start_date, end_date, warmup_start, tickers)
-        except Exception as exc:  # noqa: BLE001 - surface DB read failure as failed
+        except Exception as exc:  # noqa: BLE001
             message = f"read failed: {type(exc).__name__}: {exc}"
             log.error("calculate failed: %s", message)
             return self._failed(run_id, message, db_role, start_iso, end_iso, tickers_requested)
@@ -486,11 +639,11 @@ class FeatureEngine:
         tickers_skipped = read["tickers_skipped_no_data"]
         rows_read = read["rows_read"]
 
-        # --- compute phase (pure Polars, no DB): build feature rows. ------- #
         feature_rows = self._build_feature_rows(
             read["prices"],
             process_tickers,
             read["sector_by_ticker"],
+            read.get("earnings_by_ticker", {}),
             start_date,
             end_date,
         )
@@ -501,23 +654,16 @@ class FeatureEngine:
         log.info(
             "calculate computed rows_read=%d tickers_processed=%d "
             "tickers_skipped_no_data=%d ready=%d not_ready=%d",
-            rows_read,
-            tickers_processed,
-            tickers_skipped,
-            ready_count,
-            not_ready_count,
+            rows_read, tickers_processed, tickers_skipped, ready_count, not_ready_count,
         )
 
-        # --- write phase: single transaction across all upserts. ----------- #
         try:
             written, updated = self._write(db_role, feature_rows)
-        except Exception as exc:  # noqa: BLE001 - surface as failed ServiceResult
+        except Exception as exc:  # noqa: BLE001
             log.error(
                 "calculate failed during write (rolled back): %s: %s",
-                type(exc).__name__,
-                exc,
+                type(exc).__name__, exc,
             )
-            # Durable write counts are 0 (rolled back); read/compute counts kept.
             return ServiceResult(
                 status=service_result.STATUS_FAILED,
                 run_id=run_id,
@@ -551,12 +697,7 @@ class FeatureEngine:
         log.info(
             "calculate done status=success rows_read=%d tickers_processed=%d "
             "written=%d updated=%d ready=%d not_ready=%d",
-            rows_read,
-            tickers_processed,
-            written,
-            updated,
-            ready_count,
-            not_ready_count,
+            rows_read, tickers_processed, written, updated, ready_count, not_ready_count,
         )
         return ServiceResult(
             status=service_result.STATUS_SUCCESS,
@@ -566,7 +707,7 @@ class FeatureEngine:
         )
 
     # ------------------------------------------------------------------ #
-    # Read phase.
+    # Read phase
     # ------------------------------------------------------------------ #
     def _read(
         self,
@@ -576,15 +717,9 @@ class FeatureEngine:
         warmup_start: date,
         tickers: list[str] | None,
     ) -> dict[str, Any]:
-        """Resolve selection, sectors and price rows in one read-only pass.
-
-        Returns the process-ticker set, the skipped-no-data count, the sector
-        map, the loaded price :class:`polars.DataFrame`, and ``rows_read``.
-        The read connection is closed before any computation.
-        """
+        """Resolve selection, sectors, and price rows in one read-only pass."""
         connection = self._db.connect(db_role, read_only=True)
         try:
-            # Distinct eligible tickers in range (the authoritative "has data" set).
             eligible_rows = connection.execute(
                 _SELECT_DISTINCT_ELIGIBLE_TICKERS,
                 [start_date, end_date, STATUS_OK],
@@ -595,13 +730,9 @@ class FeatureEngine:
                 process_tickers = sorted(eligible_in_range)
                 tickers_skipped = 0
             else:
-                # Preserve uniqueness; only tickers with eligible in-range rows
-                # are processed, the rest are skipped-no-data.
                 requested_unique = list(dict.fromkeys(tickers))
                 process_tickers = [t for t in requested_unique if t in eligible_in_range]
-                tickers_skipped = sum(
-                    1 for t in requested_unique if t not in eligible_in_range
-                )
+                tickers_skipped = sum(1 for t in requested_unique if t not in eligible_in_range)
 
             if not process_tickers:
                 empty = pl.DataFrame(
@@ -609,6 +740,8 @@ class FeatureEngine:
                         "ticker": pl.Utf8,
                         "date": pl.Date,
                         "close_raw": pl.Float64,
+                        "high_raw": pl.Float64,
+                        "low_raw": pl.Float64,
                         "close_adj": pl.Float64,
                         "high_adj": pl.Float64,
                         "low_adj": pl.Float64,
@@ -623,8 +756,6 @@ class FeatureEngine:
                     "rows_read": 0,
                 }
 
-            # Sectors for the process tickers -> mapped sector ETFs (for sector
-            # relative strength). Missing tickers / unmapped sectors yield NULL.
             sector_by_ticker = self._read_sectors(connection, process_tickers)
             sector_etfs = {
                 constants.SECTOR_ETF_MAP[sector]
@@ -632,11 +763,15 @@ class FeatureEngine:
                 if sector in constants.SECTOR_ETF_MAP
             }
 
-            load_set = sorted(set(process_tickers) | sector_etfs)
+            # Always include SPY for relative_strength_vs_spy (v02).
+            load_set = sorted(set(process_tickers) | sector_etfs | {constants.BENCHMARK_SPY})
             placeholders = ", ".join("?" for _ in load_set)
             sql = _SELECT_PRICE_COLUMNS.format(placeholders=placeholders)
             params = [STATUS_OK, warmup_start, end_date, *load_set]
             price_rows = connection.execute(sql, params).fetchall()
+
+            # G-EARN gap closure: load earnings_calendar for all process_tickers.
+            earnings_by_ticker = self._read_earnings(connection, process_tickers)
         finally:
             connection.close()
 
@@ -646,6 +781,8 @@ class FeatureEngine:
                 ("ticker", pl.Utf8),
                 ("date", pl.Date),
                 ("close_raw", pl.Float64),
+                ("high_raw", pl.Float64),
+                ("low_raw", pl.Float64),
                 ("close_adj", pl.Float64),
                 ("high_adj", pl.Float64),
                 ("low_adj", pl.Float64),
@@ -660,36 +797,45 @@ class FeatureEngine:
             "sector_by_ticker": sector_by_ticker,
             "prices": prices,
             "rows_read": prices.height,
+            "earnings_by_ticker": earnings_by_ticker,
         }
 
-    def _read_sectors(
-        self, connection: Any, process_tickers: list[str]
-    ) -> dict[str, str | None]:
-        """Return ``{ticker: sector}`` for process tickers present in
-        ``ticker_master`` (tickers absent from the table are simply omitted)."""
+    def _read_sectors(self, connection: Any, process_tickers: list[str]) -> dict[str, str | None]:
         placeholders = ", ".join("?" for _ in process_tickers)
         sql = _SELECT_SECTORS.format(placeholders=placeholders)
         rows = connection.execute(sql, list(process_tickers)).fetchall()
         return {row[0]: row[1] for row in rows}
 
+    def _read_earnings(
+        self, connection: Any, process_tickers: list[str]
+    ) -> dict[str, list[tuple[date, str]]]:
+        """Return {ticker: [(earnings_date, confidence), ...]} sorted ascending."""
+        if not process_tickers:
+            return {}
+        try:
+            placeholders = ", ".join("?" for _ in process_tickers)
+            sql = _SELECT_EARNINGS.format(placeholders=placeholders)
+            rows = connection.execute(sql, list(process_tickers)).fetchall()
+            result: dict[str, list[tuple[date, str]]] = {}
+            for ticker, edate, conf in rows:
+                result.setdefault(ticker, []).append((edate, conf or "low"))
+            return result
+        except Exception:  # noqa: BLE001 — earnings are best-effort
+            return {}
+
     # ------------------------------------------------------------------ #
-    # Compute phase.
+    # Compute phase
     # ------------------------------------------------------------------ #
     def _build_feature_rows(
         self,
         prices: pl.DataFrame,
         process_tickers: list[str],
         sector_by_ticker: dict[str, str | None],
+        earnings_by_ticker: dict[str, list[tuple[date, str]]],
         start_date: date,
         end_date: date,
     ) -> list[dict[str, Any]]:
-        """Return one feature-row dict per processed ticker (at its cutoff).
-
-        The full per-(ticker, date) indicator frame is computed once with
-        Polars; per ticker the row at ``feature_cutoff_date`` (the latest
-        in-range eligible date) is selected. Sector relative strength is
-        resolved against the mapped ETF's 20-day return at the same cutoff date.
-        """
+        """Return one feature-row dict per processed ticker at its cutoff."""
         if prices.height == 0 or not process_tickers:
             return []
 
@@ -705,8 +851,7 @@ class FeatureEngine:
             .alias("_cutoff_date")
         )
 
-        # roc20 lookup keyed by (ticker, date) — reused for both the ticker's
-        # own 20d return and each mapped sector ETF's 20d return.
+        # roc20 lookup keyed by (ticker, date) for sector RS and SPY RS.
         roc_lookup: dict[tuple[str, date], float | None] = {}
         for rec in features.select(["ticker", "date", "roc20"]).iter_rows(named=True):
             roc_lookup[(rec["ticker"], rec["date"])] = _sanitize(rec["roc20"])
@@ -718,30 +863,118 @@ class FeatureEngine:
             & (pl.col("date") == pl.col("_cutoff_date"))
         )
 
-        out_columns = [
-            "ticker",
-            "date",
+        # Build deduplicated select list (ema50 lives in REQUIRED_FEATURE_COLUMNS already)
+        _select_base = [
+            "ticker", "date",
             *REQUIRED_FEATURE_COLUMNS,
             "distance_to_ema20_pct",
             "distance_to_ema50_pct",
             "distance_to_ema200_pct",
+            "ema20_slope",
+            "ema50_slope",
+            "atr_compression_score",
+            "pullback_depth_pct",
+            "volume_dry_up_score",
+            "volume_expansion_score",
+            "_high20",
+            "_high252",
         ]
+        seen: set[str] = set()
+        select_cols: list[str] = []
+        for c in _select_base:
+            if c not in seen:
+                seen.add(c)
+                select_cols.append(c)
+
         rows: list[dict[str, Any]] = []
-        for rec in cutoff_frame.select(out_columns).iter_rows(named=True):
+        for rec in cutoff_frame.select(select_cols).iter_rows(named=True):
             ticker = rec["ticker"]
             cutoff = rec["date"]
 
-            sector = sector_by_ticker.get(ticker)
-            etf = constants.SECTOR_ETF_MAP.get(sector) if sector is not None else None
-            sector_rs: float | None = None
-            ticker_roc = _sanitize(rec["roc20"])
-            if etf is not None and ticker_roc is not None:
-                etf_roc = roc_lookup.get((etf, cutoff))
-                if etf_roc is not None:
-                    sector_rs = ticker_roc - etf_roc
+            try:
+                # Sector RS (v01 pattern)
+                sector = sector_by_ticker.get(ticker)
+                etf = constants.SECTOR_ETF_MAP.get(sector) if sector is not None else None
+                sector_rs: float | None = None
+                ticker_roc = _sanitize(rec["roc20"])
+                if etf is not None and ticker_roc is not None:
+                    etf_roc = roc_lookup.get((etf, cutoff))
+                    if etf_roc is not None:
+                        sector_rs = ticker_roc - etf_roc
 
-            row = self._assemble_row(ticker, cutoff, rec, sector_rs)
-            rows.append(row)
+                # relative_strength_vs_spy (v02)
+                rs_vs_spy: float | None = None
+                if ticker_roc is not None:
+                    spy_roc = roc_lookup.get((constants.BENCHMARK_SPY, cutoff))
+                    if spy_roc is not None:
+                        rs_vs_spy = ticker_roc - spy_roc
+
+                # Per-ticker structural features: operate on full history slice.
+                ticker_prices = prices.filter(pl.col("ticker") == ticker).sort("date")
+
+                swing_highs, swing_lows = _compute_swing_pivots(ticker_prices)
+
+                # close_adj at cutoff for support/resistance derivation
+                ca_rows = ticker_prices.filter(pl.col("date") == cutoff).select("close_adj")
+                close_adj_val: float | None = (
+                    _sanitize(ca_rows[0, "close_adj"]) if ca_rows.height > 0 else None
+                )
+
+                support, resistance, next_resistance = _compute_support_resistance(
+                    close_adj=close_adj_val,
+                    swing_highs=swing_highs,
+                    swing_lows=swing_lows,
+                    ema50=_sanitize(rec["ema50"]),
+                    high20=_sanitize(rec["_high20"]),
+                    high252=_sanitize(rec["_high252"]),
+                )
+
+                base_high, base_low, range_duration, range_width_pct, range_tightness = (
+                    _compute_base(ticker_prices)
+                )
+
+                # Most-recent single swing pivot values for storage
+                swing_high_val = swing_highs[0] if swing_highs else None
+                swing_low_val = swing_lows[0] if swing_lows else None
+
+                # G-EARN gap closure: compute days_to_earnings_bd from earnings_calendar.
+                ticker_earnings = earnings_by_ticker.get(ticker, [])
+                days_to_earn: int | None = None
+                earn_conf: str | None = None
+                for edate, econf in ticker_earnings:
+                    bd = _bd_to_earnings(cutoff, edate)
+                    if bd is not None and (days_to_earn is None or bd < days_to_earn):
+                        days_to_earn = bd
+                        earn_conf = econf
+
+                row = self._assemble_row(
+                    ticker=ticker,
+                    cutoff=cutoff,
+                    rec=rec,
+                    sector_rs=sector_rs,
+                    rs_vs_spy=rs_vs_spy,
+                    swing_high=swing_high_val,
+                    swing_low=swing_low_val,
+                    support=support,
+                    resistance=resistance,
+                    next_resistance=next_resistance,
+                    base_high=base_high,
+                    base_low=base_low,
+                    range_duration=range_duration,
+                    range_width_pct=range_width_pct,
+                    range_tightness_score=range_tightness,
+                    days_to_earnings=days_to_earn,
+                    earnings_confidence=earn_conf,
+                )
+                rows.append(row)
+
+            except Exception as exc:  # noqa: BLE001
+                # Log and skip this ticker; do not crash the whole batch.
+                import logging as _logging
+                _logging.getLogger(__name__).warning(
+                    "feature compute error ticker=%s cutoff=%s %s: %s — skipping",
+                    ticker, cutoff, type(exc).__name__, exc,
+                )
 
         rows.sort(key=lambda r: r["ticker"])
         return rows
@@ -752,15 +985,22 @@ class FeatureEngine:
         cutoff: date,
         rec: dict[str, Any],
         sector_rs: float | None,
+        rs_vs_spy: float | None,
+        swing_high: float | None,
+        swing_low: float | None,
+        support: float | None,
+        resistance: float | None,
+        next_resistance: float | None,
+        base_high: float | None,
+        base_low: float | None,
+        range_duration: int | None,
+        range_width_pct: float | None,
+        range_tightness_score: float | None,
+        days_to_earnings: int | None = None,
+        earnings_confidence: str | None = None,
     ) -> dict[str, Any]:
-        """Assemble a single ``daily_features`` row dict (sanitised, with
-        readiness computed and open-gap columns at their documented defaults)."""
+        """Assemble a single ``daily_features`` row dict (sanitised)."""
         required = {col: _sanitize(rec[col]) for col in REQUIRED_FEATURE_COLUMNS}
-        optional_emas = {
-            "distance_to_ema20_pct": _sanitize(rec["distance_to_ema20_pct"]),
-            "distance_to_ema50_pct": _sanitize(rec["distance_to_ema50_pct"]),
-            "distance_to_ema200_pct": _sanitize(rec["distance_to_ema200_pct"]),
-        }
         feature_ready = all(required[col] is not None for col in REQUIRED_FEATURE_COLUMNS)
 
         return {
@@ -769,31 +1009,47 @@ class FeatureEngine:
             "feature_cutoff_date": cutoff,
             "feature_schema_version": constants.FEATURE_SCHEMA_VERSION,
             "feature_ready": feature_ready,
+            # v01 required
             **required,
-            **optional_emas,
+            # v01 optional EMAs
+            "distance_to_ema20_pct": _sanitize(rec["distance_to_ema20_pct"]),
+            "distance_to_ema50_pct": _sanitize(rec["distance_to_ema50_pct"]),
+            "distance_to_ema200_pct": _sanitize(rec["distance_to_ema200_pct"]),
+            # v02 vectorised
+            "ema20_slope": _sanitize(rec["ema20_slope"]),
+            "ema50_slope": _sanitize(rec["ema50_slope"]),
+            "atr_compression_score": _sanitize(rec["atr_compression_score"]),
+            "pullback_depth_pct": _sanitize(rec["pullback_depth_pct"]),
+            "volume_dry_up_score": _sanitize(rec["volume_dry_up_score"]),
+            "volume_expansion_score": _sanitize(rec["volume_expansion_score"]),
+            # v02 structural (per-ticker computed)
+            "swing_high": _sanitize(swing_high),
+            "swing_low": _sanitize(swing_low),
+            "support_level": _sanitize(support),
+            "resistance_level": _sanitize(resistance),
+            "next_resistance_level": _sanitize(next_resistance),
+            "base_high": _sanitize(base_high),
+            "base_low": _sanitize(base_low),
+            "range_width_pct": _sanitize(range_width_pct),
+            "range_duration": range_duration,
+            "range_tightness_score": _sanitize(range_tightness_score),
+            "relative_strength_vs_spy": _sanitize(rs_vs_spy),
+            # context
             "sector_relative_strength": _sanitize(sector_rs),
-            # Open gaps (documented in the spec): NULL / NULL / FALSE defaults.
+            # market_regime: open gap G-REGIME (owned by Module 12)
             "market_regime": None,
-            "days_to_earnings_bd": None,
-            "earnings_confidence": None,
+            # G-EARN gap closed: populated from earnings_calendar when data exists
+            "days_to_earnings_bd": days_to_earnings,
+            "earnings_confidence": earnings_confidence,
+            # macro_event_risk_flag: open gap G-MACRO
             "macro_event_risk_flag": False,
         }
 
     # ------------------------------------------------------------------ #
-    # Write phase.
+    # Write phase
     # ------------------------------------------------------------------ #
-    def _write(
-        self, db_role: str, feature_rows: list[dict[str, Any]]
-    ) -> tuple[int, int]:
-        """Upsert every feature row in a single transaction; return
-        ``(written, updated)``.
-
-        Inserts vs conflict-updates are classified up front by probing the
-        existing ``(ticker, feature_date)`` keys for this feature schema version
-        among the rows about to be written, so reruns are stable and the two
-        counts are accurate. Any error triggers ``ROLLBACK`` so no partial
-        Module 11 writes survive. An empty plan opens and commits with no rows.
-        """
+    def _write(self, db_role: str, feature_rows: list[dict[str, Any]]) -> tuple[int, int]:
+        """Upsert every feature row in a single transaction; return (written, updated)."""
         if not feature_rows:
             return (0, 0)
 
@@ -823,8 +1079,6 @@ class FeatureEngine:
     def _existing_keys(
         self, connection: Any, feature_rows: list[dict[str, Any]]
     ) -> set[tuple[str, date]]:
-        """Return the subset of ``(ticker, feature_date)`` keys already present
-        in ``daily_features`` for this feature schema version."""
         tickers = sorted({row["ticker"] for row in feature_rows})
         placeholders = ", ".join("?" for _ in tickers)
         sql = _SELECT_EXISTING_KEYS.format(placeholders=placeholders)
@@ -833,7 +1087,7 @@ class FeatureEngine:
         return {(row[0], row[1]) for row in rows}
 
     # ------------------------------------------------------------------ #
-    # Result builders.
+    # Result builders
     # ------------------------------------------------------------------ #
     def _failed(
         self,
@@ -844,7 +1098,6 @@ class FeatureEngine:
         end_iso: str,
         tickers_requested: int,
     ) -> ServiceResult:
-        """Build a ``failed`` result for a pre-DB guard (no I/O performed)."""
         return ServiceResult(
             status=service_result.STATUS_FAILED,
             run_id=run_id,
@@ -873,7 +1126,6 @@ class FeatureEngine:
         feature_ready_count: int = 0,
         feature_not_ready_count: int = 0,
     ) -> dict[str, Any]:
-        """Build the metadata dict carrying exactly :data:`METADATA_KEYS`."""
         return {
             "db_role": db_role,
             "start_date": start_date,
@@ -889,6 +1141,192 @@ class FeatureEngine:
         }
 
 
+# --------------------------------------------------------------------------- #
+# Vectorised indicator computation (all tickers at once via Polars)
+# --------------------------------------------------------------------------- #
+def _compute_features(prices: pl.DataFrame) -> pl.DataFrame:
+    """Return per-(ticker, date) feature frame from ``prices``.
+
+    ``prices`` must be sorted by (ticker, date) and contain:
+    ticker, date, close_raw, high_raw, low_raw, close_adj, high_adj, low_adj, volume_raw.
+
+    Rows where any required OHLC field (close_raw, high_raw, low_raw, close_adj,
+    high_adj, low_adj) is NULL are dropped before indicator computation.  This
+    prevents arithmetic crashes on failed / quarantined price rows that passed
+    the data_quality_status='ok' filter but still have NULL OHLCV values.
+
+    ``volume_raw`` may be NULL (e.g. index / VIX symbols with valid OHLC but no
+    volume).  The downstream dollar / rvol / volume-score columns become NULL for
+    those rows — Polars handles this null-safely; no crash results.
+
+    All indicators are vectorised per ticker via Polars window / rolling
+    expressions.  Immature recursive (EWM) values are nulled below their
+    minimum-bar count.
+    """
+    # Drop rows with NULL in any required OHLC field; volume_raw may be NULL.
+    _required_ohlc = ["close_raw", "high_raw", "low_raw", "close_adj", "high_adj", "low_adj"]
+    prices = prices.filter(
+        pl.all_horizontal([pl.col(c).is_not_null() for c in _required_ohlc])
+    )
+    # ------------------------------------------------------------------ #
+    # Stage A: primitives
+    # ------------------------------------------------------------------ #
+    frame = prices.with_columns(
+        pl.col("date").cum_count().over("ticker").alias("bar_index"),
+        pl.col("close_adj").shift(1).over("ticker").alias("_prev_close_adj"),
+        pl.col("close_adj").diff().over("ticker").alias("_delta"),
+        pl.col("close_adj").shift(20).over("ticker").alias("_close_adj_lag20"),
+        (pl.col("close_raw") * pl.col("volume_raw")).alias("_dollar"),
+        (pl.col("high_adj") - pl.col("low_adj")).alias("_range_hl"),
+    )
+
+    # ------------------------------------------------------------------ #
+    # Stage B: EMAs, gain/loss, true range, rolling windows
+    # ------------------------------------------------------------------ #
+    frame = frame.with_columns(
+        pl.col("close_adj").ewm_mean(span=20, adjust=False).over("ticker").alias("_ema20_raw"),
+        pl.col("close_adj").ewm_mean(span=50, adjust=False).over("ticker").alias("_ema50_raw"),
+        pl.col("close_adj").ewm_mean(span=200, adjust=False).over("ticker").alias("_ema200_raw"),
+        pl.when(pl.col("_delta") > 0).then(pl.col("_delta")).otherwise(0.0).fill_null(0.0).alias("_gain"),
+        pl.when(pl.col("_delta") < 0).then(-pl.col("_delta")).otherwise(0.0).fill_null(0.0).alias("_loss"),
+        pl.max_horizontal(
+            pl.col("high_adj") - pl.col("low_adj"),
+            (pl.col("high_adj") - pl.col("_prev_close_adj")).abs(),
+            (pl.col("low_adj") - pl.col("_prev_close_adj")).abs(),
+        ).alias("_tr"),
+        pl.col("volume_raw").shift(1).over("ticker").alias("_vol_lag1"),
+        pl.col("_dollar").shift(1).over("ticker").alias("_dollar_lag1"),
+        pl.col("close_adj").rolling_max(window_size=20, min_samples=20).over("ticker").alias("_high20"),
+        pl.col("close_adj").rolling_max(window_size=252, min_samples=252).over("ticker").alias("_high252"),
+        pl.col("_range_hl").rolling_mean(window_size=10, min_samples=10).over("ticker").alias("_range_mean10"),
+        pl.col("_range_hl").rolling_mean(window_size=60, min_samples=60).over("ticker").alias("_range_mean60"),
+        pl.col("volume_raw").rolling_mean(window_size=10, min_samples=10).over("ticker").alias("_vol_mean10"),
+        pl.col("volume_raw").rolling_mean(window_size=60, min_samples=60).over("ticker").alias("_vol_mean60"),
+        pl.col("high_adj").rolling_max(window_size=20, min_samples=20).over("ticker").alias("_high_adj_20"),
+    )
+
+    # ------------------------------------------------------------------ #
+    # Stage C: Wilder averages, ATR14, volume means
+    # ------------------------------------------------------------------ #
+    frame = frame.with_columns(
+        pl.col("_gain").ewm_mean(alpha=_WILDER_ALPHA_14, adjust=False).over("ticker").alias("_avg_gain"),
+        pl.col("_loss").ewm_mean(alpha=_WILDER_ALPHA_14, adjust=False).over("ticker").alias("_avg_loss"),
+        pl.when(pl.col("bar_index") >= _MIN_BARS_ATR14)
+        .then(pl.col("_tr").ewm_mean(alpha=_WILDER_ALPHA_14, adjust=False).over("ticker"))
+        .otherwise(None)
+        .alias("atr14"),
+        pl.col("_vol_lag1").rolling_mean(window_size=20, min_samples=20).over("ticker").alias("avg_volume_20d"),
+        pl.col("_dollar_lag1").rolling_mean(window_size=20, min_samples=20).over("ticker").alias("avg_dollar_volume_20d"),
+    )
+
+    # ------------------------------------------------------------------ #
+    # Stage D: masked EMAs, ATR 60d mean (for consolidation + compression)
+    # ------------------------------------------------------------------ #
+    frame = frame.with_columns(
+        pl.when(pl.col("bar_index") >= _MIN_BARS_EMA20).then(pl.col("_ema20_raw")).otherwise(None).alias("ema20"),
+        pl.when(pl.col("bar_index") >= _MIN_BARS_EMA50).then(pl.col("_ema50_raw")).otherwise(None).alias("ema50"),
+        pl.when(pl.col("bar_index") >= _MIN_BARS_EMA200).then(pl.col("_ema200_raw")).otherwise(None).alias("ema200"),
+        pl.col("atr14").rolling_mean(window_size=60, min_samples=60).over("ticker").alias("_atr_mean60"),
+        pl.col("_ema20_raw").shift(5).over("ticker").alias("_ema20_lag5_raw"),
+        pl.col("_ema50_raw").shift(10).over("ticker").alias("_ema50_lag10_raw"),
+    )
+
+    # ------------------------------------------------------------------ #
+    # Stage E: v01 derived indicators
+    # ------------------------------------------------------------------ #
+    rsi_rs = pl.col("_avg_gain") / pl.col("_avg_loss")
+    frame = frame.with_columns(
+        pl.when(pl.col("bar_index") >= _MIN_BARS_RSI14)
+        .then(
+            pl.when(pl.col("_avg_loss") == 0)
+            .then(100.0)
+            .otherwise(100.0 - 100.0 / (1.0 + rsi_rs))
+        )
+        .otherwise(None)
+        .alias("rsi14"),
+        (pl.col("close_adj") / pl.col("_close_adj_lag20") - 1.0).alias("roc20"),
+        (pl.col("volume_raw") / pl.col("avg_volume_20d")).alias("rvol20"),
+        (pl.col("close_adj") / pl.col("_high252") - 1.0).alias("distance_from_52w_high_pct"),
+        (pl.col("close_adj") / pl.col("_high20") - 1.0).alias("pullback_from_recent_high_pct"),
+    )
+
+    frame = frame.with_columns(
+        (pl.col("atr14") / pl.col("close_adj")).alias("atr_pct"),
+        ((pl.col("close_adj") - pl.col("_high20")) / pl.col("atr14")).alias("breakout_proximity"),
+        (pl.col("close_adj") / pl.col("ema20") - 1.0).alias("distance_to_ema20_pct"),
+        (pl.col("close_adj") / pl.col("ema50") - 1.0).alias("distance_to_ema50_pct"),
+        (pl.col("close_adj") / pl.col("ema200") - 1.0).alias("distance_to_ema200_pct"),
+        pl.when(pl.col("ema20").is_null() | pl.col("ema50").is_null() | pl.col("ema200").is_null())
+        .then(None)
+        .when((pl.col("ema20") > pl.col("ema50")) & (pl.col("ema50") > pl.col("ema200")))
+        .then(100.0)
+        .when(pl.col("close_adj") > pl.col("ema200"))
+        .then(50.0)
+        .otherwise(0.0)
+        .alias("ema_alignment_score"),
+    )
+
+    # Consolidation score (v01, retained)
+    atr_contraction = 1.0 - (pl.col("atr14") / pl.col("_atr_mean60")).clip(upper_bound=1.0)
+    range_contraction = 1.0 - (pl.col("_range_mean10") / pl.col("_range_mean60")).clip(upper_bound=1.0)
+    volume_contraction = 1.0 - (pl.col("_vol_mean10") / pl.col("_vol_mean60")).clip(upper_bound=1.0)
+    frame = frame.with_columns(
+        (100.0 * (0.4 * atr_contraction + 0.4 * range_contraction + 0.2 * volume_contraction))
+        .clip(lower_bound=0.0, upper_bound=100.0)
+        .alias("consolidation_score"),
+    )
+
+    # ------------------------------------------------------------------ #
+    # Stage F: v02 simple derived features (vectorised)
+    # ------------------------------------------------------------------ #
+    frame = frame.with_columns(
+        # EMA slopes
+        pl.when(pl.col("bar_index") >= _MIN_BARS_EMA20 + 5)
+        .then(pl.col("ema20") / pl.col("_ema20_lag5_raw") - 1.0)
+        .otherwise(None)
+        .alias("ema20_slope"),
+        pl.when(pl.col("bar_index") >= _MIN_BARS_EMA50 + 10)
+        .then(pl.col("ema50") / pl.col("_ema50_lag10_raw") - 1.0)
+        .otherwise(None)
+        .alias("ema50_slope"),
+        # ATR compression: score > 0 when current ATR < historical mean
+        pl.when(pl.col("atr14").is_not_null() & pl.col("_atr_mean60").is_not_null())
+        .then(
+            (100.0 * (1.0 - (pl.col("atr14") / pl.col("_atr_mean60")).clip(upper_bound=1.0)))
+            .clip(lower_bound=0.0, upper_bound=100.0)
+        )
+        .otherwise(None)
+        .alias("atr_compression_score"),
+        # Pullback depth: (max(high_adj, 20d) - close_adj) / max(high_adj, 20d)
+        pl.when(pl.col("_high_adj_20").is_not_null() & (pl.col("_high_adj_20") > 0))
+        .then((pl.col("_high_adj_20") - pl.col("close_adj")) / pl.col("_high_adj_20"))
+        .otherwise(None)
+        .alias("pullback_depth_pct"),
+        # Volume dry-up: score > 0 when recent vol < 60-bar mean
+        pl.when(
+            pl.col("_vol_mean10").is_not_null()
+            & pl.col("_vol_mean60").is_not_null()
+            & (pl.col("_vol_mean60") > 0)
+        )
+        .then(
+            (100.0 * (1.0 - (pl.col("_vol_mean10") / pl.col("_vol_mean60")).clip(upper_bound=1.0)))
+            .clip(lower_bound=0.0, upper_bound=100.0)
+        )
+        .otherwise(None)
+        .alias("volume_dry_up_score"),
+        # Volume expansion
+        pl.when(pl.col("rvol20").is_not_null())
+        .then(
+            (100.0 * ((pl.col("rvol20") - 1.0).clip(lower_bound=0.0) / 1.0).clip(upper_bound=1.0))
+            .clip(lower_bound=0.0, upper_bound=100.0)
+        )
+        .otherwise(None)
+        .alias("volume_expansion_score"),
+    )
+
+    return frame
+
+
 __all__ = [
     "FeatureEngine",
     "METADATA_KEYS",
@@ -897,4 +1335,9 @@ __all__ = [
     "OPTIONAL_FEATURE_COLUMNS",
     "REQUIRED_MIN_BARS",
     "LOOKBACK_WARMUP_CALENDAR_DAYS",
+    # Exposed for unit testing of structural helpers
+    "_compute_swing_pivots",
+    "_compute_support_resistance",
+    "_compute_base",
+    "_true_ranges",
 ]

@@ -100,24 +100,24 @@ class FakeConfig:
         self.activate_calls: list[dict] = []
         self.create_calls: list[dict] = []
         self.get_calls: list[dict] = []
-        self._activate_result = activate_result or _ok(config_id="cfg1", strategy_name="Normal")
-        self._create_result = create_result or _ok(config_id="cfg2", strategy_name="Normal", active_flag=False)
-        self._get_result = get_result or _ok(config={"config_id": "cfg1", "strategy_name": "Normal", "version": "v1", "active_flag": True, "config_hash": "abc", "created_at": "2026-01-01", "created_by": None, "notes": None})
+        self._activate_result = activate_result or _ok(config_id="cfg1", setup_name="Normal")
+        self._create_result = create_result or _ok(config_id="cfg2", setup_name="Normal", active_flag=False)
+        self._get_result = get_result or _ok(config={"config_id": "cfg1", "setup_name": "Normal", "version": "v1", "active_flag": True, "config_hash": "abc", "created_at": "2026-01-01", "created_by": None, "notes": None})
         self._list_result = list_result or _ok(versions=[])
 
-    def activate_strategy_config(self, config_id: str, db_role: str, activated_by: Any = None, reason: Any = None) -> ServiceResult:
+    def activate_setup_config(self, config_id: str, db_role: str, activated_by: Any = None, reason: Any = None) -> ServiceResult:
         self.activate_calls.append({"config_id": config_id, "db_role": db_role, "activated_by": activated_by, "reason": reason})
         return self._activate_result
 
-    def create_strategy_config_version(self, **kwargs: Any) -> ServiceResult:
+    def create_setup_config_version(self, **kwargs: Any) -> ServiceResult:
         self.create_calls.append(kwargs)
         return self._create_result
 
-    def get_strategy_config(self, config_id: str, db_role: str) -> ServiceResult:
+    def get_setup_config(self, config_id: str, db_role: str) -> ServiceResult:
         self.get_calls.append({"config_id": config_id, "db_role": db_role})
         return self._get_result
 
-    def list_strategy_configs(self, db_role: str, strategy_name: Any = None) -> ServiceResult:
+    def list_setup_configs(self, db_role: str, setup_name: Any = None) -> ServiceResult:
         return self._list_result
 
 
@@ -209,7 +209,7 @@ class TestExportTickerReview:
         svc = _svc(export_engine=fake)
         result = svc.export_ticker_review(
             signal_date=self._DATE,
-            strategy_config_id="cfg1",
+            setup_config_id="cfg1",
             proposal_ids=["p1", "p2"],
             db_role="prod",
         )
@@ -219,28 +219,28 @@ class TestExportTickerReview:
     def test_invalid_role_no_engine_call(self) -> None:
         fake = FakeExport()
         svc = _svc(export_engine=fake)
-        result = svc.export_ticker_review(signal_date=self._DATE, strategy_config_id="cfg1", proposal_ids=["p1"], db_role="simulation")
+        result = svc.export_ticker_review(signal_date=self._DATE, setup_config_id="cfg1", proposal_ids=["p1"], db_role="simulation")
         assert result.status == sr_mod.STATUS_FAILED
         assert len(fake.called) == 0
 
-    def test_empty_strategy_config_id_rejected(self) -> None:
+    def test_empty_setup_config_id_rejected(self) -> None:
         fake = FakeExport()
         svc = _svc(export_engine=fake)
-        result = svc.export_ticker_review(signal_date=self._DATE, strategy_config_id="", proposal_ids=["p1"], db_role="prod")
+        result = svc.export_ticker_review(signal_date=self._DATE, setup_config_id="", proposal_ids=["p1"], db_role="prod")
         assert result.status == sr_mod.STATUS_FAILED
         assert len(fake.called) == 0
 
     def test_empty_proposal_ids_rejected(self) -> None:
         fake = FakeExport()
         svc = _svc(export_engine=fake)
-        result = svc.export_ticker_review(signal_date=self._DATE, strategy_config_id="cfg1", proposal_ids=[], db_role="prod")
+        result = svc.export_ticker_review(signal_date=self._DATE, setup_config_id="cfg1", proposal_ids=[], db_role="prod")
         assert result.status == sr_mod.STATUS_FAILED
         assert len(fake.called) == 0
 
     def test_debug_role_allowed(self) -> None:
         fake = FakeExport()
         svc = _svc(export_engine=fake)
-        result = svc.export_ticker_review(signal_date=self._DATE, strategy_config_id="cfg1", proposal_ids=["p1"], db_role="debug")
+        result = svc.export_ticker_review(signal_date=self._DATE, setup_config_id="cfg1", proposal_ids=["p1"], db_role="debug")
         assert result.status == sr_mod.STATUS_SUCCESS
 
 
@@ -299,14 +299,14 @@ class TestRecordHumanAction:
 
 
 # ------------------------------------------------------------------ #
-# activate_strategy_config.
+# activate_setup_config.
 # ------------------------------------------------------------------ #
 
 class TestActivateStrategyConfig:
     def test_success(self) -> None:
         fake = FakeConfig()
         svc = _svc(config_service=fake)
-        result = svc.activate_strategy_config(config_id="cfg1", db_role="prod")
+        result = svc.activate_setup_config(config_id="cfg1", db_role="prod")
         assert result.status == sr_mod.STATUS_SUCCESS
         assert len(fake.activate_calls) == 1
         assert fake.activate_calls[0]["config_id"] == "cfg1"
@@ -314,35 +314,35 @@ class TestActivateStrategyConfig:
     def test_invalid_role(self) -> None:
         fake = FakeConfig()
         svc = _svc(config_service=fake)
-        result = svc.activate_strategy_config(config_id="cfg1", db_role="simulation")
+        result = svc.activate_setup_config(config_id="cfg1", db_role="simulation")
         assert result.status == sr_mod.STATUS_FAILED
         assert not fake.activate_calls
 
     def test_empty_config_id(self) -> None:
         fake = FakeConfig()
         svc = _svc(config_service=fake)
-        result = svc.activate_strategy_config(config_id="", db_role="prod")
+        result = svc.activate_setup_config(config_id="", db_role="prod")
         assert result.status == sr_mod.STATUS_FAILED
 
     def test_activated_by_and_reason_forwarded(self) -> None:
         fake = FakeConfig()
         svc = _svc(config_service=fake)
-        svc.activate_strategy_config(config_id="cfg1", db_role="debug", activated_by="alice", reason="test reason")
+        svc.activate_setup_config(config_id="cfg1", db_role="debug", activated_by="alice", reason="test reason")
         assert fake.activate_calls[0]["activated_by"] == "alice"
         assert fake.activate_calls[0]["reason"] == "test reason"
 
 
 # ------------------------------------------------------------------ #
-# clone_strategy_config.
+# clone_setup_config.
 # ------------------------------------------------------------------ #
 
 class TestCloneStrategyConfig:
     def test_success(self) -> None:
         fake = FakeConfig()
         svc = _svc(config_service=fake)
-        result = svc.clone_strategy_config(
+        result = svc.clone_setup_config(
             db_role="prod",
-            strategy_name="Normal",
+            setup_name="Normal",
             config_json={"min_price": 5.0},
         )
         assert result.status == sr_mod.STATUS_SUCCESS
@@ -351,69 +351,69 @@ class TestCloneStrategyConfig:
     def test_invalid_role(self) -> None:
         fake = FakeConfig()
         svc = _svc(config_service=fake)
-        result = svc.clone_strategy_config(db_role="simulation", strategy_name="Normal", config_json={"x": 1})
+        result = svc.clone_setup_config(db_role="simulation", setup_name="Normal", config_json={"x": 1})
         assert result.status == sr_mod.STATUS_FAILED
         assert not fake.create_calls
 
-    def test_empty_strategy_name_rejected(self) -> None:
+    def test_empty_setup_name_rejected(self) -> None:
         fake = FakeConfig()
         svc = _svc(config_service=fake)
-        result = svc.clone_strategy_config(db_role="prod", strategy_name="", config_json={"x": 1})
+        result = svc.clone_setup_config(db_role="prod", setup_name="", config_json={"x": 1})
         assert result.status == sr_mod.STATUS_FAILED
 
     def test_empty_config_json_rejected(self) -> None:
         fake = FakeConfig()
         svc = _svc(config_service=fake)
-        result = svc.clone_strategy_config(db_role="prod", strategy_name="Normal", config_json={})
+        result = svc.clone_setup_config(db_role="prod", setup_name="Normal", config_json={})
         assert result.status == sr_mod.STATUS_FAILED
 
     def test_activate_flag_forwarded(self) -> None:
         fake = FakeConfig()
         svc = _svc(config_service=fake)
-        svc.clone_strategy_config(db_role="prod", strategy_name="Normal", config_json={"x": 1}, activate=True)
+        svc.clone_setup_config(db_role="prod", setup_name="Normal", config_json={"x": 1}, activate=True)
         assert fake.create_calls[0]["activate"] is True
 
 
 # ------------------------------------------------------------------ #
-# export_strategy_config_csv.
+# export_setup_config_csv.
 # ------------------------------------------------------------------ #
 
 class TestExportStrategyConfigCsv:
     def test_csv_bytes_returned(self) -> None:
         fake = FakeConfig()
         svc = _svc(config_service=fake)
-        result = svc.export_strategy_config_csv(config_id="cfg1", db_role="prod")
+        result = svc.export_setup_config_csv(config_id="cfg1", db_role="prod")
         assert result.status == sr_mod.STATUS_SUCCESS
         csv_bytes = result.metadata["csv_bytes"]
         assert isinstance(csv_bytes, bytes)
         rows = list(csv.DictReader(io.StringIO(csv_bytes.decode("utf-8"))))
         assert len(rows) == 1
         assert rows[0]["config_id"] == "cfg1"
-        assert rows[0]["strategy_name"] == "Normal"
+        assert rows[0]["setup_name"] == "Normal"
 
     def test_filename_contains_strategy_and_version(self) -> None:
         fake = FakeConfig()
         svc = _svc(config_service=fake)
-        result = svc.export_strategy_config_csv(config_id="cfg1", db_role="prod")
+        result = svc.export_setup_config_csv(config_id="cfg1", db_role="prod")
         assert "Normal" in result.metadata["filename"]
         assert "v1" in result.metadata["filename"]
 
     def test_invalid_role(self) -> None:
         fake = FakeConfig()
         svc = _svc(config_service=fake)
-        result = svc.export_strategy_config_csv(config_id="cfg1", db_role="simulation")
+        result = svc.export_setup_config_csv(config_id="cfg1", db_role="simulation")
         assert result.status == sr_mod.STATUS_FAILED
 
     def test_empty_config_id(self) -> None:
         fake = FakeConfig()
         svc = _svc(config_service=fake)
-        result = svc.export_strategy_config_csv(config_id="", db_role="prod")
+        result = svc.export_setup_config_csv(config_id="", db_role="prod")
         assert result.status == sr_mod.STATUS_FAILED
 
     def test_upstream_failure_propagated(self) -> None:
         fake = FakeConfig(get_result=_fail(error="not found"))
         svc = _svc(config_service=fake)
-        result = svc.export_strategy_config_csv(config_id="cfg1", db_role="prod")
+        result = svc.export_setup_config_csv(config_id="cfg1", db_role="prod")
         assert result.status == sr_mod.STATUS_FAILED
 
 
@@ -428,7 +428,7 @@ class TestExportProposalsCsv:
         rows = [
             ("pid1", date(2026, 6, 5), "NVDA", "cfg1", 1, 1, 92.4, 91.0, True, True, "Trend Resume", 3.12, "Technology", "Semiconductors", "EMA breakout"),
         ]
-        columns = ["proposal_id", "signal_date", "ticker", "strategy_config_id", "raw_rank", "diversified_rank", "proposal_score_raw", "proposal_score_final", "in_raw_top_n", "in_diversified_top_n", "setup_type", "estimated_rr", "sector", "industry", "mechanical_explanation"]
+        columns = ["proposal_id", "signal_date", "ticker", "setup_config_id", "raw_rank", "diversified_rank", "proposal_score_raw", "proposal_score_final", "in_raw_top_n", "in_diversified_top_n", "setup_type", "estimated_rr", "sector", "industry", "mechanical_explanation"]
         return FakeDbManager(rows=rows, columns=columns)
 
     def test_success_returns_csv_bytes(self) -> None:

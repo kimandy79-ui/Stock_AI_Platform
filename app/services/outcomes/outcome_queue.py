@@ -1,9 +1,9 @@
-"""Module 16 — Outcome Queue.
+"""Module 16 — Outcome Queue (setup-mode).
 
 Two services that turn Step 5 proposals into realized ``signal_outcomes``:
 
 ``OutcomeQueueCreator``
-    For one ``signal_date`` / ``strategy_config_id`` it reads every Step 5
+    For one ``signal_date`` / ``setup_config_id`` it reads every Step 5
     proposal that is in the raw OR diversified Top-N
     (``in_raw_top_n OR in_diversified_top_n`` — AD-22.13) and enqueues one
     ``outcome_tracking_queue`` row per outcome horizon
@@ -13,30 +13,22 @@ Two services that turn Step 5 proposals into realized ``signal_outcomes``:
 ``OutcomeQueueProcessor``
     For one ``run_date`` it processes every ``pending`` queue row whose
     ``eval_date`` has been reached, computes slippage-adjusted entry prices,
-    horizon returns, 40bd MFE/MAE, realized R-multiple and the
-    ``earnings_within_window`` flag (AD-22.14: ``entry_price_sim`` is the
+    horizon returns, 40bd MFE/MAE, stop_hit/target_hit, realized R-multiple and
+    the ``earnings_within_window`` flag (AD-22.14: ``entry_price_sim`` is the
     denominator for every performance figure), and upserts one
     ``signal_outcomes`` row per queue row. Missing entry-date prices increment a
     repair counter and mark the row ``unresolvable`` after three attempts.
 
-Contract source of truth: ``M16_OUTCOME_QUEUE_SPEC.md`` (derived from the split
-Project Files — ``01b_SCHEMA_AND_DATA.md`` for the
+Setup-mode contract: signal_outcomes carries ``setup_config_id``, ``setup_type``,
+``risk_label``, ``stop_price_raw``, ``target_price_raw``, ``stop_hit``,
+``target_hit`` (AD-22.21). The old ``strategy_config_id`` key is retired.
+
+Contract source of truth: ``01b_SCHEMA_AND_DATA.md`` for the
 ``outcome_tracking_queue`` / ``signal_outcomes`` / ``step5_proposals`` /
 ``step4_analysis`` / ``daily_prices`` / ``earnings_calendar`` schema,
 ``01c_FORMULAS_AND_CONFIGS.md`` §64 for the entry / return / MFE / MAE /
-R-multiple formulas, ``02b_ARCHITECTURE_DECISIONS.md`` AD-22.13 / AD-22.14 for
-the eligibility condition and ``entry_price_sim`` rule, ``01a`` / ``01c`` for
-``OUTCOME_HORIZONS_BD`` and ``simulation.slippage_bps``,
-``PIPELINE/73_Trading_Calendar_Spec.md`` for NYSE ``next_trading_day`` /
-``add_trading_days``, and the frozen Module 15 service for the ``db_role`` guard,
-config-validation-before-IO, read→compute→single-write transaction style and
-metadata discipline).
-
-Both services route every database access through the approved
-:mod:`app.database.duckdb_manager` (or an injected ``db_manager``); neither
-imports ``duckdb`` directly, runs DDL, uses ``ATTACH``, calls providers, or uses
-``print()``. ``db_role`` accepts only ``prod`` / ``debug``; ``simulation`` is
-rejected before any DB access.
+R-multiple / stop_hit / target_hit formulas, ``02b_ARCHITECTURE_DECISIONS.md``
+AD-22.13 / AD-22.14 / AD-22.21 / AD-22.23.
 """
 
 from __future__ import annotations
@@ -78,7 +70,7 @@ _OUTCOME_ID_PREFIX: Final[str] = "signal_outcomes"
 ENQUEUE_METADATA_KEYS: Final[tuple[str, ...]] = (
     "db_role",
     "signal_date",
-    "strategy_config_id",
+    "setup_config_id",
     "run_id",
     "proposals_read",
     "rows_enqueued",
@@ -98,14 +90,8 @@ PROCESS_METADATA_KEYS: Final[tuple[str, ...]] = (
 # Injection hooks (kept off the public ``__init__`` signatures).
 # --------------------------------------------------------------------------- #
 def _default_calendar() -> Any:
-    """Return the project NYSE trading-calendar utility.
-
-    Imported lazily and resolved through this module-level function so tests can
-    ``monkeypatch`` it with a fake calendar without importing
-    ``pandas_market_calendars``. The real utility is used in prod / debug.
-    """
+    """Return the project NYSE trading-calendar utility."""
     from app.utils import trading_calendar
-
     return trading_calendar
 
 
@@ -116,23 +102,24 @@ class _DbManagerLike(Protocol):
 
 
 class _ConfigError(ValueError):
-    """Raised internally when ``strategy_config`` is missing / invalid a key."""
+    """Raised internally when ``setup_config`` is missing / invalid a key."""
 
 
 # --------------------------------------------------------------------------- #
 # SQL (operates only on existing objects; no DDL).
 # --------------------------------------------------------------------------- #
 # Eligible proposals for enqueue: raw OR diversified Top-N (AD-22.13).
+# Uses setup_config_id (setup-mode column name, AD-22.21).
 _SELECT_ELIGIBLE_PROPOSALS: Final[str] = (
     "SELECT proposal_id, ticker "
     "FROM step5_proposals "
     "WHERE signal_date = ? "
-    "  AND strategy_config_id = ? "
+    "  AND setup_config_id = ? "
     "  AND (in_raw_top_n = TRUE OR in_diversified_top_n = TRUE) "
     "ORDER BY proposal_id"
 )
 
-# Idempotent queue insert. RETURNING lets us count only newly inserted rows.
+# Idempotent queue insert.
 _INSERT_QUEUE_ROW: Final[str] = (
     "INSERT INTO outcome_tracking_queue "
     "(tracking_id, proposal_id, ticker, signal_date, entry_date, eval_date, "
@@ -153,17 +140,10 @@ _SELECT_DUE_QUEUE_ROWS: Final[str] = (
     "ORDER BY tracking_id"
 )
 
-_SELECT_PROPOSAL_CONFIG: Final[str] = (
-    "SELECT strategy_config_id FROM step5_proposals WHERE proposal_id = ?"
-)
-
-# stop_price_raw via the (ticker, signal_date, strategy_config_id) join path.
-# step5_proposals carries no analysis_id/candidate_id, so this is the documented
-# relationship (M16 spec open gap G-STOP-JOIN). Deterministic single pick.
-_SELECT_STOP_PRICE: Final[str] = (
-    "SELECT stop_price_raw FROM step4_analysis "
-    "WHERE ticker = ? AND signal_date = ? AND strategy_config_id = ? "
-    "ORDER BY analysis_id LIMIT 1"
+# Read setup_config_id, setup_type, risk_label, stop/target from proposal.
+_SELECT_PROPOSAL_SETUP_FIELDS: Final[str] = (
+    "SELECT setup_config_id, setup_type, risk_label, stop_price_raw, target_price_raw "
+    "FROM step5_proposals WHERE proposal_id = ?"
 )
 
 _SELECT_OPEN_RAW: Final[str] = (
@@ -174,13 +154,13 @@ _SELECT_CLOSE_ADJ: Final[str] = (
     "SELECT close_adj FROM daily_prices WHERE ticker = ? AND date = ?"
 )
 
-# High/low adjusted candles inside an inclusive date window (40bd MFE/MAE).
+# High/low candles for stop_hit/target_hit and MFE/MAE.
 _SELECT_WINDOW_CANDLES: Final[str] = (
-    "SELECT date, high_adj, low_adj FROM daily_prices "
+    "SELECT date, high_adj, low_adj, high_raw, low_raw FROM daily_prices "
     "WHERE ticker = ? AND date BETWEEN ? AND ?"
 )
 
-# Earnings totals + in-window counts for the (entry_date, eval_date] window.
+# Earnings in-window counts.
 _SELECT_EARNINGS: Final[str] = (
     "SELECT "
     "  COUNT(*) AS total, "
@@ -191,27 +171,35 @@ _SELECT_EARNINGS: Final[str] = (
 
 _UPSERT_OUTCOME: Final[str] = (
     "INSERT INTO signal_outcomes "
-    "(outcome_id, proposal_id, ticker, strategy_config_id, signal_date, "
-    " entry_date, entry_price_raw, entry_price_sim, return_5bd_pct, "
-    " return_10bd_pct, return_20bd_pct, return_40bd_pct, mfe_40bd_pct, "
-    " mae_40bd_pct, realized_r_multiple, earnings_within_window, "
+    "(outcome_id, proposal_id, ticker, setup_config_id, setup_type, risk_label, "
+    " signal_date, entry_date, entry_price_raw, entry_price_sim, "
+    " stop_price_raw, target_price_raw, "
+    " return_5bd_pct, return_10bd_pct, return_20bd_pct, return_40bd_pct, "
+    " mfe_40bd_pct, mae_40bd_pct, stop_hit, target_hit, "
+    " realized_r_multiple, earnings_within_window, "
     " cross_fold_outcome, outcome_status, calculated_at) "
-    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, FALSE, ?, "
-    " CAST(now() AS TIMESTAMP)) "
+    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
+    " FALSE, ?, CAST(now() AS TIMESTAMP)) "
     "ON CONFLICT (outcome_id) DO UPDATE SET "
     "  proposal_id = excluded.proposal_id, "
     "  ticker = excluded.ticker, "
-    "  strategy_config_id = excluded.strategy_config_id, "
+    "  setup_config_id = excluded.setup_config_id, "
+    "  setup_type = excluded.setup_type, "
+    "  risk_label = excluded.risk_label, "
     "  signal_date = excluded.signal_date, "
     "  entry_date = excluded.entry_date, "
     "  entry_price_raw = excluded.entry_price_raw, "
     "  entry_price_sim = excluded.entry_price_sim, "
+    "  stop_price_raw = excluded.stop_price_raw, "
+    "  target_price_raw = excluded.target_price_raw, "
     "  return_5bd_pct = excluded.return_5bd_pct, "
     "  return_10bd_pct = excluded.return_10bd_pct, "
     "  return_20bd_pct = excluded.return_20bd_pct, "
     "  return_40bd_pct = excluded.return_40bd_pct, "
     "  mfe_40bd_pct = excluded.mfe_40bd_pct, "
     "  mae_40bd_pct = excluded.mae_40bd_pct, "
+    "  stop_hit = excluded.stop_hit, "
+    "  target_hit = excluded.target_hit, "
     "  realized_r_multiple = excluded.realized_r_multiple, "
     "  earnings_within_window = excluded.earnings_within_window, "
     "  outcome_status = excluded.outcome_status, "
@@ -271,20 +259,20 @@ def _outcome_id_for(proposal_id: str, horizon_bd: int) -> str:
     )
 
 
-def _validate_config(strategy_config: dict) -> float:
+def _validate_config(setup_config: dict) -> float:
     """Validate ``simulation.slippage_bps`` and return it as ``float``.
 
     Raises
     ------
     _ConfigError
-        If ``strategy_config`` is not a dict, the ``simulation`` section is
+        If ``setup_config`` is not a dict, the ``simulation`` section is
         missing / not a dict, or ``slippage_bps`` is missing / non-numeric /
         negative.
     """
-    if not isinstance(strategy_config, dict):
-        raise _ConfigError("strategy_config must be a dict")
+    if not isinstance(setup_config, dict):
+        raise _ConfigError("setup_config must be a dict")
 
-    sim = strategy_config.get("simulation")
+    sim = setup_config.get("simulation")
     if not isinstance(sim, dict):
         raise _ConfigError("missing config section simulation")
 
@@ -319,8 +307,8 @@ class OutcomeQueueCreator:
     def enqueue(
         self,
         signal_date: date,
-        strategy_config_id: str,
-        strategy_config: dict,
+        setup_config_id: str,
+        setup_config: dict,
         db_role: str = "prod",
         run_id: str | None = None,
     ) -> ServiceResult:
@@ -330,35 +318,27 @@ class OutcomeQueueCreator:
         ----------
         signal_date:
             Proposal signal date; only ``step5_proposals`` with this
-            ``signal_date`` / ``strategy_config_id`` are considered.
-        strategy_config_id:
-            Strategy config id used in the eligibility filter.
-        strategy_config:
-            Parsed strategy-config JSON. ``simulation.slippage_bps`` is validated
+            ``signal_date`` / ``setup_config_id`` are considered.
+        setup_config_id:
+            Setup config id used in the eligibility filter (AD-22.21).
+        setup_config:
+            Parsed setup-config JSON. ``simulation.slippage_bps`` is validated
             before any DB access.
         db_role:
-            ``"prod"`` or ``"debug"`` only; ``"simulation"`` (or anything else)
-            returns ``failed`` before any DB access.
+            ``"prod"`` or ``"debug"`` only.
         run_id:
             A fresh ``uuid4`` is minted when ``None``.
-
-        Returns
-        -------
-        ServiceResult
-            ``rows_processed`` equals ``metadata["rows_enqueued"]`` on every
-            path; ``metadata`` carries exactly :data:`ENQUEUE_METADATA_KEYS`.
         """
         run_id = run_id if run_id is not None else str(uuid.uuid4())
         log = logging_config.get_logger(__name__, run_id)
         signal_iso = signal_date.isoformat()
         log.info(
-            "enqueue start db_role=%s signal_date=%s strategy_config_id=%s",
+            "enqueue start db_role=%s signal_date=%s setup_config_id=%s",
             db_role,
             signal_iso,
-            strategy_config_id,
+            setup_config_id,
         )
 
-        # --- db_role guard (no I/O). --------------------------------------- #
         if db_role not in ALLOWED_DB_ROLES:
             message = (
                 f"Unsupported db_role {db_role!r}. "
@@ -366,43 +346,34 @@ class OutcomeQueueCreator:
             )
             log.error("enqueue failed: %s", message)
             return self._enqueue_failed(
-                run_id, db_role, signal_iso, strategy_config_id, message
+                run_id, db_role, signal_iso, setup_config_id, message
             )
 
-        # --- config guard (before any DB access). -------------------------- #
         try:
-            _validate_config(strategy_config)
+            _validate_config(setup_config)
         except _ConfigError as exc:
             log.error("enqueue failed: %s", exc)
             return self._enqueue_failed(
-                run_id, db_role, signal_iso, strategy_config_id, str(exc)
+                run_id, db_role, signal_iso, setup_config_id, str(exc)
             )
 
-        # --- read phase (read-only). --------------------------------------- #
         try:
-            proposals = self._read_eligible(
-                db_role, signal_date, strategy_config_id
-            )
-        except Exception as exc:  # noqa: BLE001 - surface DB read failure
+            proposals = self._read_eligible(db_role, signal_date, setup_config_id)
+        except Exception as exc:  # noqa: BLE001
             message = f"read failed: {type(exc).__name__}: {exc}"
             log.error("enqueue failed: %s", message)
             return self._enqueue_failed(
-                run_id, db_role, signal_iso, strategy_config_id, message
+                run_id, db_role, signal_iso, setup_config_id, message
             )
 
         proposals_read = len(proposals)
         if proposals_read == 0:
             log.info("enqueue done: no eligible proposals for %s", signal_iso)
             return self._enqueue_success(
-                run_id,
-                db_role,
-                signal_iso,
-                strategy_config_id,
-                proposals_read=0,
-                rows_enqueued=0,
+                run_id, db_role, signal_iso, setup_config_id,
+                proposals_read=0, rows_enqueued=0,
             )
 
-        # --- compute phase (calendar dates; pure, no DB). ------------------ #
         cal = _default_calendar()
         entry_date = cal.next_trading_day(signal_date)
         eval_by_horizon = {
@@ -415,9 +386,7 @@ class OutcomeQueueCreator:
             for horizon in constants.OUTCOME_HORIZONS_BD:
                 plan.append(
                     {
-                        "tracking_id": _tracking_id_for(
-                            proposal["proposal_id"], horizon
-                        ),
+                        "tracking_id": _tracking_id_for(proposal["proposal_id"], horizon),
                         "proposal_id": proposal["proposal_id"],
                         "ticker": proposal["ticker"],
                         "signal_date": signal_date,
@@ -427,64 +396,39 @@ class OutcomeQueueCreator:
                     }
                 )
 
-        # --- write phase (single transaction; counts only new inserts). ---- #
         try:
             rows_enqueued = self._write_queue(db_role, plan)
-        except Exception as exc:  # noqa: BLE001 - surface as failed; rollback inside
+        except Exception as exc:  # noqa: BLE001
             log.error(
                 "enqueue failed during write (rolled back): %s: %s",
-                type(exc).__name__,
-                exc,
+                type(exc).__name__, exc,
             )
             return self._enqueue_failed(
-                run_id,
-                db_role,
-                signal_iso,
-                strategy_config_id,
-                f"{type(exc).__name__}: {exc}",
-                proposals_read=proposals_read,
+                run_id, db_role, signal_iso, setup_config_id,
+                f"{type(exc).__name__}: {exc}", proposals_read=proposals_read,
             )
 
-        log.info(
-            "enqueue done proposals_read=%d rows_enqueued=%d",
-            proposals_read,
-            rows_enqueued,
-        )
+        log.info("enqueue done proposals_read=%d rows_enqueued=%d", proposals_read, rows_enqueued)
         return self._enqueue_success(
-            run_id,
-            db_role,
-            signal_iso,
-            strategy_config_id,
-            proposals_read=proposals_read,
-            rows_enqueued=rows_enqueued,
+            run_id, db_role, signal_iso, setup_config_id,
+            proposals_read=proposals_read, rows_enqueued=rows_enqueued,
         )
 
-    # ------------------------------------------------------------------ #
-    # Read / write phases.
-    # ------------------------------------------------------------------ #
     def _read_eligible(
-        self, db_role: str, signal_date: date, strategy_config_id: str
+        self, db_role: str, signal_date: date, setup_config_id: str
     ) -> list[dict[str, Any]]:
-        """Read eligible (raw OR diversified Top-N) proposals (read-only)."""
         connection = self._db.connect(db_role, read_only=True)
         try:
             raw = connection.execute(
-                _SELECT_ELIGIBLE_PROPOSALS, [signal_date, strategy_config_id]
+                _SELECT_ELIGIBLE_PROPOSALS, [signal_date, setup_config_id]
             ).fetchall()
         finally:
             connection.close()
         return [{"proposal_id": r[0], "ticker": r[1]} for r in raw]
 
     def _write_queue(self, db_role: str, plan: list[dict[str, Any]]) -> int:
-        """Insert queue rows idempotently; return count of NEW rows.
-
-        Each row is inserted with ``ON CONFLICT (tracking_id) DO NOTHING
-        RETURNING tracking_id`` inside one ``BEGIN/COMMIT``; a returned row means
-        a genuine insert (conflicts return nothing). Any failure rolls back.
-        """
         if not plan:
             return 0
-
         inserted = 0
         connection = self._db.connect(db_role)
         try:
@@ -494,12 +438,8 @@ class OutcomeQueueCreator:
                     returned = connection.execute(
                         _INSERT_QUEUE_ROW,
                         [
-                            row["tracking_id"],
-                            row["proposal_id"],
-                            row["ticker"],
-                            row["signal_date"],
-                            row["entry_date"],
-                            row["eval_date"],
+                            row["tracking_id"], row["proposal_id"], row["ticker"],
+                            row["signal_date"], row["entry_date"], row["eval_date"],
                             row["horizon_bd"],
                         ],
                     ).fetchone()
@@ -509,49 +449,31 @@ class OutcomeQueueCreator:
             except Exception:
                 try:
                     connection.execute("ROLLBACK")
-                except Exception:  # noqa: BLE001 - never mask original error
+                except Exception:  # noqa: BLE001
                     pass
                 raise
         finally:
             connection.close()
         return inserted
 
-    # ------------------------------------------------------------------ #
-    # Result builders.
-    # ------------------------------------------------------------------ #
     def _enqueue_success(
-        self,
-        run_id: str,
-        db_role: str,
-        signal_iso: str,
-        strategy_config_id: str,
-        *,
-        proposals_read: int,
-        rows_enqueued: int,
+        self, run_id: str, db_role: str, signal_iso: str, setup_config_id: str,
+        *, proposals_read: int, rows_enqueued: int,
     ) -> ServiceResult:
         return ServiceResult(
             status=service_result.STATUS_SUCCESS,
             run_id=run_id,
             rows_processed=rows_enqueued,
             metadata=self._enqueue_metadata(
-                db_role=db_role,
-                signal_date=signal_iso,
-                strategy_config_id=strategy_config_id,
-                run_id=run_id,
-                proposals_read=proposals_read,
-                rows_enqueued=rows_enqueued,
+                db_role=db_role, signal_date=signal_iso,
+                setup_config_id=setup_config_id, run_id=run_id,
+                proposals_read=proposals_read, rows_enqueued=rows_enqueued,
             ),
         )
 
     def _enqueue_failed(
-        self,
-        run_id: str,
-        db_role: str,
-        signal_iso: str,
-        strategy_config_id: str,
-        message: str,
-        *,
-        proposals_read: int = 0,
+        self, run_id: str, db_role: str, signal_iso: str, setup_config_id: str,
+        message: str, *, proposals_read: int = 0,
     ) -> ServiceResult:
         return ServiceResult(
             status=service_result.STATUS_FAILED,
@@ -559,29 +481,21 @@ class OutcomeQueueCreator:
             rows_processed=0,
             errors=[message],
             metadata=self._enqueue_metadata(
-                db_role=db_role,
-                signal_date=signal_iso,
-                strategy_config_id=strategy_config_id,
-                run_id=run_id,
-                proposals_read=proposals_read,
-                rows_enqueued=0,
+                db_role=db_role, signal_date=signal_iso,
+                setup_config_id=setup_config_id, run_id=run_id,
+                proposals_read=proposals_read, rows_enqueued=0,
             ),
         )
 
     @staticmethod
     def _enqueue_metadata(
-        *,
-        db_role: str,
-        signal_date: str,
-        strategy_config_id: str,
-        run_id: str,
-        proposals_read: int,
-        rows_enqueued: int,
+        *, db_role: str, signal_date: str, setup_config_id: str, run_id: str,
+        proposals_read: int, rows_enqueued: int,
     ) -> dict[str, Any]:
         return {
             "db_role": db_role,
             "signal_date": signal_date,
-            "strategy_config_id": strategy_config_id,
+            "setup_config_id": setup_config_id,
             "run_id": run_id,
             "proposals_read": proposals_read,
             "rows_enqueued": rows_enqueued,
@@ -592,11 +506,7 @@ class OutcomeQueueCreator:
 # Outcome queue processor.
 # --------------------------------------------------------------------------- #
 class OutcomeQueueProcessor:
-    """Compute ``signal_outcomes`` for every due (``eval_date <= run_date``)
-    pending queue row.
-
-    The optional ``db_manager`` argument exists only for test injection.
-    """
+    """Compute ``signal_outcomes`` for every due pending queue row."""
 
     def __init__(self, db_manager: _DbManagerLike | None = None) -> None:
         self._db: _DbManagerLike = (
@@ -606,7 +516,7 @@ class OutcomeQueueProcessor:
     def process(
         self,
         run_date: date,
-        strategy_config: dict,
+        setup_config: dict,
         db_role: str = "prod",
         run_id: str | None = None,
     ) -> ServiceResult:
@@ -617,27 +527,19 @@ class OutcomeQueueProcessor:
         run_date:
             Processing date; only ``pending`` queue rows with
             ``eval_date <= run_date`` are processed.
-        strategy_config:
-            Parsed strategy-config JSON. ``simulation.slippage_bps`` is validated
+        setup_config:
+            Parsed setup-config JSON. ``simulation.slippage_bps`` is validated
             before any DB access and used for ``entry_price_sim``.
         db_role:
-            ``"prod"`` or ``"debug"`` only; ``"simulation"`` returns ``failed``
-            before any DB access.
+            ``"prod"`` or ``"debug"`` only.
         run_id:
             A fresh ``uuid4`` is minted when ``None``.
-
-        Returns
-        -------
-        ServiceResult
-            ``rows_processed`` equals ``metadata["outcomes_written"]`` on every
-            path; ``metadata`` carries exactly :data:`PROCESS_METADATA_KEYS`.
         """
         run_id = run_id if run_id is not None else str(uuid.uuid4())
         log = logging_config.get_logger(__name__, run_id)
         run_iso = run_date.isoformat()
         log.info("process start db_role=%s run_date=%s", db_role, run_iso)
 
-        # --- db_role guard (no I/O). --------------------------------------- #
         if db_role not in ALLOWED_DB_ROLES:
             message = (
                 f"Unsupported db_role {db_role!r}. "
@@ -646,17 +548,15 @@ class OutcomeQueueProcessor:
             log.error("process failed: %s", message)
             return self._process_failed(run_id, db_role, run_iso, message)
 
-        # --- config guard (before any DB access). -------------------------- #
         try:
-            slippage_bps = _validate_config(strategy_config)
+            slippage_bps = _validate_config(setup_config)
         except _ConfigError as exc:
             log.error("process failed: %s", exc)
             return self._process_failed(run_id, db_role, run_iso, str(exc))
 
-        # --- read + compute phase (read-only connection). ------------------ #
         try:
             plan = self._build_plan(db_role, run_date, slippage_bps)
-        except Exception as exc:  # noqa: BLE001 - surface DB read failure
+        except Exception as exc:  # noqa: BLE001
             message = f"read failed: {type(exc).__name__}: {exc}"
             log.error("process failed: %s", message)
             return self._process_failed(run_id, db_role, run_iso, message)
@@ -665,80 +565,49 @@ class OutcomeQueueProcessor:
         if queue_rows_read == 0:
             log.info("process done: no due queue rows for %s", run_iso)
             return self._process_success(
-                run_id,
-                db_role,
-                run_iso,
-                queue_rows_read=0,
-                outcomes_written=0,
-                unresolvable_count=0,
-                repair_incremented_count=0,
+                run_id, db_role, run_iso, queue_rows_read=0, outcomes_written=0,
+                unresolvable_count=0, repair_incremented_count=0,
             )
 
-        # --- write phase (single transaction). ----------------------------- #
         try:
             self._write_plan(db_role, plan)
-        except Exception as exc:  # noqa: BLE001 - surface as failed; rollback inside
+        except Exception as exc:  # noqa: BLE001
             log.error(
                 "process failed during write (rolled back): %s: %s",
-                type(exc).__name__,
-                exc,
+                type(exc).__name__, exc,
             )
             return self._process_failed(
-                run_id,
-                db_role,
-                run_iso,
-                f"{type(exc).__name__}: {exc}",
+                run_id, db_role, run_iso, f"{type(exc).__name__}: {exc}",
                 queue_rows_read=queue_rows_read,
             )
 
         log.info(
             "process done queue_rows_read=%d outcomes_written=%d "
             "unresolvable=%d repair_incremented=%d",
-            queue_rows_read,
-            len(plan["outcomes"]),
-            plan["unresolvable_count"],
-            plan["repair_incremented_count"],
+            queue_rows_read, len(plan["outcomes"]),
+            plan["unresolvable_count"], plan["repair_incremented_count"],
         )
         return self._process_success(
-            run_id,
-            db_role,
-            run_iso,
-            queue_rows_read=queue_rows_read,
+            run_id, db_role, run_iso, queue_rows_read=queue_rows_read,
             outcomes_written=len(plan["outcomes"]),
             unresolvable_count=plan["unresolvable_count"],
             repair_incremented_count=plan["repair_incremented_count"],
         )
 
-    # ------------------------------------------------------------------ #
-    # Read + compute phase.
-    # ------------------------------------------------------------------ #
     def _build_plan(
         self, db_role: str, run_date: date, slippage_bps: float
     ) -> dict[str, Any]:
-        """Read all due queue rows, compute outcomes / repair decisions.
-
-        Returns a write-plan dict with ``outcomes`` (signal_outcomes upserts),
-        ``queue_done`` (tracking_ids to mark done), ``queue_repair`` (repair
-        updates), counters and ``queue_rows_read``. All reads use a single
-        read-only connection that is closed before the caller's write phase.
-        """
+        """Read all due queue rows, compute outcomes / repair decisions."""
         cal = _default_calendar()
         connection = self._db.connect(db_role, read_only=True)
         try:
             queue_rows = [
                 {
-                    "tracking_id": r[0],
-                    "proposal_id": r[1],
-                    "ticker": r[2],
-                    "signal_date": r[3],
-                    "entry_date": r[4],
-                    "eval_date": r[5],
-                    "horizon_bd": int(r[6]),
-                    "repair_attempts": int(r[7]),
+                    "tracking_id": r[0], "proposal_id": r[1], "ticker": r[2],
+                    "signal_date": r[3], "entry_date": r[4], "eval_date": r[5],
+                    "horizon_bd": int(r[6]), "repair_attempts": int(r[7]),
                 }
-                for r in connection.execute(
-                    _SELECT_DUE_QUEUE_ROWS, [run_date]
-                ).fetchall()
+                for r in connection.execute(_SELECT_DUE_QUEUE_ROWS, [run_date]).fetchall()
             ]
 
             outcomes: list[dict[str, Any]] = []
@@ -752,137 +621,105 @@ class OutcomeQueueProcessor:
                 entry_date = row["entry_date"]
                 horizon_bd = row["horizon_bd"]
 
-                # 1. entry-date open_raw.
-                entry_open = _f(
-                    self._scalar(
-                        connection, _SELECT_OPEN_RAW, [ticker, entry_date]
-                    )
-                )
+                entry_open = _f(self._scalar(connection, _SELECT_OPEN_RAW, [ticker, entry_date]))
 
-                # 2. missing entry price -> repair / unresolvable; no outcome.
                 if entry_open is None:
                     attempts = row["repair_attempts"] + 1
                     repair_incremented_count += 1
                     if attempts >= MAX_REPAIR_ATTEMPTS:
                         unresolvable_count += 1
-                        queue_repair.append(
-                            {
-                                "tracking_id": row["tracking_id"],
-                                "repair_attempts": attempts,
-                                "unresolvable": True,
-                            }
-                        )
+                        queue_repair.append({
+                            "tracking_id": row["tracking_id"],
+                            "repair_attempts": attempts, "unresolvable": True,
+                        })
                     else:
-                        queue_repair.append(
-                            {
-                                "tracking_id": row["tracking_id"],
-                                "repair_attempts": attempts,
-                                "unresolvable": False,
-                            }
-                        )
+                        queue_repair.append({
+                            "tracking_id": row["tracking_id"],
+                            "repair_attempts": attempts, "unresolvable": False,
+                        })
                     continue
 
-                # 3. entry prices (AD-22.14: entry_price_sim drives returns).
                 entry_price_raw = entry_open
                 entry_price_sim = entry_price_raw * (1 + slippage_bps / 10000.0)
 
-                # Resolve strategy_config_id + stop_price for this proposal.
-                strategy_config_id = self._scalar(
-                    connection, _SELECT_PROPOSAL_CONFIG, [row["proposal_id"]]
-                )
-                stop_price_raw = _f(
-                    self._scalar(
-                        connection,
-                        _SELECT_STOP_PRICE,
-                        [ticker, row["signal_date"], strategy_config_id],
-                    )
-                )
+                # Read setup_config_id, setup_type, risk_label, stop/target from proposal.
+                proposal_row = connection.execute(
+                    _SELECT_PROPOSAL_SETUP_FIELDS, [row["proposal_id"]]
+                ).fetchone()
+                setup_config_id: str | None = None
+                setup_type: str | None = None
+                risk_label: str | None = None
+                stop_price_raw: float | None = None
+                target_price_raw: float | None = None
+                if proposal_row is not None:
+                    setup_config_id = proposal_row[0]
+                    setup_type = proposal_row[1]
+                    risk_label = proposal_row[2]
+                    stop_price_raw = _f(proposal_row[3])
+                    target_price_raw = _f(proposal_row[4])
 
-                # 4. horizon returns for horizons <= this row's horizon_bd.
-                returns: dict[int, float | None] = {
-                    5: None,
-                    10: None,
-                    20: None,
-                    40: None,
-                }
+                # Horizon returns.
+                returns: dict[int, float | None] = {5: None, 10: None, 20: None, 40: None}
                 eval_close_adj: dict[int, float | None] = {}
                 for n in constants.OUTCOME_HORIZONS_BD:
                     if n > horizon_bd:
                         continue
                     eval_n = cal.add_trading_days(entry_date, n)
-                    close_n = _f(
-                        self._scalar(
-                            connection, _SELECT_CLOSE_ADJ, [ticker, eval_n]
-                        )
-                    )
+                    close_n = _f(self._scalar(connection, _SELECT_CLOSE_ADJ, [ticker, eval_n]))
                     eval_close_adj[n] = close_n
                     returns[n] = (
-                        None
-                        if close_n is None
-                        else close_n / entry_price_sim - 1.0
+                        None if close_n is None else close_n / entry_price_sim - 1.0
                     )
 
-                # 5. 40bd MFE/MAE (only for horizon_bd == 40).
+                # 40bd MFE/MAE + stop_hit/target_hit (only for horizon_bd == 40).
                 mfe_40 = mae_40 = None
+                stop_hit: bool | None = None
+                target_hit: bool | None = None
                 if horizon_bd == 40:
-                    mfe_40, mae_40 = self._window_mfe_mae(
-                        connection,
-                        cal,
-                        ticker,
-                        entry_date,
-                        row["eval_date"],
-                        horizon_bd,
-                        entry_price_sim,
+                    mfe_40, mae_40, stop_hit, target_hit = self._window_stats(
+                        connection, cal, ticker, entry_date, row["eval_date"],
+                        entry_price_sim, stop_price_raw, target_price_raw,
                     )
 
-                # 6. realized R-multiple (this row's own eval-date close_adj).
                 exit_close = eval_close_adj.get(horizon_bd)
-                realized_r = self._realized_r(
-                    exit_close, entry_price_sim, stop_price_raw
-                )
+                realized_r = self._realized_r(exit_close, entry_price_sim, stop_price_raw)
 
-                # 7. earnings_within_window over (entry_date, eval_date].
                 earnings_flag = self._earnings_within_window(
                     connection, ticker, entry_date, row["eval_date"]
                 )
 
-                # 8. outcome_status: complete iff all required returns present.
                 required = [
-                    returns[n]
-                    for n in constants.OUTCOME_HORIZONS_BD
-                    if n <= horizon_bd
+                    returns[n] for n in constants.OUTCOME_HORIZONS_BD if n <= horizon_bd
                 ]
                 status = (
-                    OUTCOME_COMPLETE
-                    if all(v is not None for v in required)
-                    else OUTCOME_PARTIAL
+                    OUTCOME_COMPLETE if all(v is not None for v in required) else OUTCOME_PARTIAL
                 )
 
-                # 9. one signal_outcomes upsert payload (deterministic id).
-                outcomes.append(
-                    {
-                        "outcome_id": _outcome_id_for(
-                            row["proposal_id"], horizon_bd
-                        ),
-                        "proposal_id": row["proposal_id"],
-                        "ticker": ticker,
-                        "strategy_config_id": strategy_config_id,
-                        "signal_date": row["signal_date"],
-                        "entry_date": entry_date,
-                        "entry_price_raw": entry_price_raw,
-                        "entry_price_sim": entry_price_sim,
-                        "return_5bd_pct": returns[5],
-                        "return_10bd_pct": returns[10],
-                        "return_20bd_pct": returns[20],
-                        "return_40bd_pct": returns[40],
-                        "mfe_40bd_pct": mfe_40,
-                        "mae_40bd_pct": mae_40,
-                        "realized_r_multiple": realized_r,
-                        "earnings_within_window": earnings_flag,
-                        "outcome_status": status,
-                    }
-                )
-                # 10. mark queue row done after a successful outcome write.
+                outcomes.append({
+                    "outcome_id": _outcome_id_for(row["proposal_id"], horizon_bd),
+                    "proposal_id": row["proposal_id"],
+                    "ticker": ticker,
+                    "setup_config_id": setup_config_id,
+                    "setup_type": setup_type,
+                    "risk_label": risk_label,
+                    "signal_date": row["signal_date"],
+                    "entry_date": entry_date,
+                    "entry_price_raw": entry_price_raw,
+                    "entry_price_sim": entry_price_sim,
+                    "stop_price_raw": stop_price_raw,
+                    "target_price_raw": target_price_raw,
+                    "return_5bd_pct": returns[5],
+                    "return_10bd_pct": returns[10],
+                    "return_20bd_pct": returns[20],
+                    "return_40bd_pct": returns[40],
+                    "mfe_40bd_pct": mfe_40,
+                    "mae_40bd_pct": mae_40,
+                    "stop_hit": stop_hit,
+                    "target_hit": target_hit,
+                    "realized_r_multiple": realized_r,
+                    "earnings_within_window": earnings_flag,
+                    "outcome_status": status,
+                })
                 queue_done.append(row["tracking_id"])
         finally:
             connection.close()
@@ -898,50 +735,63 @@ class OutcomeQueueProcessor:
 
     @staticmethod
     def _scalar(connection: Any, sql: str, params: list[Any]) -> Any:
-        """Return the first column of the first row, or ``None`` if no row."""
         row = connection.execute(sql, params).fetchone()
         return None if row is None else row[0]
 
-    def _window_mfe_mae(
+    def _window_stats(
         self,
         connection: Any,
         cal: Any,
         ticker: str,
         entry_date: date,
         eval_date: date,
-        horizon_bd: int,
         entry_price_sim: float,
-    ) -> tuple[float | None, float | None]:
-        """Compute (mfe, mae) over ``[entry_date, eval_date]`` or (None, None).
+        stop_price_raw: float | None,
+        target_price_raw: float | None,
+    ) -> tuple[float | None, float | None, bool | None, bool | None]:
+        """Compute (mfe, mae, stop_hit, target_hit) over [entry_date, eval_date].
 
-        Every expected NYSE session in the inclusive window must have a non-NULL
-        ``high_adj`` and ``low_adj`` candle; if any is missing the result is
-        ``(None, None)`` (FORMULAS §64 missing-candle rule).
+        MFE/MAE use adjusted highs/lows. stop_hit/target_hit use raw highs/lows
+        (FORMULAS §64). Returns (None, None, None, None) on any missing candle.
         """
         expected = cal.trading_days_between(entry_date, eval_date)
         candles = {
-            r[0]: (r[1], r[2])
+            r[0]: (r[1], r[2], r[3], r[4])
             for r in connection.execute(
                 _SELECT_WINDOW_CANDLES, [ticker, entry_date, eval_date]
             ).fetchall()
         }
-        highs: list[float] = []
-        lows: list[float] = []
+        highs_adj: list[float] = []
+        lows_adj: list[float] = []
+        stop_triggered = False
+        target_triggered = False
         for day in expected:
             cell = candles.get(day)
             if cell is None:
-                return None, None
-            high = _f(cell[0])
-            low = _f(cell[1])
-            if high is None or low is None:
-                return None, None
-            highs.append(high)
-            lows.append(low)
-        if not highs:
-            return None, None
-        mfe = max(highs) / entry_price_sim - 1.0
-        mae = min(lows) / entry_price_sim - 1.0
-        return mfe, mae
+                return None, None, None, None
+            high_adj = _f(cell[0])
+            low_adj = _f(cell[1])
+            high_raw = _f(cell[2])
+            low_raw = _f(cell[3])
+            if high_adj is None or low_adj is None:
+                return None, None, None, None
+            highs_adj.append(high_adj)
+            lows_adj.append(low_adj)
+            # stop_hit: low_raw <= stop_price_raw (FORMULAS §64)
+            if stop_price_raw is not None and low_raw is not None and not stop_triggered:
+                if low_raw <= stop_price_raw:
+                    stop_triggered = True
+            # target_hit: high_raw >= target_price_raw (FORMULAS §64)
+            if target_price_raw is not None and high_raw is not None and not target_triggered:
+                if high_raw >= target_price_raw:
+                    target_triggered = True
+        if not highs_adj:
+            return None, None, None, None
+        mfe = max(highs_adj) / entry_price_sim - 1.0
+        mae = min(lows_adj) / entry_price_sim - 1.0
+        sh = stop_triggered if stop_price_raw is not None else None
+        th = target_triggered if target_price_raw is not None else None
+        return mfe, mae, sh, th
 
     @staticmethod
     def _realized_r(
@@ -949,7 +799,6 @@ class OutcomeQueueProcessor:
         entry_price_sim: float,
         stop_price_raw: float | None,
     ) -> float | None:
-        """Realized R-multiple, or ``None`` for missing prices / denom <= 0."""
         if exit_close_adj is None or stop_price_raw is None:
             return None
         denom = entry_price_sim - stop_price_raw
@@ -958,18 +807,8 @@ class OutcomeQueueProcessor:
         return (exit_close_adj - entry_price_sim) / denom
 
     def _earnings_within_window(
-        self,
-        connection: Any,
-        ticker: str,
-        entry_date: date,
-        eval_date: date,
+        self, connection: Any, ticker: str, entry_date: date, eval_date: date,
     ) -> bool | None:
-        """Tri-state earnings flag for ``(entry_date, eval_date]``.
-
-        ``True`` if any earnings row falls in the window; ``False`` if the ticker
-        has earnings rows but none in the window; ``None`` if the ticker has no
-        earnings rows at all (M16 spec gap G-EARNINGS-NULL).
-        """
         row = connection.execute(
             _SELECT_EARNINGS, [entry_date, eval_date, ticker]
         ).fetchone()
@@ -979,24 +818,12 @@ class OutcomeQueueProcessor:
             return None
         return in_window > 0
 
-    # ------------------------------------------------------------------ #
-    # Write phase.
-    # ------------------------------------------------------------------ #
     def _write_plan(self, db_role: str, plan: dict[str, Any]) -> None:
-        """Apply all outcome upserts + queue updates in one transaction.
-
-        ``signal_outcomes`` rows are upserted on ``outcome_id``; queue rows with
-        a written outcome become ``done`` (with ``completed_at``); repair rows
-        bump ``repair_attempts`` / ``last_repair_attempt`` (and flip to
-        ``unresolvable`` at the 3rd attempt). Any failure rolls the whole batch
-        back without masking the original error.
-        """
         outcomes = plan["outcomes"]
         queue_done = plan["queue_done"]
         queue_repair = plan["queue_repair"]
         if not outcomes and not queue_done and not queue_repair:
             return
-
         connection = self._db.connect(db_role)
         try:
             connection.execute("BEGIN TRANSACTION")
@@ -1005,22 +832,16 @@ class OutcomeQueueProcessor:
                     connection.execute(
                         _UPSERT_OUTCOME,
                         [
-                            o["outcome_id"],
-                            o["proposal_id"],
-                            o["ticker"],
-                            o["strategy_config_id"],
-                            o["signal_date"],
-                            o["entry_date"],
-                            o["entry_price_raw"],
-                            o["entry_price_sim"],
-                            o["return_5bd_pct"],
-                            o["return_10bd_pct"],
-                            o["return_20bd_pct"],
-                            o["return_40bd_pct"],
-                            o["mfe_40bd_pct"],
-                            o["mae_40bd_pct"],
-                            o["realized_r_multiple"],
-                            o["earnings_within_window"],
+                            o["outcome_id"], o["proposal_id"], o["ticker"],
+                            o["setup_config_id"], o["setup_type"], o["risk_label"],
+                            o["signal_date"], o["entry_date"],
+                            o["entry_price_raw"], o["entry_price_sim"],
+                            o["stop_price_raw"], o["target_price_raw"],
+                            o["return_5bd_pct"], o["return_10bd_pct"],
+                            o["return_20bd_pct"], o["return_40bd_pct"],
+                            o["mfe_40bd_pct"], o["mae_40bd_pct"],
+                            o["stop_hit"], o["target_hit"],
+                            o["realized_r_multiple"], o["earnings_within_window"],
                             o["outcome_status"],
                         ],
                     )
@@ -1032,55 +853,36 @@ class OutcomeQueueProcessor:
                         if repair["unresolvable"]
                         else _UPDATE_QUEUE_REPAIR_PENDING
                     )
-                    connection.execute(
-                        sql, [repair["repair_attempts"], repair["tracking_id"]]
-                    )
+                    connection.execute(sql, [repair["repair_attempts"], repair["tracking_id"]])
                 connection.execute("COMMIT")
             except Exception:
                 try:
                     connection.execute("ROLLBACK")
-                except Exception:  # noqa: BLE001 - never mask original error
+                except Exception:  # noqa: BLE001
                     pass
                 raise
         finally:
             connection.close()
 
-    # ------------------------------------------------------------------ #
-    # Result builders.
-    # ------------------------------------------------------------------ #
     def _process_success(
-        self,
-        run_id: str,
-        db_role: str,
-        run_iso: str,
-        *,
-        queue_rows_read: int,
-        outcomes_written: int,
-        unresolvable_count: int,
-        repair_incremented_count: int,
+        self, run_id: str, db_role: str, run_iso: str, *,
+        queue_rows_read: int, outcomes_written: int,
+        unresolvable_count: int, repair_incremented_count: int,
     ) -> ServiceResult:
         return ServiceResult(
             status=service_result.STATUS_SUCCESS,
             run_id=run_id,
             rows_processed=outcomes_written,
             metadata=self._process_metadata(
-                db_role=db_role,
-                run_date=run_iso,
-                run_id=run_id,
-                queue_rows_read=queue_rows_read,
-                outcomes_written=outcomes_written,
+                db_role=db_role, run_date=run_iso, run_id=run_id,
+                queue_rows_read=queue_rows_read, outcomes_written=outcomes_written,
                 unresolvable_count=unresolvable_count,
                 repair_incremented_count=repair_incremented_count,
             ),
         )
 
     def _process_failed(
-        self,
-        run_id: str,
-        db_role: str,
-        run_iso: str,
-        message: str,
-        *,
+        self, run_id: str, db_role: str, run_iso: str, message: str, *,
         queue_rows_read: int = 0,
     ) -> ServiceResult:
         return ServiceResult(
@@ -1089,26 +891,17 @@ class OutcomeQueueProcessor:
             rows_processed=0,
             errors=[message],
             metadata=self._process_metadata(
-                db_role=db_role,
-                run_date=run_iso,
-                run_id=run_id,
-                queue_rows_read=queue_rows_read,
-                outcomes_written=0,
-                unresolvable_count=0,
-                repair_incremented_count=0,
+                db_role=db_role, run_date=run_iso, run_id=run_id,
+                queue_rows_read=queue_rows_read, outcomes_written=0,
+                unresolvable_count=0, repair_incremented_count=0,
             ),
         )
 
     @staticmethod
     def _process_metadata(
-        *,
-        db_role: str,
-        run_date: str,
-        run_id: str,
-        queue_rows_read: int,
-        outcomes_written: int,
-        unresolvable_count: int,
-        repair_incremented_count: int,
+        *, db_role: str, run_date: str, run_id: str,
+        queue_rows_read: int, outcomes_written: int,
+        unresolvable_count: int, repair_incremented_count: int,
     ) -> dict[str, Any]:
         return {
             "db_role": db_role,

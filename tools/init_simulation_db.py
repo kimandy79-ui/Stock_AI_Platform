@@ -1,7 +1,7 @@
 """Create / apply the simulation schema to ``data/duckdb/simulation.duckdb``.
 
 Thin wrapper around ``app.database.schema_manager.apply_simulation_schema()``
-followed by ``ConfigService().seed_defaults("simulation")`` (M21 Config
+followed by ``ConfigService().seed_defaults("simulation")  # setup_configs + risk_label_config + sector_alias`` (M21 Config
 Management Addendum §12). Targets the **simulation** role only; never touches
 ``prod.duckdb`` or ``debug.duckdb``. Idempotent (M02 §6).
 
@@ -41,7 +41,7 @@ def _seed_defaults() -> Any:
     ensure_repo_root_on_path()
     from app.services.config.config_service import ConfigService
 
-    return ConfigService().seed_defaults("simulation")
+    return ConfigService().seed_defaults("simulation")  # setup_configs + risk_label_config + sector_alias
 
 
 def _resolve_simulation_path() -> str:
@@ -101,10 +101,10 @@ def main(argv: list[str] | None = None) -> int:
         print(
             f"SUCCESS: simulation schema applied to {_resolve_simulation_path()} "
             f"(status={status}, tables={n_tables}, "
-            f"version={metadata.get('schema_version', 'schema_v01')}, "
+            f"version={metadata.get('schema_version', 'schema_v02')}, "
             f"newly_seeded={metadata.get('seed_row_inserted')}, "
-            f"strategy_seeded={seed_meta.get('strategy_seeded')}, "
-            f"runtime_seeded={seed_meta.get('runtime_seeded')}, "
+            f"setup_seeded={seed_meta.get('setup_seeded')}, "
+            f"risk_label_seeded={seed_meta.get('risk_label_seeded')}, "
             f"sector_alias_seeded={seed_meta.get('sector_alias_seeded')})."
         )
         return 0

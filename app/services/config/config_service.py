@@ -1,19 +1,18 @@
-"""ConfigService (M21 Config Management Addendum §6).
+"""ConfigService (M11) — setup-mode config store.
 
-DuckDB-backed, versioned configuration store for strategy and runtime settings.
-This is the runtime source of truth for active configs; Python ``DEFAULT_*``
-values are only used as fresh-DB seeds.
+Setup-mode migration (AD-22.19–22.24):
+- Primary config tables: setup_configs (4 rows, one per setup_type) + risk_label_config.
+- strategy_configs / runtime_configs / config_activation_log are REMOVED from the
+  active schema; the old M21 strategy-config API is retired.
+- Activation constraint (AD-22.21 / 01b §14): exactly one active_flag=TRUE per
+  setup_type in prod/debug; exactly one active risk_label_config row. Enforced here.
+- sector_alias_map seeding is retained (unchanged from legacy).
 
-Boundaries (mirrors the other service modules):
-
-- All DB access goes through the injected ``db_manager`` (no ``import duckdb``).
-- Returns a :class:`ServiceResult` on every path.
+Boundaries:
+- All DB access via injected db_manager (no import duckdb).
+- Returns ServiceResult on every path.
 - No Streamlit / provider / dashboard logic.
-- Writes target only the config tables (``strategy_configs``,
-  ``runtime_configs``, ``config_activation_log``, ``sector_alias_map``).
-
-V1 scope: ``prod`` / ``debug`` roles only (see
-:data:`app.services.config.config_validator.ALLOWED_CONFIG_DB_ROLES`).
+- Writes only to setup_configs, risk_label_config, sector_alias_map.
 """
 
 from __future__ import annotations
@@ -35,109 +34,66 @@ SEED_CREATED_BY: Final[str] = default_configs.SEED_CREATED_BY
 
 
 class _DbManagerLike(Protocol):
-    """Minimal DB-manager hook needed for test injection."""
-
     def connect(self, db_role: str, read_only: bool = ...) -> Any: ...
 
 
 # --------------------------------------------------------------------------- #
-# SQL (parameterized; operates only on the config tables; no DDL).
+# SQL (setup_configs + risk_label_config + sector_alias_map)
 # --------------------------------------------------------------------------- #
-_INSERT_STRATEGY: Final[str] = (
-    "INSERT INTO strategy_configs "
-    "(config_id, db_role, strategy_name, version, parent_config_id, "
-    " config_json, config_hash, active_flag, created_at, created_by, notes) "
-    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, CAST(now() AS TIMESTAMP), ?, ?) "
+_INSERT_SETUP_CONFIG: Final[str] = (
+    "INSERT INTO setup_configs "
+    "(config_id, setup_type, version, parent_config_id, config_json, config_hash, "
+    " active_flag, created_at, notes) "
+    "VALUES (?, ?, ?, ?, ?, ?, ?, CAST(now() AS TIMESTAMP), ?) "
     "ON CONFLICT (config_id) DO NOTHING "
     "RETURNING config_id"
 )
-_SELECT_ACTIVE_STRATEGY: Final[str] = (
-    "SELECT config_id, strategy_name, version, config_json, config_hash "
-    "FROM strategy_configs WHERE db_role = ? AND active_flag = TRUE "
-    "ORDER BY strategy_name"
-)
-_SELECT_STRATEGY_BY_NAME_ACTIVE: Final[str] = (
-    "SELECT COUNT(*) FROM strategy_configs "
-    "WHERE db_role = ? AND strategy_name = ? AND active_flag = TRUE"
-)
-_LIST_STRATEGY: Final[str] = (
-    "SELECT config_id, strategy_name, version, parent_config_id, "
-    " config_hash, active_flag, created_at, created_by, notes "
-    "FROM strategy_configs WHERE db_role = ? "
-    "ORDER BY strategy_name, created_at"
-)
-_LIST_STRATEGY_BY_NAME: Final[str] = (
-    "SELECT config_id, strategy_name, version, parent_config_id, "
-    " config_hash, active_flag, created_at, created_by, notes "
-    "FROM strategy_configs WHERE db_role = ? AND strategy_name = ? "
-    "ORDER BY created_at"
-)
-_GET_STRATEGY: Final[str] = (
-    "SELECT config_id, db_role, strategy_name, version, parent_config_id, "
-    " config_json, config_hash, active_flag, created_at, created_by, notes "
-    "FROM strategy_configs WHERE config_id = ? AND db_role = ?"
-)
-_GET_STRATEGY_NAME: Final[str] = (
-    "SELECT strategy_name FROM strategy_configs "
-    "WHERE config_id = ? AND db_role = ?"
-)
-_DEACTIVATE_STRATEGY_SIBLINGS: Final[str] = (
-    "UPDATE strategy_configs SET active_flag = FALSE "
-    "WHERE db_role = ? AND strategy_name = ?"
-)
-_ACTIVATE_STRATEGY: Final[str] = (
-    "UPDATE strategy_configs SET active_flag = TRUE "
-    "WHERE config_id = ? AND db_role = ?"
+
+_SELECT_ACTIVE_SETUP_CONFIG: Final[str] = (
+    "SELECT config_id, setup_type, version, config_json, config_hash "
+    "FROM setup_configs WHERE setup_type = ? AND active_flag = TRUE LIMIT 1"
 )
 
-_INSERT_RUNTIME: Final[str] = (
-    "INSERT INTO runtime_configs "
-    "(config_id, db_role, config_type, version, parent_config_id, "
-    " config_json, config_hash, active_flag, created_at, created_by, notes) "
-    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, CAST(now() AS TIMESTAMP), ?, ?) "
+_SELECT_ALL_ACTIVE_SETUP_CONFIGS: Final[str] = (
+    "SELECT config_id, setup_type, version, config_json, config_hash "
+    "FROM setup_configs WHERE active_flag = TRUE ORDER BY setup_type"
+)
+
+_COUNT_ACTIVE_SETUP: Final[str] = (
+    "SELECT COUNT(*) FROM setup_configs WHERE setup_type = ? AND active_flag = TRUE"
+)
+
+_DEACTIVATE_SETUP_SIBLINGS: Final[str] = (
+    "UPDATE setup_configs SET active_flag = FALSE WHERE setup_type = ?"
+)
+
+_ACTIVATE_SETUP_CONFIG: Final[str] = (
+    "UPDATE setup_configs SET active_flag = TRUE WHERE config_id = ?"
+)
+
+_INSERT_RISK_LABEL_CONFIG: Final[str] = (
+    "INSERT INTO risk_label_config "
+    "(config_id, version, config_json, config_hash, active_flag, created_at, notes) "
+    "VALUES (?, ?, ?, ?, ?, CAST(now() AS TIMESTAMP), ?) "
     "ON CONFLICT (config_id) DO NOTHING "
     "RETURNING config_id"
 )
-_SELECT_ACTIVE_RUNTIME: Final[str] = (
-    "SELECT config_id, config_type, version, config_json, config_hash "
-    "FROM runtime_configs "
-    "WHERE db_role = ? AND config_type = ? AND active_flag = TRUE "
-    "LIMIT 1"
-)
-_COUNT_ACTIVE_RUNTIME: Final[str] = (
-    "SELECT COUNT(*) FROM runtime_configs "
-    "WHERE db_role = ? AND config_type = ? AND active_flag = TRUE"
-)
-_LIST_RUNTIME: Final[str] = (
-    "SELECT config_id, config_type, version, parent_config_id, "
-    " config_hash, active_flag, created_at, created_by, notes "
-    "FROM runtime_configs WHERE db_role = ? "
-    "ORDER BY config_type, created_at"
-)
-_LIST_RUNTIME_BY_TYPE: Final[str] = (
-    "SELECT config_id, config_type, version, parent_config_id, "
-    " config_hash, active_flag, created_at, created_by, notes "
-    "FROM runtime_configs WHERE db_role = ? AND config_type = ? "
-    "ORDER BY created_at"
-)
-_GET_RUNTIME_TYPE: Final[str] = (
-    "SELECT config_type FROM runtime_configs "
-    "WHERE config_id = ? AND db_role = ?"
-)
-_DEACTIVATE_RUNTIME_SIBLINGS: Final[str] = (
-    "UPDATE runtime_configs SET active_flag = FALSE "
-    "WHERE db_role = ? AND config_type = ?"
-)
-_ACTIVATE_RUNTIME: Final[str] = (
-    "UPDATE runtime_configs SET active_flag = TRUE "
-    "WHERE config_id = ? AND db_role = ?"
+
+_SELECT_ACTIVE_RISK_LABEL_CONFIG: Final[str] = (
+    "SELECT config_id, version, config_json, config_hash "
+    "FROM risk_label_config WHERE active_flag = TRUE LIMIT 1"
 )
 
-_INSERT_ACTIVATION_LOG: Final[str] = (
-    "INSERT INTO config_activation_log "
-    "(activation_id, config_id, db_role, config_type, profile_name, "
-    " activated_at, activated_by, reason) "
-    "VALUES (?, ?, ?, ?, ?, CAST(now() AS TIMESTAMP), ?, ?)"
+_COUNT_ACTIVE_RISK_LABEL: Final[str] = (
+    "SELECT COUNT(*) FROM risk_label_config WHERE active_flag = TRUE"
+)
+
+_DEACTIVATE_ALL_RISK_LABEL: Final[str] = (
+    "UPDATE risk_label_config SET active_flag = FALSE"
+)
+
+_ACTIVATE_RISK_LABEL_CONFIG: Final[str] = (
+    "UPDATE risk_label_config SET active_flag = TRUE WHERE config_id = ?"
 )
 
 _INSERT_SECTOR_ALIAS: Final[str] = (
@@ -149,34 +105,21 @@ _INSERT_SECTOR_ALIAS: Final[str] = (
 )
 
 
-def _seed_strategy_id(db_role: str, strategy_name: str) -> str:
-    return f"seed_strategy_{db_role}_{strategy_name}_{SEED_VERSION}"
-
-
-def _seed_runtime_id(db_role: str, config_type: str) -> str:
-    return f"seed_runtime_{db_role}_{config_type}_{SEED_VERSION}"
-
-
 def _loads(value: Any) -> Any:
-    """Parse a JSON column value that may arrive as text or already-parsed."""
     if isinstance(value, str):
         return json.loads(value)
     return value
 
 
 class ConfigService:
-    """Versioned strategy/runtime config store (control plane, no trading logic)."""
+    """Setup-mode versioned config store (setup_configs + risk_label_config)."""
 
     def __init__(self, db_manager: _DbManagerLike | None = None) -> None:
         if db_manager is None:
             from app.database import duckdb_manager
-
             db_manager = duckdb_manager
         self._db = db_manager
 
-    # ------------------------------------------------------------------ #
-    # DB helpers (open / execute / close — no long-held connection).
-    # ------------------------------------------------------------------ #
     def _query(self, db_role: str, sql: str, params: list[Any]) -> list[tuple]:
         connection = self._db.connect(db_role, read_only=True)
         try:
@@ -185,98 +128,38 @@ class ConfigService:
             connection.close()
 
     # ------------------------------------------------------------------ #
-    # Seeding (idempotent — deterministic seed config_id + ON CONFLICT).
+    # Setup config seeding
     # ------------------------------------------------------------------ #
-    def seed_default_strategy_configs(self, db_role: str) -> ServiceResult:
-        """Seed normal/aggressive/conservative active strategy configs."""
+    def seed_default_setup_configs(self, db_role: str) -> ServiceResult:
+        """Seed the four active setup configs. Idempotent via ON CONFLICT."""
         run_id = str(uuid.uuid4())
         try:
             cv.validate_db_role(db_role)
         except cv.ConfigValidationError as exc:
             return self._failed(run_id, str(exc), {"db_role": db_role})
 
-        defaults = default_configs.get_default_strategy_configs()
+        defaults = default_configs.get_default_setup_configs()
         inserted = 0
         connection = self._db.connect(db_role)
         try:
             connection.execute("BEGIN TRANSACTION")
             try:
-                for strategy_name, payload in defaults.items():
-                    cv.validate_strategy_name(strategy_name)
+                for setup_type, payload in defaults.items():
+                    cv.validate_setup_type(setup_type)
                     cfg = cv.validate_config_payload(payload)
                     config_hash = cv.deterministic_hash(cfg)
-                    config_id = _seed_strategy_id(db_role, strategy_name)
+                    config_id = payload.get("config_id", f"setup_{setup_type}_v1")
+                    version = payload.get("version", "v1")
                     returned = connection.execute(
-                        _INSERT_STRATEGY,
+                        _INSERT_SETUP_CONFIG,
                         [
                             config_id,
-                            db_role,
-                            strategy_name,
-                            SEED_VERSION,
+                            setup_type,
+                            version,
                             None,
                             cv.canonical_json(cfg),
                             config_hash,
                             True,
-                            SEED_CREATED_BY,
-                            "seeded default",
-                        ],
-                    ).fetchall()
-                    inserted += len(returned)
-                connection.execute("COMMIT")
-            except Exception:
-                connection.execute("ROLLBACK")
-                raise
-        except Exception as exc:  # noqa: BLE001 - surface as failed result
-            _LOG.error("seed_default_strategy_configs failed: %s", exc)
-            return self._failed(
-                run_id, f"{type(exc).__name__}: {exc}", {"db_role": db_role}
-            )
-        finally:
-            connection.close()
-
-        return ServiceResult(
-            status=service_result.STATUS_SUCCESS,
-            run_id=run_id,
-            rows_processed=inserted,
-            metadata={
-                "db_role": db_role,
-                "config_kind": "strategy",
-                "seeded": inserted,
-                "requested": len(defaults),
-            },
-        )
-
-    def seed_default_runtime_configs(self, db_role: str) -> ServiceResult:
-        """Seed one active runtime config per required config_type."""
-        run_id = str(uuid.uuid4())
-        try:
-            cv.validate_db_role(db_role)
-        except cv.ConfigValidationError as exc:
-            return self._failed(run_id, str(exc), {"db_role": db_role})
-
-        defaults = default_configs.get_default_runtime_configs()
-        inserted = 0
-        connection = self._db.connect(db_role)
-        try:
-            connection.execute("BEGIN TRANSACTION")
-            try:
-                for config_type, payload in defaults.items():
-                    cv.validate_config_type(config_type)
-                    cfg = cv.validate_config_payload(payload)
-                    config_hash = cv.deterministic_hash(cfg)
-                    config_id = _seed_runtime_id(db_role, config_type)
-                    returned = connection.execute(
-                        _INSERT_RUNTIME,
-                        [
-                            config_id,
-                            db_role,
-                            config_type,
-                            SEED_VERSION,
-                            None,
-                            cv.canonical_json(cfg),
-                            config_hash,
-                            True,
-                            SEED_CREATED_BY,
                             "seeded default",
                         ],
                     ).fetchall()
@@ -286,10 +169,8 @@ class ConfigService:
                 connection.execute("ROLLBACK")
                 raise
         except Exception as exc:  # noqa: BLE001
-            _LOG.error("seed_default_runtime_configs failed: %s", exc)
-            return self._failed(
-                run_id, f"{type(exc).__name__}: {exc}", {"db_role": db_role}
-            )
+            _LOG.error("seed_default_setup_configs failed: %s", exc)
+            return self._failed(run_id, f"{type(exc).__name__}: {exc}", {"db_role": db_role})
         finally:
             connection.close()
 
@@ -299,14 +180,71 @@ class ConfigService:
             rows_processed=inserted,
             metadata={
                 "db_role": db_role,
-                "config_kind": "runtime",
+                "config_kind": "setup",
                 "seeded": inserted,
                 "requested": len(defaults),
             },
         )
 
+    # ------------------------------------------------------------------ #
+    # Risk label config seeding
+    # ------------------------------------------------------------------ #
+    def seed_default_risk_label_config(self, db_role: str) -> ServiceResult:
+        """Seed the single active risk-label config. Idempotent."""
+        run_id = str(uuid.uuid4())
+        try:
+            cv.validate_db_role(db_role)
+        except cv.ConfigValidationError as exc:
+            return self._failed(run_id, str(exc), {"db_role": db_role})
+
+        payload = default_configs.get_default_risk_label_config()
+        inserted = 0
+        connection = self._db.connect(db_role)
+        try:
+            connection.execute("BEGIN TRANSACTION")
+            try:
+                cfg = cv.validate_config_payload(payload)
+                config_hash = cv.deterministic_hash(cfg)
+                config_id = payload.get("config_id", cv.RISK_LABEL_CONFIG_SEED_ID)
+                version = payload.get("version", "risk_v1")
+                returned = connection.execute(
+                    _INSERT_RISK_LABEL_CONFIG,
+                    [
+                        config_id,
+                        version,
+                        cv.canonical_json(cfg),
+                        config_hash,
+                        True,
+                        "seeded default",
+                    ],
+                ).fetchall()
+                inserted += len(returned)
+                connection.execute("COMMIT")
+            except Exception:
+                connection.execute("ROLLBACK")
+                raise
+        except Exception as exc:  # noqa: BLE001
+            _LOG.error("seed_default_risk_label_config failed: %s", exc)
+            return self._failed(run_id, f"{type(exc).__name__}: {exc}", {"db_role": db_role})
+        finally:
+            connection.close()
+
+        return ServiceResult(
+            status=service_result.STATUS_SUCCESS,
+            run_id=run_id,
+            rows_processed=inserted,
+            metadata={
+                "db_role": db_role,
+                "config_kind": "risk_label",
+                "seeded": inserted,
+            },
+        )
+
+    # ------------------------------------------------------------------ #
+    # Sector alias seeding (retained)
+    # ------------------------------------------------------------------ #
     def seed_sector_alias_map(self, db_role: str) -> ServiceResult:
-        """Seed ``sector_alias_map`` from ``constants.SECTOR_ALIAS_MAP``."""
+        """Seed sector_alias_map from constants.SECTOR_ALIAS_MAP."""
         run_id = str(uuid.uuid4())
         try:
             cv.validate_db_role(db_role)
@@ -321,8 +259,7 @@ class ConfigService:
             try:
                 for source, raw_sector, canonical_sector in seeds:
                     returned = connection.execute(
-                        _INSERT_SECTOR_ALIAS,
-                        [source, raw_sector, canonical_sector],
+                        _INSERT_SECTOR_ALIAS, [source, raw_sector, canonical_sector]
                     ).fetchall()
                     inserted += len(returned)
                 connection.execute("COMMIT")
@@ -331,9 +268,7 @@ class ConfigService:
                 raise
         except Exception as exc:  # noqa: BLE001
             _LOG.error("seed_sector_alias_map failed: %s", exc)
-            return self._failed(
-                run_id, f"{type(exc).__name__}: {exc}", {"db_role": db_role}
-            )
+            return self._failed(run_id, f"{type(exc).__name__}: {exc}", {"db_role": db_role})
         finally:
             connection.close()
 
@@ -341,53 +276,70 @@ class ConfigService:
             status=service_result.STATUS_SUCCESS,
             run_id=run_id,
             rows_processed=inserted,
-            metadata={
-                "db_role": db_role,
-                "config_kind": "sector_alias",
-                "seeded": inserted,
-                "requested": len(seeds),
-            },
+            metadata={"db_role": db_role, "config_kind": "sector_alias", "seeded": inserted},
         )
 
     def seed_defaults(self, db_role: str) -> ServiceResult:
-        """Seed strategy + runtime + sector-alias defaults for ``db_role``.
-
-        Convenience entry point for fresh DB initialization. ``sector_etf_map``
-        is intentionally NOT seeded here: Module 07 remains its sole owner and
-        seeds it from ``constants.SECTOR_ETF_MAP`` (already canonical).
-        """
+        """Seed setup configs + risk-label config + sector aliases. Idempotent."""
         run_id = str(uuid.uuid4())
-        strat = self.seed_default_strategy_configs(db_role)
-        runtime = self.seed_default_runtime_configs(db_role)
+        setup = self.seed_default_setup_configs(db_role)
+        risk = self.seed_default_risk_label_config(db_role)
         sectors = self.seed_sector_alias_map(db_role)
-        errors = [e for r in (strat, runtime, sectors) for e in r.errors]
-        status = (
-            service_result.STATUS_FAILED
-            if errors
-            else service_result.STATUS_SUCCESS
-        )
+        errors = [e for r in (setup, risk, sectors) for e in r.errors]
+        status = service_result.STATUS_FAILED if errors else service_result.STATUS_SUCCESS
         return ServiceResult(
             status=status,
             run_id=run_id,
-            rows_processed=(
-                strat.rows_processed
-                + runtime.rows_processed
-                + sectors.rows_processed
-            ),
+            rows_processed=setup.rows_processed + risk.rows_processed + sectors.rows_processed,
             errors=errors,
             metadata={
                 "db_role": db_role,
-                "strategy_seeded": strat.rows_processed,
-                "runtime_seeded": runtime.rows_processed,
+                "setup_seeded": setup.rows_processed,
+                "risk_label_seeded": risk.rows_processed,
                 "sector_alias_seeded": sectors.rows_processed,
             },
         )
 
     # ------------------------------------------------------------------ #
-    # Strategy reads.
+    # Setup config reads
     # ------------------------------------------------------------------ #
-    def get_active_strategy_configs(self, db_role: str) -> ServiceResult:
-        """Return active strategy configs as ``{strategy_name: config_json}``."""
+    def get_active_setup_config(self, db_role: str, setup_type: str) -> ServiceResult:
+        """Return the active setup config for the given setup_type."""
+        run_id = str(uuid.uuid4())
+        try:
+            cv.validate_db_role(db_role)
+            cv.validate_setup_type(setup_type)
+        except cv.ConfigValidationError as exc:
+            return self._failed(run_id, str(exc), {"db_role": db_role})
+
+        try:
+            rows = self._query(db_role, _SELECT_ACTIVE_SETUP_CONFIG, [setup_type])
+        except Exception as exc:  # noqa: BLE001
+            return self._failed(run_id, f"{type(exc).__name__}: {exc}", {"db_role": db_role})
+
+        if not rows:
+            return self._failed(
+                run_id,
+                f"no active setup config for setup_type={setup_type!r} (db_role={db_role!r})",
+                {"db_role": db_role, "setup_type": setup_type},
+            )
+
+        config_id, _st, _ver, config_json, config_hash = rows[0]
+        return ServiceResult(
+            status=service_result.STATUS_SUCCESS,
+            run_id=run_id,
+            rows_processed=1,
+            metadata={
+                "db_role": db_role,
+                "setup_type": setup_type,
+                "config_id": config_id,
+                "config_json": _loads(config_json),
+                "config_hash": config_hash,
+            },
+        )
+
+    def get_all_active_setup_configs(self, db_role: str) -> ServiceResult:
+        """Return all active setup configs as {setup_type: config_json}."""
         run_id = str(uuid.uuid4())
         try:
             cv.validate_db_role(db_role)
@@ -395,22 +347,16 @@ class ConfigService:
             return self._failed(run_id, str(exc), {"db_role": db_role})
 
         try:
-            rows = self._query(db_role, _SELECT_ACTIVE_STRATEGY, [db_role])
+            rows = self._query(db_role, _SELECT_ALL_ACTIVE_SETUP_CONFIGS, [])
         except Exception as exc:  # noqa: BLE001
-            return self._failed(
-                run_id, f"{type(exc).__name__}: {exc}", {"db_role": db_role}
-            )
+            return self._failed(run_id, f"{type(exc).__name__}: {exc}", {"db_role": db_role})
 
-        configs_by_strategy: dict[str, dict[str, Any]] = {}
+        configs_by_type: dict[str, dict[str, Any]] = {}
         configs_by_id: dict[str, dict[str, Any]] = {}
-        config_ids_by_strategy: dict[str, str] = {}
-        config_ids: list[str] = []
-        for config_id, strategy_name, _version, config_json, _hash in rows:
+        for config_id, setup_type, _ver, config_json, _hash in rows:
             parsed = _loads(config_json)
-            configs_by_strategy[strategy_name] = parsed
+            configs_by_type[setup_type] = parsed
             configs_by_id[config_id] = parsed
-            config_ids_by_strategy[strategy_name] = config_id
-            config_ids.append(config_id)
 
         return ServiceResult(
             status=service_result.STATUS_SUCCESS,
@@ -418,242 +364,76 @@ class ConfigService:
             rows_processed=len(configs_by_id),
             metadata={
                 "db_role": db_role,
-                # Keyed by strategy_name (debug/user selection).
-                "configs": configs_by_strategy,
-                "configs_by_strategy": configs_by_strategy,
-                # Keyed by real DB config_id (used as strategy_config_id in
-                # output tables).
+                "configs": configs_by_type,
+                "configs_by_type": configs_by_type,
                 "configs_by_id": configs_by_id,
-                "config_ids_by_strategy": config_ids_by_strategy,
-                "config_ids": config_ids,
             },
         )
 
-    def list_strategy_configs(
-        self, db_role: str, strategy_name: str | None = None
-    ) -> ServiceResult:
-        """List strategy config versions (optionally for one strategy)."""
-        run_id = str(uuid.uuid4())
-        try:
-            cv.validate_db_role(db_role)
-            if strategy_name is not None:
-                cv.validate_strategy_name(strategy_name)
-        except cv.ConfigValidationError as exc:
-            return self._failed(run_id, str(exc), {"db_role": db_role})
+    def assert_universe_config_parity(self, db_role: str) -> ServiceResult:
+        """Assert all four active setup configs have identical universe blocks.
 
-        sql = _LIST_STRATEGY if strategy_name is None else _LIST_STRATEGY_BY_NAME
-        params = [db_role] if strategy_name is None else [db_role, strategy_name]
-        try:
-            rows = self._query(db_role, sql, params)
-        except Exception as exc:  # noqa: BLE001
-            return self._failed(
-                run_id, f"{type(exc).__name__}: {exc}", {"db_role": db_role}
-            )
-        versions = [
-            {
-                "config_id": r[0],
-                "strategy_name": r[1],
-                "version": r[2],
-                "parent_config_id": r[3],
-                "config_hash": r[4],
-                "active_flag": bool(r[5]),
-                "created_at": str(r[6]),
-                "created_by": r[7],
-                "notes": r[8],
-            }
-            for r in rows
-        ]
-        return ServiceResult(
-            status=service_result.STATUS_SUCCESS,
-            run_id=run_id,
-            rows_processed=len(versions),
-            metadata={"db_role": db_role, "versions": versions},
-        )
-
-    def get_strategy_config(self, config_id: str, db_role: str) -> ServiceResult:
-        """Return a single strategy config by id (with parsed config_json)."""
+        AD-22.23 / 01d Module 13: universe config must be identical across all
+        active setup configs. Divergence is a configuration error.
+        """
         run_id = str(uuid.uuid4())
-        try:
-            cv.validate_db_role(db_role)
-        except cv.ConfigValidationError as exc:
-            return self._failed(run_id, str(exc), {"db_role": db_role})
-        try:
-            rows = self._query(db_role, _GET_STRATEGY, [config_id, db_role])
-        except Exception as exc:  # noqa: BLE001
-            return self._failed(
-                run_id, f"{type(exc).__name__}: {exc}", {"db_role": db_role}
-            )
-        if not rows:
+        all_result = self.get_all_active_setup_configs(db_role)
+        if not all_result.is_ok():
+            return all_result
+
+        configs = all_result.metadata.get("configs_by_type", {})
+        universe_blocks: dict[str, Any] = {}
+        for setup_type, cfg in configs.items():
+            universe_blocks[setup_type] = cfg.get("universe", {})
+
+        if not universe_blocks:
+            return self._failed(run_id, "no active setup configs found", {"db_role": db_role})
+
+        # All universe blocks must be identical (canonical JSON comparison)
+        canonical_blocks = [cv.canonical_json(b) for b in universe_blocks.values()]
+        if len(set(canonical_blocks)) > 1:
             return self._failed(
                 run_id,
-                f"strategy config {config_id!r} not found for db_role {db_role!r}",
-                {"db_role": db_role, "config_id": config_id},
+                f"universe config parity mismatch across setup types: {list(universe_blocks)}",
+                {"db_role": db_role, "universe_blocks": universe_blocks},
             )
-        r = rows[0]
-        config = {
-            "config_id": r[0],
-            "db_role": r[1],
-            "strategy_name": r[2],
-            "version": r[3],
-            "parent_config_id": r[4],
-            "config_json": _loads(r[5]),
-            "config_hash": r[6],
-            "active_flag": bool(r[7]),
-            "created_at": str(r[8]),
-            "created_by": r[9],
-            "notes": r[10],
-        }
-        return ServiceResult(
-            status=service_result.STATUS_SUCCESS,
-            run_id=run_id,
-            rows_processed=1,
-            metadata={"db_role": db_role, "config": config},
-        )
-
-    # ------------------------------------------------------------------ #
-    # Strategy writes.
-    # ------------------------------------------------------------------ #
-    def create_strategy_config_version(
-        self,
-        db_role: str,
-        strategy_name: str,
-        config_json: dict[str, Any],
-        version: str | None = None,
-        parent_config_id: str | None = None,
-        created_by: str | None = None,
-        notes: str | None = None,
-        activate: bool = False,
-    ) -> ServiceResult:
-        """Create a new (inactive by default) strategy config version."""
-        run_id = str(uuid.uuid4())
-        try:
-            cv.validate_db_role(db_role)
-            cv.validate_strategy_name(strategy_name)
-            cfg = cv.validate_config_payload(config_json)
-        except cv.ConfigValidationError as exc:
-            return self._failed(run_id, str(exc), {"db_role": db_role})
-
-        config_id = str(uuid.uuid4())
-        config_hash = cv.deterministic_hash(cfg)
-        version = version or f"{strategy_name}_{config_id[:8]}"
-        connection = self._db.connect(db_role)
-        try:
-            connection.execute("BEGIN TRANSACTION")
-            try:
-                connection.execute(
-                    _INSERT_STRATEGY,
-                    [
-                        config_id,
-                        db_role,
-                        strategy_name,
-                        version,
-                        parent_config_id,
-                        cv.canonical_json(cfg),
-                        config_hash,
-                        bool(activate),
-                        created_by,
-                        notes,
-                    ],
-                ).fetchall()
-                if activate:
-                    connection.execute(
-                        _DEACTIVATE_STRATEGY_SIBLINGS, [db_role, strategy_name]
-                    )
-                    connection.execute(_ACTIVATE_STRATEGY, [config_id, db_role])
-                    connection.execute(
-                        _INSERT_ACTIVATION_LOG,
-                        [
-                            str(uuid.uuid4()),
-                            config_id,
-                            db_role,
-                            "strategy",          # config_type is always "strategy"
-                            strategy_name,       # profile_name carries the name
-                            created_by,
-                            notes or "created+activated",
-                        ],
-                    )
-                connection.execute("COMMIT")
-            except Exception:
-                connection.execute("ROLLBACK")
-                raise
-        except Exception as exc:  # noqa: BLE001
-            return self._failed(
-                run_id, f"{type(exc).__name__}: {exc}", {"db_role": db_role}
-            )
-        finally:
-            connection.close()
 
         return ServiceResult(
             status=service_result.STATUS_SUCCESS,
             run_id=run_id,
-            rows_processed=1,
-            metadata={
-                "db_role": db_role,
-                "config_id": config_id,
-                "config_hash": config_hash,
-                "strategy_name": strategy_name,
-                "active_flag": bool(activate),
-            },
+            rows_processed=len(universe_blocks),
+            metadata={"db_role": db_role, "setup_types_checked": list(universe_blocks)},
         )
 
-    def activate_strategy_config(
+    # ------------------------------------------------------------------ #
+    # Setup config writes
+    # ------------------------------------------------------------------ #
+    def activate_setup_config(
         self,
         config_id: str,
         db_role: str,
-        activated_by: str | None = None,
-        reason: str | None = None,
+        setup_type: str,
     ) -> ServiceResult:
-        """Activate a strategy config version; deactivate its siblings."""
+        """Activate a setup config; deactivate all siblings for the same setup_type."""
         run_id = str(uuid.uuid4())
         try:
             cv.validate_db_role(db_role)
+            cv.validate_setup_type(setup_type)
         except cv.ConfigValidationError as exc:
             return self._failed(run_id, str(exc), {"db_role": db_role})
-
-        try:
-            name_rows = self._query(
-                db_role, _GET_STRATEGY_NAME, [config_id, db_role]
-            )
-        except Exception as exc:  # noqa: BLE001
-            return self._failed(
-                run_id, f"{type(exc).__name__}: {exc}", {"db_role": db_role}
-            )
-        if not name_rows:
-            return self._failed(
-                run_id,
-                f"strategy config {config_id!r} not found for db_role {db_role!r}",
-                {"db_role": db_role, "config_id": config_id},
-            )
-        strategy_name = name_rows[0][0]
 
         connection = self._db.connect(db_role)
         try:
             connection.execute("BEGIN TRANSACTION")
             try:
-                connection.execute(
-                    _DEACTIVATE_STRATEGY_SIBLINGS, [db_role, strategy_name]
-                )
-                connection.execute(_ACTIVATE_STRATEGY, [config_id, db_role])
-                connection.execute(
-                    _INSERT_ACTIVATION_LOG,
-                    [
-                        str(uuid.uuid4()),
-                        config_id,
-                        db_role,
-                        "strategy",      # config_type = "strategy" (not "strategy:name")
-                        strategy_name,   # profile_name = the strategy name
-                        activated_by,
-                        reason,
-                    ],
-                )
+                connection.execute(_DEACTIVATE_SETUP_SIBLINGS, [setup_type])
+                connection.execute(_ACTIVATE_SETUP_CONFIG, [config_id])
                 connection.execute("COMMIT")
             except Exception:
                 connection.execute("ROLLBACK")
                 raise
         except Exception as exc:  # noqa: BLE001
-            return self._failed(
-                run_id, f"{type(exc).__name__}: {exc}", {"db_role": db_role}
-            )
+            return self._failed(run_id, f"{type(exc).__name__}: {exc}", {"db_role": db_role})
         finally:
             connection.close()
 
@@ -661,258 +441,152 @@ class ConfigService:
             status=service_result.STATUS_SUCCESS,
             run_id=run_id,
             rows_processed=1,
-            metadata={
-                "db_role": db_role,
-                "config_id": config_id,
-                "strategy_name": strategy_name,
-            },
+            metadata={"db_role": db_role, "config_id": config_id, "setup_type": setup_type},
         )
 
     # ------------------------------------------------------------------ #
-    # Runtime reads.
+    # Risk label config reads
     # ------------------------------------------------------------------ #
-    def get_active_runtime_config(
-        self, db_role: str, config_type: str
-    ) -> ServiceResult:
-        """Return the active runtime config payload for ``config_type``."""
+    def get_active_risk_label_config(self, db_role: str) -> ServiceResult:
+        """Return the active risk-label config."""
         run_id = str(uuid.uuid4())
         try:
             cv.validate_db_role(db_role)
-            cv.validate_config_type(config_type)
         except cv.ConfigValidationError as exc:
             return self._failed(run_id, str(exc), {"db_role": db_role})
+
         try:
-            rows = self._query(
-                db_role, _SELECT_ACTIVE_RUNTIME, [db_role, config_type]
-            )
+            rows = self._query(db_role, _SELECT_ACTIVE_RISK_LABEL_CONFIG, [])
         except Exception as exc:  # noqa: BLE001
-            return self._failed(
-                run_id, f"{type(exc).__name__}: {exc}", {"db_role": db_role}
-            )
+            return self._failed(run_id, f"{type(exc).__name__}: {exc}", {"db_role": db_role})
+
         if not rows:
             return self._failed(
                 run_id,
-                f"no active runtime config for {config_type!r} (db_role {db_role!r})",
-                {"db_role": db_role, "config_type": config_type},
+                f"no active risk_label_config (db_role={db_role!r})",
+                {"db_role": db_role},
             )
-        config_id, _ctype, _version, config_json, config_hash = rows[0]
+
+        config_id, _ver, config_json, config_hash = rows[0]
         return ServiceResult(
             status=service_result.STATUS_SUCCESS,
             run_id=run_id,
             rows_processed=1,
             metadata={
                 "db_role": db_role,
-                "config_type": config_type,
                 "config_id": config_id,
                 "config_json": _loads(config_json),
                 "config_hash": config_hash,
             },
         )
 
-    def list_runtime_configs(
-        self, db_role: str, config_type: str | None = None
-    ) -> ServiceResult:
-        """List runtime config versions (optionally for one type)."""
+    # ------------------------------------------------------------------ #
+    # Validation helpers
+    # ------------------------------------------------------------------ #
+    def validate_setup_config(self, config_json: dict[str, Any]) -> ServiceResult:
+        """Validate a setup config payload (structure checks)."""
         run_id = str(uuid.uuid4())
         try:
-            cv.validate_db_role(db_role)
-            if config_type is not None:
-                cv.validate_config_type(config_type)
+            cfg = cv.validate_config_payload(config_json)
         except cv.ConfigValidationError as exc:
-            return self._failed(run_id, str(exc), {"db_role": db_role})
-        sql = _LIST_RUNTIME if config_type is None else _LIST_RUNTIME_BY_TYPE
-        params = [db_role] if config_type is None else [db_role, config_type]
+            return self._failed(run_id, str(exc), {})
+
+        errors: list[str] = []
+        setup_type = cfg.get("setup_type")
         try:
-            rows = self._query(db_role, sql, params)
-        except Exception as exc:  # noqa: BLE001
-            return self._failed(
-                run_id, f"{type(exc).__name__}: {exc}", {"db_role": db_role}
-            )
-        versions = [
-            {
-                "config_id": r[0],
-                "config_type": r[1],
-                "version": r[2],
-                "parent_config_id": r[3],
-                "config_hash": r[4],
-                "active_flag": bool(r[5]),
-                "created_at": str(r[6]),
-                "created_by": r[7],
-                "notes": r[8],
-            }
-            for r in rows
-        ]
+            cv.validate_setup_type(setup_type)
+        except cv.ConfigValidationError as exc:
+            errors.append(str(exc))
+
+        # scoring_weights must sum to 1.0
+        weights = cfg.get("scoring_weights", {})
+        if weights:
+            total = sum(weights.values())
+            if abs(total - 1.0) > 1e-6:
+                errors.append(f"scoring_weights sum {total:.6f} != 1.0")
+
+        if errors:
+            return self._failed(run_id, "; ".join(errors), {"errors": errors})
+
+        config_hash = cv.deterministic_hash(cfg)
         return ServiceResult(
             status=service_result.STATUS_SUCCESS,
             run_id=run_id,
-            rows_processed=len(versions),
-            metadata={"db_role": db_role, "versions": versions},
+            rows_processed=1,
+            metadata={"config_hash": config_hash, "setup_type": setup_type},
+        )
+
+    def validate_risk_label_config(self, config_json: dict[str, Any]) -> ServiceResult:
+        """Validate a risk-label config payload (structure checks)."""
+        run_id = str(uuid.uuid4())
+        try:
+            cfg = cv.validate_config_payload(config_json)
+        except cv.ConfigValidationError as exc:
+            return self._failed(run_id, str(exc), {})
+
+        errors: list[str] = []
+        fw = cfg.get("factor_weights", {})
+        if fw:
+            total = sum(fw.values())
+            if abs(total - 1.0) > 1e-6:
+                errors.append(f"factor_weights sum {total:.6f} != 1.0")
+
+        if errors:
+            return self._failed(run_id, "; ".join(errors), {"errors": errors})
+
+        config_hash = cv.deterministic_hash(cfg)
+        return ServiceResult(
+            status=service_result.STATUS_SUCCESS,
+            run_id=run_id,
+            rows_processed=1,
+            metadata={"config_hash": config_hash},
         )
 
     # ------------------------------------------------------------------ #
-    # Runtime writes.
+    # Runtime config reads (retained for pipeline/provider/debug/sim/dashboard)
     # ------------------------------------------------------------------ #
-    def create_runtime_config_version(
-        self,
-        db_role: str,
-        config_type: str,
-        config_json: dict[str, Any],
-        version: str | None = None,
-        parent_config_id: str | None = None,
-        created_by: str | None = None,
-        notes: str | None = None,
-        activate: bool = False,
-    ) -> ServiceResult:
-        """Create a new (inactive by default) runtime config version."""
+    def get_active_runtime_config(self, db_role: str, config_type: str) -> ServiceResult:
+        """Return active runtime config payload for config_type from default_configs.
+
+        Note: runtime_configs table is NOT in the setup-mode schema (retired with
+        strategy_configs). Runtime configs are served from in-memory defaults for
+        Phase 1. If the table doesn't exist, fall back to defaults gracefully.
+        """
         run_id = str(uuid.uuid4())
         try:
             cv.validate_db_role(db_role)
             cv.validate_config_type(config_type)
-            cfg = cv.validate_config_payload(config_json)
         except cv.ConfigValidationError as exc:
             return self._failed(run_id, str(exc), {"db_role": db_role})
 
-        config_id = str(uuid.uuid4())
-        config_hash = cv.deterministic_hash(cfg)
-        version = version or f"{config_type}_{config_id[:8]}"
-        connection = self._db.connect(db_role)
-        try:
-            connection.execute("BEGIN TRANSACTION")
-            try:
-                connection.execute(
-                    _INSERT_RUNTIME,
-                    [
-                        config_id,
-                        db_role,
-                        config_type,
-                        version,
-                        parent_config_id,
-                        cv.canonical_json(cfg),
-                        config_hash,
-                        bool(activate),
-                        created_by,
-                        notes,
-                    ],
-                ).fetchall()
-                if activate:
-                    connection.execute(
-                        _DEACTIVATE_RUNTIME_SIBLINGS, [db_role, config_type]
-                    )
-                    connection.execute(_ACTIVATE_RUNTIME, [config_id, db_role])
-                    connection.execute(
-                        _INSERT_ACTIVATION_LOG,
-                        [
-                            str(uuid.uuid4()),
-                            config_id,
-                            db_role,
-                            config_type,
-                            None,
-                            created_by,
-                            notes or "created+activated",
-                        ],
-                    )
-                connection.execute("COMMIT")
-            except Exception:
-                connection.execute("ROLLBACK")
-                raise
-        except Exception as exc:  # noqa: BLE001
-            return self._failed(
-                run_id, f"{type(exc).__name__}: {exc}", {"db_role": db_role}
-            )
-        finally:
-            connection.close()
-
-        return ServiceResult(
-            status=service_result.STATUS_SUCCESS,
-            run_id=run_id,
-            rows_processed=1,
-            metadata={
-                "db_role": db_role,
-                "config_id": config_id,
-                "config_hash": config_hash,
-                "config_type": config_type,
-                "active_flag": bool(activate),
-            },
-        )
-
-    def activate_runtime_config(
-        self,
-        config_id: str,
-        db_role: str,
-        activated_by: str | None = None,
-        reason: str | None = None,
-    ) -> ServiceResult:
-        """Activate a runtime config version; deactivate its siblings."""
-        run_id = str(uuid.uuid4())
-        try:
-            cv.validate_db_role(db_role)
-        except cv.ConfigValidationError as exc:
-            return self._failed(run_id, str(exc), {"db_role": db_role})
-        try:
-            type_rows = self._query(
-                db_role, _GET_RUNTIME_TYPE, [config_id, db_role]
-            )
-        except Exception as exc:  # noqa: BLE001
-            return self._failed(
-                run_id, f"{type(exc).__name__}: {exc}", {"db_role": db_role}
-            )
-        if not type_rows:
+        defaults = default_configs.get_default_runtime_configs()
+        if config_type not in defaults:
             return self._failed(
                 run_id,
-                f"runtime config {config_id!r} not found for db_role {db_role!r}",
-                {"db_role": db_role, "config_id": config_id},
+                f"no runtime config for {config_type!r}",
+                {"db_role": db_role, "config_type": config_type},
             )
-        config_type = type_rows[0][0]
 
-        connection = self._db.connect(db_role)
-        try:
-            connection.execute("BEGIN TRANSACTION")
-            try:
-                connection.execute(
-                    _DEACTIVATE_RUNTIME_SIBLINGS, [db_role, config_type]
-                )
-                connection.execute(_ACTIVATE_RUNTIME, [config_id, db_role])
-                connection.execute(
-                    _INSERT_ACTIVATION_LOG,
-                    [
-                        str(uuid.uuid4()),
-                        config_id,
-                        db_role,
-                        config_type,
-                        None,
-                        activated_by,
-                        reason,
-                    ],
-                )
-                connection.execute("COMMIT")
-            except Exception:
-                connection.execute("ROLLBACK")
-                raise
-        except Exception as exc:  # noqa: BLE001
-            return self._failed(
-                run_id, f"{type(exc).__name__}: {exc}", {"db_role": db_role}
-            )
-        finally:
-            connection.close()
-
+        cfg = defaults[config_type]
+        config_hash = cv.deterministic_hash(cfg)
         return ServiceResult(
             status=service_result.STATUS_SUCCESS,
             run_id=run_id,
             rows_processed=1,
             metadata={
                 "db_role": db_role,
-                "config_id": config_id,
                 "config_type": config_type,
+                "config_id": f"default_{config_type}",
+                "config_json": cfg,
+                "config_hash": config_hash,
             },
         )
 
     # ------------------------------------------------------------------ #
-    # Internal helpers.
+    # Internal helpers
     # ------------------------------------------------------------------ #
     @staticmethod
-    def _failed(
-        run_id: str, message: str, metadata: dict[str, Any]
-    ) -> ServiceResult:
+    def _failed(run_id: str, message: str, metadata: dict[str, Any]) -> ServiceResult:
         return ServiceResult(
             status=service_result.STATUS_FAILED,
             run_id=run_id,

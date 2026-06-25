@@ -74,11 +74,21 @@ DISPLAY_COLUMNS: Final[tuple[str, ...]] = (
     "raw_rank",
     "diversified_rank",
     "ticker",
-    "strategy_config_id",
     "setup_type",
+    "setup_score",
+    "risk_label",
+    # final_display_status is the unambiguous display label (read-layer annotation).
+    # disposition may say BUY even for cap-excluded rows; final_display_status
+    # distinguishes "BUY" (selected_flag=True) from "BUY (excluded)" (cap-excluded).
+    # The UI must prefer final_display_status over raw disposition for display.
+    "final_display_status",
+    "disposition",
+    "entry_price_raw",
+    "stop_price_raw",
+    "target_price_raw",
+    "estimated_rr",
     "proposal_score_raw",
     "proposal_score_final",
-    "estimated_rr",
     "sector",
     "industry",
     "div_reason",
@@ -87,6 +97,31 @@ DISPLAY_COLUMNS: Final[tuple[str, ...]] = (
 
 # CSS applied to rows where in_raw_top_n != in_diversified_top_n (01e spec).
 DISAGREEMENT_HIGHLIGHT_CSS: Final[str] = "background-color: #fff3cd"
+
+# --------------------------------------------------------------------------- #
+# final_display_status values (read-layer annotation — no DB column).
+#
+# Semantics clarification (AD-22.11):
+#   selected_top_n  = in_raw_top_n OR in_diversified_top_n
+#                     "was ever in a top-N list (raw or diversified)"
+#                     — used by outcome queue membership rule.
+#   selected_flag   = in_diversified_top_n
+#                     "is in the final diversified shortlist"
+#                     — the definitive 'final selected' flag.
+#
+# A row may have disposition=BUY but selected_flag=False when the
+# diversification hard cap excluded it (rejection_reason='sector_cap' or
+# 'industry_cap').  Such rows must NEVER be shown as final BUY in the UI.
+# final_display_status makes this unambiguous at the display layer:
+#   "BUY"            — disposition=BUY AND selected_flag=True
+#   "BUY (excluded)" — disposition=BUY AND selected_flag=False (cap-excluded)
+#   "WATCHLIST_ONLY" — disposition=WATCHLIST_ONLY
+#   "REJECTED"       — disposition=REJECTED
+# --------------------------------------------------------------------------- #
+FINAL_DISPLAY_STATUS_BUY: Final[str] = "BUY"
+FINAL_DISPLAY_STATUS_BUY_EXCLUDED: Final[str] = "BUY (excluded)"
+FINAL_DISPLAY_STATUS_WATCHLIST: Final[str] = "WATCHLIST_ONLY"
+FINAL_DISPLAY_STATUS_REJECTED: Final[str] = "REJECTED"
 
 # --------------------------------------------------------------------------- #
 # Outcome status.
@@ -125,8 +160,8 @@ class ProposalsView:
         The signal date the rows belong to (``None`` when no data found).
     run_id:
         The single run_id the rows were scoped to (``None`` when no data).
-    strategy_config_id:
-        The strategy config filter applied (``None`` = all configs).
+    setup_config_id:
+        The setup config filter applied (``None`` = all configs).
     """
 
     rows: list[dict[str, Any]] = field(default_factory=list)
@@ -134,7 +169,7 @@ class ProposalsView:
     rank_column: str = DIVERSIFIED_RANK_COLUMN
     signal_date: date | None = None
     run_id: str | None = None
-    strategy_config_id: str | None = None
+    setup_config_id: str | None = None
 
 
 @dataclass
@@ -148,7 +183,9 @@ class OutcomeSummary:
     avg_return_10bd_pct: float | None = None
     avg_return_20bd_pct: float | None = None
     avg_return_40bd_pct: float | None = None
-    strategy_config_id: str | None = None
+    setup_type: str | None = None
+    risk_label: str | None = None
+    setup_config_id: str | None = None
 
 
 # --------------------------------------------------------------------------- #
@@ -201,11 +238,49 @@ def derive_div_reason(row: dict[str, Any]) -> str | None:
     return None
 
 
-def annotate_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Add ``list_disagreement`` and ``div_reason`` to each proposal row.
+def derive_final_display_status(row: dict[str, Any]) -> str:
+    """Return the unambiguous display status for one proposal row.
 
-    ``list_disagreement`` is ``True`` when ``in_raw_top_n != in_diversified_top_n``
-    (the rows the UI highlights, per 01e spec).  Input rows are not mutated.
+    This is a read-layer annotation: it does NOT add a DB column.
+
+    Rules (implements AD-22.11 semantics):
+    - BUY             : disposition=BUY  AND selected_flag=True
+    - BUY (excluded)  : disposition=BUY  AND selected_flag=False
+                        (hard cap excluded this row from the diversified list)
+    - WATCHLIST_ONLY  : disposition=WATCHLIST_ONLY
+    - REJECTED        : any other disposition
+
+    A row must NEVER be rendered as a final BUY when selected_flag is False,
+    even if its stored disposition column says "BUY".
+    """
+    disposition = row.get("disposition", "")
+    selected = bool(row.get("selected_flag", False))
+    if disposition == "BUY":
+        return FINAL_DISPLAY_STATUS_BUY if selected else FINAL_DISPLAY_STATUS_BUY_EXCLUDED
+    if disposition == "WATCHLIST_ONLY":
+        return FINAL_DISPLAY_STATUS_WATCHLIST
+    return FINAL_DISPLAY_STATUS_REJECTED
+
+
+def annotate_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Add ``list_disagreement``, ``div_reason``, and ``final_display_status`` to each proposal row.
+
+    Annotations injected (all read-layer only — no DB columns written):
+
+    ``list_disagreement``
+        ``True`` when ``in_raw_top_n != in_diversified_top_n`` (the rows the
+        UI highlights per 01e spec).
+
+    ``div_reason``
+        Human-readable diversification reason derived from stored fields
+        (rejection_reason or diversity_penalty).
+
+    ``final_display_status``
+        Unambiguous display status — see :func:`derive_final_display_status`.
+        Ensures rows with ``disposition=BUY`` but ``selected_flag=False``
+        (cap-excluded) are never shown as final BUY in the UI.
+
+    Input rows are not mutated.
     """
     annotated: list[dict[str, Any]] = []
     for row in rows:
@@ -214,6 +289,7 @@ def annotate_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
             row.get("in_raw_top_n") != row.get("in_diversified_top_n")
         )
         new_row["div_reason"] = derive_div_reason(row)
+        new_row["final_display_status"] = derive_final_display_status(row)
         annotated.append(new_row)
     return annotated
 
@@ -282,26 +358,24 @@ def _proposals_sql(
     *,
     rank_column: str,
     membership_column: str,
-    with_strategy: bool,
+    with_setup_config: bool,
 ) -> str:
-    strategy_clause = "AND p.strategy_config_id = ? " if with_strategy else ""
+    setup_config_clause = "AND p.setup_config_id = ? " if with_setup_config else ""
     return (
         "SELECT "
-        "p.raw_rank, p.diversified_rank, p.ticker, p.strategy_config_id, "
-        "p.proposal_score_raw, p.proposal_score_final, p.diversity_penalty, "
-        "p.in_raw_top_n, p.in_diversified_top_n, p.diversification_applied, "
-        "p.rejection_reason, p.mechanical_explanation, "
-        "a.setup_type, a.estimated_rr, "
+        "p.raw_rank, p.diversified_rank, p.ticker, "
+        "p.setup_type, p.setup_score, p.risk_label, p.disposition, "
+        "p.entry_price_raw, p.stop_price_raw, p.target_price_raw, "
+        "p.estimated_rr, p.proposal_score_raw, p.proposal_score_final, "
+        "p.diversity_penalty, p.in_raw_top_n, p.in_diversified_top_n, "
+        "p.selected_flag, p.selected_top_n, "
+        "p.diversification_applied, p.rejection_reason, p.mechanical_explanation, "
         "m.sector, m.industry "
         "FROM step5_proposals p "
-        "LEFT JOIN step4_analysis a "
-        "  ON a.run_id = p.run_id AND a.ticker = p.ticker "
-        "  AND a.signal_date = p.signal_date "
-        "  AND a.strategy_config_id = p.strategy_config_id "
         "LEFT JOIN ticker_master m ON m.ticker = p.ticker "
         "WHERE p.run_id = ? AND p.signal_date = ? "
         f"AND p.{membership_column} = TRUE "
-        f"{strategy_clause}"
+        f"{setup_config_clause}"
         f"ORDER BY p.{rank_column} ASC NULLS LAST, p.ticker ASC"
     )
 
@@ -371,14 +445,14 @@ class DashboardDataLoader:
         )
         return [r["signal_date"] for r in rows]
 
-    def list_strategy_configs(self) -> list[str]:
-        """Distinct strategy config ids present in ``step5_proposals``."""
+    def list_setup_configs(self) -> list[str]:
+        """Distinct setup config ids present in ``step5_proposals``."""
         rows = self._fetch_dicts(
-            "SELECT DISTINCT strategy_config_id FROM step5_proposals "
-            "ORDER BY strategy_config_id ASC",
+            "SELECT DISTINCT setup_config_id FROM step5_proposals "
+            "ORDER BY setup_config_id ASC",
             [],
         )
-        return [r["strategy_config_id"] for r in rows]
+        return [r["setup_config_id"] for r in rows]
 
     def latest_signal_date(self) -> date | None:
         """Most recent signal date with proposals, or ``None``."""
@@ -388,7 +462,7 @@ class DashboardDataLoader:
         return row[0] if row is not None else None
 
     def latest_run_id_for_date(
-        self, signal_date: date, strategy_config_id: str | None = None
+        self, signal_date: date, setup_config_id: str | None = None
     ) -> str | None:
         """Most recent run_id that has proposals for *signal_date*.
 
@@ -396,14 +470,14 @@ class DashboardDataLoader:
         run wrote proposals for the same date.
         """
         params: list[Any] = [signal_date]
-        strategy_clause = ""
-        if strategy_config_id is not None:
-            strategy_clause = "AND strategy_config_id = ? "
-            params.append(strategy_config_id)
+        setup_config_clause = ""
+        if setup_config_id is not None:
+            setup_config_clause = "AND setup_config_id = ? "
+            params.append(setup_config_id)
         row = self._fetch_one(
             "SELECT run_id FROM step5_proposals "
             "WHERE signal_date = ? "
-            f"{strategy_clause}"
+            f"{setup_config_clause}"
             "ORDER BY created_at DESC LIMIT 1",
             params,
         )
@@ -415,7 +489,7 @@ class DashboardDataLoader:
     def load_daily_proposals(
         self,
         signal_date: date | None = None,
-        strategy_config_id: str | None = None,
+        setup_config_id: str | None = None,
         show_diversified: bool = True,
     ) -> ProposalsView:
         """Load the proposal shortlist for one signal date and run.
@@ -444,10 +518,10 @@ class DashboardDataLoader:
                 rank_column=rank_col,
                 signal_date=None,
                 run_id=None,
-                strategy_config_id=strategy_config_id,
+                setup_config_id=setup_config_id,
             )
 
-        run_id = self.latest_run_id_for_date(resolved_date, strategy_config_id)
+        run_id = self.latest_run_id_for_date(resolved_date, setup_config_id)
         if run_id is None:
             return ProposalsView(
                 rows=[],
@@ -455,17 +529,17 @@ class DashboardDataLoader:
                 rank_column=rank_col,
                 signal_date=resolved_date,
                 run_id=None,
-                strategy_config_id=strategy_config_id,
+                setup_config_id=setup_config_id,
             )
 
         params: list[Any] = [run_id, resolved_date]
-        if strategy_config_id is not None:
-            params.append(strategy_config_id)
+        if setup_config_id is not None:
+            params.append(setup_config_id)
 
         sql = _proposals_sql(
             rank_column=rank_col,
             membership_column=membership_col,
-            with_strategy=strategy_config_id is not None,
+            with_setup_config=setup_config_id is not None,
         )
         rows = annotate_rows(self._fetch_dicts(sql, params))
 
@@ -475,7 +549,7 @@ class DashboardDataLoader:
             rank_column=rank_col,
             signal_date=resolved_date,
             run_id=run_id,
-            strategy_config_id=strategy_config_id,
+            setup_config_id=setup_config_id,
         )
 
     # ------------------------------------------------------------------ #
@@ -512,7 +586,7 @@ class DashboardDataLoader:
     # Outcome Tracking (trivial COUNT/AVG read -- no recomputation).
     # ------------------------------------------------------------------ #
     def load_outcome_summary(
-        self, strategy_config_id: str | None = None
+        self, setup_config_id: str | None = None
     ) -> OutcomeSummary:
         """Aggregate counts/averages over already-computed ``signal_outcomes``.
 
@@ -524,9 +598,9 @@ class DashboardDataLoader:
         resolved_list = ", ".join("?" for _ in RESOLVED_OUTCOME_STATUSES)
         params: list[Any] = list(RESOLVED_OUTCOME_STATUSES)
         where = ""
-        if strategy_config_id is not None:
-            where = "WHERE strategy_config_id = ? "
-            params.append(strategy_config_id)
+        if setup_config_id is not None:
+            where = "WHERE setup_config_id = ? "
+            params.append(setup_config_id)
         row = self._fetch_one(
             "SELECT COUNT(*) AS total, "
             f"SUM(CASE WHEN outcome_status IN ({resolved_list}) "
@@ -540,7 +614,7 @@ class DashboardDataLoader:
             params,
         )
         if row is None:
-            return OutcomeSummary(strategy_config_id=strategy_config_id)
+            return OutcomeSummary(setup_config_id=setup_config_id)
         total = int(row[0] or 0)
         resolved = int(row[1] or 0)
         return OutcomeSummary(
@@ -551,7 +625,7 @@ class DashboardDataLoader:
             avg_return_10bd_pct=row[3],
             avg_return_20bd_pct=row[4],
             avg_return_40bd_pct=row[5],
-            strategy_config_id=strategy_config_id,
+            setup_config_id=setup_config_id,
         )
 
     # ------------------------------------------------------------------ #
@@ -576,7 +650,7 @@ class DashboardDataLoader:
         run_id: str,
         signal_date: date,
         tickers: list[str],
-        strategy_config_id: str | None = None,
+        setup_config_id: str | None = None,
     ) -> list[str]:
         """Return ``proposal_id`` values for the given tickers within a run.
 
@@ -587,15 +661,15 @@ class DashboardDataLoader:
             return []
         placeholders = ", ".join(["?"] * len(tickers))
         params: list[Any] = [run_id, signal_date] + list(tickers)
-        strategy_clause = ""
-        if strategy_config_id is not None:
-            strategy_clause = "AND strategy_config_id = ? "
-            params.append(strategy_config_id)
+        setup_config_clause = ""
+        if setup_config_id is not None:
+            setup_config_clause = "AND setup_config_id = ? "
+            params.append(setup_config_id)
         rows = self._fetch_dicts(
             "SELECT proposal_id FROM step5_proposals "
             "WHERE run_id = ? AND signal_date = ? "
             f"AND ticker IN ({placeholders}) "
-            f"{strategy_clause}"
+            f"{setup_config_clause}"
             "ORDER BY raw_rank ASC NULLS LAST",
             params,
         )

@@ -1,0 +1,10 @@
+ticker,yahoo_symbol,symbol_type,active_flag,name,industry,market_cap,last_price,volume,source_symbol
+NVDA,NVDA,stock,TRUE,NVIDIA Corporation Common Stock,Technology,5.29157E+12,218.66,169024638,NVDA
+AAPL,AAPL,stock,TRUE,Apple Inc. Common Stock,Technology,4.57115E+12,311.23,44869329,AAPL
+GOOGL,GOOGL,stock,TRUE,Alphabet Inc. Class A Common Stock,Technology,4.50945E+12,372.19,44055727,GOOGL
+GOOG,GOOG,stock,TRUE,Alphabet Inc. Class C Capital Stock,Technology,4.47408E+12,369.27,37746211,GOOG
+MSFT,MSFT,stock,TRUE,Microsoft Corporation Common Stock,Technology,3.17974E+12,428.05,26899672,MSFT
+AMZN,AMZN,stock,TRUE,Amazon.com Inc. Common Stock,Consumer Discretionary,2.73005E+12,253.79,35609875,AMZN
+AVGO,AVGO,stock,TRUE,Broadcom Inc. Common Stock,Technology,1.9834E+12,418.91,80980179,AVGO
+META,META,stock,TRUE,Meta Platforms Inc. Class A Common Stock,Technology,1.59304E+12,627.57,21469795,META
+TSLA,TSLA,stock,TRUE,Tesla Inc. Common Stock,Industrials,1.57158E+12,418.45,35324569,TSLA

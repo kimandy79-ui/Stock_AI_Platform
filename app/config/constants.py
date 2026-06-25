@@ -1,12 +1,9 @@
 """Project-wide constants for the Swing Trading Stock Analyzer.
 
-This module holds immutable, non-tunable constants drawn directly from
-``MASTER_SPEC.md`` and ``ARCHITECTURE.md``. Per ``CODING_STANDARDS.md``:
-
-- Tunable trading thresholds (min_price, min_rvol, etc.) live in strategy
-  config, NOT here. Those are exposed via ``settings.py`` strategy presets.
-- These constants are structural / vocabulary values that define the domain
-  (symbol types, regimes, setup types, feature schema version, etc.).
+Setup-mode migration (AD-22.19–22.24): FEATURE_SCHEMA_VERSION bumped to
+features_v02. ALLOWED_SETUP_TYPES now carries the four active setup-mode
+values. Legacy six-value setup vocabulary is retired; legacy strategy names
+(aggressive/normal/conservative) appear only as deprecated notes.
 
 Module 01 scope: definitions only. No database, provider, or trading logic.
 """
@@ -16,21 +13,20 @@ from __future__ import annotations
 from typing import Final
 
 # --------------------------------------------------------------------------- #
-# Feature schema version
+# Feature schema version (AD-22.8; bumped AD-22.19)
+# Zero-padded per DECISIONS_LOG.md to avoid lexicographic MAX bugs.
 # --------------------------------------------------------------------------- #
-# Zero-padded per DECISIONS_LOG.md ("Use zero-padded feature schema versions")
-# to avoid lexicographic MAX bugs. Required exact value for Module 01.
-FEATURE_SCHEMA_VERSION: Final[str] = "features_v01"
+FEATURE_SCHEMA_VERSION: Final[str] = "features_v02"
 
 # --------------------------------------------------------------------------- #
-# Database file names (MASTER_SPEC.md section 3, ARCHITECTURE.md section 5)
+# Database file names
 # --------------------------------------------------------------------------- #
 PROD_DB_FILENAME: Final[str] = "prod.duckdb"
 DEBUG_DB_FILENAME: Final[str] = "debug.duckdb"
 SIMULATION_DB_FILENAME: Final[str] = "simulation.duckdb"
 
 # --------------------------------------------------------------------------- #
-# Symbol types (MASTER_SPEC.md section 6). Only `stock` enters screening.
+# Symbol types
 # --------------------------------------------------------------------------- #
 SYMBOL_TYPE_STOCK: Final[str] = "stock"
 SYMBOL_TYPE_ETF: Final[str] = "etf"
@@ -45,28 +41,39 @@ ALLOWED_SYMBOL_TYPES: Final[tuple[str, ...]] = (
 )
 
 # --------------------------------------------------------------------------- #
-# Benchmark and sector ETF symbols (MASTER_SPEC.md section 5)
+# Benchmark and sector ETF symbols
 # --------------------------------------------------------------------------- #
 BENCHMARK_SPY: Final[str] = "SPY"
 BENCHMARK_QQQ: Final[str] = "QQQ"
 BENCHMARK_VIX: Final[str] = "^VIX"
 
-# Sector SPDR ETFs used for sector relative strength and exclusions.
 SECTOR_ETFS: Final[tuple[str, ...]] = (
-    "XLK",
-    "XLF",
-    "XLV",
-    "XLY",
-    "XLP",
-    "XLC",
-    "XLI",
-    "XLE",
-    "XLB",
-    "XLU",
-    "XLRE",
+    # Broad sector (SPDR)
+    "XLB", "XLC", "XLE", "XLF", "XLI", "XLK", "XLP", "XLU", "XLV", "XLY", "XLRE",
+    # Basic Materials
+    "COPX", "GDX", "MOO", "PICK", "SIL", "SLX", "WOOD",
+    # Communication Services
+    "ESPO", "FDN", "IYZ", "PBS", "PEJ",
+    # Consumer Cyclical
+    "BJK", "CARZ", "EATZ", "IBUY", "ITB", "XRT",
+    # Consumer Defensive
+    "PBJ",
+    # Energy
+    "AMLP", "CRAK", "OIH", "URA", "XOP",
+    # Financial Services
+    "IAI", "IAK", "KBE", "KRE", "REM",
+    # Healthcare
+    "IHE", "IHF", "IHI", "XBI",
+    # Industrials
+    "BOAT", "IFRA", "ITA", "IYT", "JETS", "PAVE", "XHB", "XME",
+    # Real Estate
+    "DESK", "INDS", "REZ", "RXRE", "SRVR", "VNQ",
+    # Technology
+    "IGV", "SOXX", "TAN",
+    # Utilities
+    "ICLN", "IDU", "PHO",
 )
 
-# Required benchmark universe loaded before the feature engine.
 REQUIRED_BENCHMARK_SYMBOLS: Final[tuple[str, ...]] = (
     BENCHMARK_SPY,
     BENCHMARK_QQQ,
@@ -74,12 +81,6 @@ REQUIRED_BENCHMARK_SYMBOLS: Final[tuple[str, ...]] = (
     *SECTOR_ETFS,
 )
 
-# Canonical internal sector vocabulary (M21 Config Management Addendum §8).
-# These are the ONLY sector names that may be stored in ``ticker_master.sector``
-# / ``ticker_universe_snapshot.sector`` or used as keys in ``SECTOR_ETF_MAP`` /
-# ``sector_etf_map``. Provider-raw sectors are normalized to one of these via
-# ``SECTOR_ALIAS_MAP`` before storage. This is structural vocabulary, not a
-# tunable setting, so it is intentionally a hardcoded constant.
 CANONICAL_SECTORS: Final[tuple[str, ...]] = (
     "Technology",
     "Financials",
@@ -94,7 +95,6 @@ CANONICAL_SECTORS: Final[tuple[str, ...]] = (
     "Real Estate",
 )
 
-# Sector -> ETF mapping (MASTER_SPEC.md section 10). Keys are canonical sectors.
 SECTOR_ETF_MAP: Final[dict[str, str]] = {
     "Technology": "XLK",
     "Financials": "XLF",
@@ -109,17 +109,12 @@ SECTOR_ETF_MAP: Final[dict[str, str]] = {
     "Real Estate": "XLRE",
 }
 
-# Provider/source raw-sector -> canonical-sector aliases (M21 Config Management
-# Addendum §8). This is the single source of truth for sector normalization;
-# the DB ``sector_alias_map`` table is seeded from this map for dashboard
-# visibility / future editing, and runtime ingestion normalizes via this map.
-# Keys are matched case-sensitively first, then case-insensitively as a
-# fallback (see ``normalize_sector``).
 SECTOR_ALIAS_SOURCE_YAHOO: Final[str] = "yahoo"
 SECTOR_ALIAS_MAP: Final[dict[str, str]] = {
     "Technology": "Technology",
     "Financial Services": "Financials",
     "Financials": "Financials",
+    "Finance": "Financials",
     "Healthcare": "Healthcare",
     "Health Care": "Healthcare",
     "Consumer Cyclical": "Consumer Discretionary",
@@ -127,6 +122,7 @@ SECTOR_ALIAS_MAP: Final[dict[str, str]] = {
     "Consumer Defensive": "Consumer Staples",
     "Consumer Staples": "Consumer Staples",
     "Communication Services": "Communication Services",
+    "Telecommunications": "Communication Services",
     "Industrials": "Industrials",
     "Energy": "Energy",
     "Basic Materials": "Materials",
@@ -135,8 +131,183 @@ SECTOR_ALIAS_MAP: Final[dict[str, str]] = {
     "Real Estate": "Real Estate",
 }
 
+# Industry-level ETF map: yfinance sector name → {industry → ETF ticker}.
+# Keys use raw yfinance values (matching ticker_master.sector / .industry after
+# the metadata backfill). Use SECTOR_ALIAS_MAP to convert to canonical sector
+# names; use this map to look up the best ETF for a specific industry.
+# All ETFs referenced here are members of SECTOR_ETFS (loaded as daily prices).
+INDUSTRY_ETF_MAP: Final[dict[str, dict[str, str]]] = {
+    "Basic Materials": {
+        "Agricultural Inputs": "MOO",
+        "Aluminum": "PICK",
+        "Building Materials": "XLB",
+        "Chemicals": "XLB",
+        "Coking Coal": "XLB",
+        "Copper": "COPX",
+        "Gold": "GDX",
+        "Lumber & Wood Products": "WOOD",
+        "Other Industrial Metals & Mining": "PICK",
+        "Other Precious Metals & Mining": "PICK",
+        "Paper & Paper Products": "WOOD",
+        "Silver": "SIL",
+        "Specialty Chemicals": "XLB",
+        "Steel": "SLX",
+    },
+    "Communication Services": {
+        "Advertising Agencies": "XLC",
+        "Broadcasting": "PBS",
+        "Electronic Gaming & Multimedia": "ESPO",
+        "Entertainment": "PEJ",
+        "Internet Content & Information": "FDN",
+        "Publishing": "XLC",
+        "Telecom Services": "IYZ",
+    },
+    "Consumer Cyclical": {
+        "Apparel Manufacturing": "XLY",
+        "Apparel Retail": "XRT",
+        "Auto & Truck Dealerships": "CARZ",
+        "Auto Manufacturers": "CARZ",
+        "Auto Parts": "CARZ",
+        "Department Stores": "XRT",
+        "Footwear & Accessories": "XLY",
+        "Furnishings, Fixtures & Appliances": "XLY",
+        "Gambling": "BJK",
+        "Home Improvement Retail": "XRT",
+        "Internet Retail": "IBUY",
+        "Leisure": "PEJ",
+        "Lodging": "PEJ",
+        "Luxury Goods": "XLY",
+        "Packaging & Containers": "XLY",
+        "Personal Services": "XLY",
+        "Recreational Vehicles": "XLY",
+        "Residential Construction": "ITB",
+        "Resorts & Casinos": "BJK",
+        "Restaurants": "EATZ",
+        "Specialty Retail": "XRT",
+        "Textile Manufacturing": "XLY",
+        "Travel Services": "PEJ",
+    },
+    "Consumer Defensive": {
+        "Beverages - Brewers": "XLP",
+        "Beverages - Non-Alcoholic": "XLP",
+        "Beverages - Wineries & Distilleries": "XLP",
+        "Confectioners": "PBJ",
+        "Discount Stores": "XRT",
+        "Drug Stores": "XLP",
+        "Education & Training Services": "XLP",
+        "Farm Products": "MOO",
+        "Food Distribution": "PBJ",
+        "Grocery Stores": "XLP",
+        "Household & Personal Products": "XLP",
+        "Packaged Foods": "PBJ",
+        "Tobacco": "XLP",
+    },
+    "Energy": {
+        "Oil & Gas Drilling": "OIH",
+        "Oil & Gas E&P": "XOP",
+        "Oil & Gas Equipment & Services": "OIH",
+        "Oil & Gas Integrated": "XLE",
+        "Oil & Gas Midstream": "AMLP",
+        "Oil & Gas Refining & Marketing": "CRAK",
+        "Thermal Coal": "XLE",
+        "Uranium": "URA",
+    },
+    "Financial Services": {
+        "Asset Management": "IAI",
+        "Banks - Diversified": "KBE",
+        "Banks - Regional": "KRE",
+        "Capital Markets": "IAI",
+        "Credit Services": "XLF",
+        "Financial Conglomerates": "XLF",
+        "Financial Data & Stock Exchanges": "IAI",
+        "Insurance - Diversified": "IAK",
+        "Insurance - Life": "IAK",
+        "Insurance - Property & Casualty": "IAK",
+        "Insurance - Reinsurance": "IAK",
+        "Insurance - Specialty": "IAK",
+        "Mortgage Finance": "REM",
+        "Shell Companies": "XLF",
+    },
+    "Healthcare": {
+        "Biotechnology": "XBI",
+        "Diagnostics & Research": "XLV",
+        "Drug Manufacturers - General": "IHE",
+        "Drug Manufacturers - Specialty & Generic": "IHE",
+        "Health Information Services": "XLV",
+        "Healthcare Plans": "IHF",
+        "Medical Care Facilities": "IHF",
+        "Medical Devices": "IHI",
+        "Medical Distribution": "XLV",
+        "Medical Instruments & Supplies": "IHI",
+        "Pharmaceutical Retailers": "XLV",
+    },
+    "Industrials": {
+        "Aerospace & Defense": "ITA",
+        "Airlines": "JETS",
+        "Airports & Air Services": "JETS",
+        "Building Products & Equipment": "XHB",
+        "Business Equipment & Supplies": "XLI",
+        "Conglomerates": "XLI",
+        "Consulting Services": "XLI",
+        "Electrical Equipment & Parts": "XLI",
+        "Engineering & Construction": "PAVE",
+        "Farm & Heavy Construction Machinery": "XLI",
+        "Industrial Distribution": "XLI",
+        "Infrastructure Operations": "IFRA",
+        "Integrated Freight & Logistics": "IYT",
+        "Marine Shipping": "BOAT",
+        "Metal Fabrication": "XME",
+        "Pollution & Treatment Controls": "XLI",
+        "Railroads": "IYT",
+        "Rental & Leasing Services": "XLI",
+        "Security & Protection Services": "XLI",
+        "Specialty Business Services": "XLI",
+        "Specialty Industrial Machinery": "XLI",
+        "Staffing & Employment Services": "XLI",
+        "Tools & Accessories": "XLI",
+        "Trucking": "IYT",
+        "Waste Management": "XLI",
+    },
+    "Real Estate": {
+        "Real Estate - Development": "XLRE",
+        "Real Estate - Diversified": "XLRE",
+        "Real Estate Services": "XLRE",
+        "REIT - Diversified": "VNQ",
+        "REIT - Healthcare Facilities": "RXRE",
+        "REIT - Hotel & Motel": "VNQ",
+        "REIT - Industrial": "INDS",
+        "REIT - Mortgage": "REM",
+        "REIT - Office": "DESK",
+        "REIT - Residential": "REZ",
+        "REIT - Retail": "VNQ",
+        "REIT - Specialty": "SRVR",
+    },
+    "Technology": {
+        "Communication Equipment": "XLK",
+        "Computer Hardware": "XLK",
+        "Consumer Electronics": "XLK",
+        "Electronic Components": "XLK",
+        "Electronics & Computer Distribution": "XLK",
+        "Information Technology Services": "IGV",
+        "Scientific & Technical Instruments": "XLK",
+        "Semiconductor Equipment & Materials": "SOXX",
+        "Semiconductors": "SOXX",
+        "Software - Application": "IGV",
+        "Software - Infrastructure": "IGV",
+        "Solar": "TAN",
+    },
+    "Utilities": {
+        "Utilities - Diversified": "IDU",
+        "Utilities - Independent Power Producers": "XLU",
+        "Utilities - Regulated Electric": "IDU",
+        "Utilities - Regulated Gas": "IDU",
+        "Utilities - Regulated Water": "PHO",
+        "Utilities - Renewable": "ICLN",
+    },
+}
+
 # --------------------------------------------------------------------------- #
-# Market regimes (MASTER_SPEC.md section 11)
+# Market regimes (AD-22.18; VIX boundaries are structural domain constants)
 # --------------------------------------------------------------------------- #
 REGIME_EXTREME_RISK: Final[str] = "extreme_risk"
 REGIME_HIGH_RISK: Final[str] = "high_risk"
@@ -144,7 +315,6 @@ REGIME_BEAR: Final[str] = "bear"
 REGIME_BULL: Final[str] = "bull"
 REGIME_NEUTRAL: Final[str] = "neutral"
 
-# Listed in priority order (highest priority first).
 MARKET_REGIME_PRIORITY: Final[tuple[str, ...]] = (
     REGIME_EXTREME_RISK,
     REGIME_HIGH_RISK,
@@ -153,48 +323,67 @@ MARKET_REGIME_PRIORITY: Final[tuple[str, ...]] = (
     REGIME_NEUTRAL,
 )
 
-# VIX thresholds used in regime classification.
 VIX_EXTREME_RISK_THRESHOLD: Final[float] = 30.0
 VIX_HIGH_RISK_THRESHOLD: Final[float] = 25.0
 
 # --------------------------------------------------------------------------- #
-# Setup types (MASTER_SPEC.md section 13)
+# Setup types — active selection unit (AD-22.20)
+# Exactly four values. Legacy six-value vocab is retired.
 # --------------------------------------------------------------------------- #
-SETUP_TREND_PULLBACK: Final[str] = "trend_pullback"
 SETUP_BREAKOUT: Final[str] = "breakout"
-SETUP_VOLATILITY_SQUEEZE: Final[str] = "volatility_squeeze"
-SETUP_TREND_RESUME: Final[str] = "trend_resume"
-SETUP_HIGH_TIGHT_FLAG: Final[str] = "high_tight_flag"
-SETUP_UNKNOWN: Final[str] = "unknown"
+SETUP_PULLBACK: Final[str] = "pullback"
+SETUP_TREND_CONTINUATION: Final[str] = "trend_continuation"
+SETUP_CONSOLIDATION_BASE: Final[str] = "consolidation_base"
 
 ALLOWED_SETUP_TYPES: Final[tuple[str, ...]] = (
-    SETUP_TREND_PULLBACK,
     SETUP_BREAKOUT,
-    SETUP_VOLATILITY_SQUEEZE,
-    SETUP_TREND_RESUME,
-    SETUP_HIGH_TIGHT_FLAG,
-    SETUP_UNKNOWN,
+    SETUP_PULLBACK,
+    SETUP_TREND_CONTINUATION,
+    SETUP_CONSOLIDATION_BASE,
+)
+
+# Retired legacy setup type names — kept as deprecated string constants ONLY
+# for referencing in migration notes. Must not be used as active selection values.
+_LEGACY_SETUP_TREND_PULLBACK: Final[str] = "trend_pullback"       # retired
+_LEGACY_SETUP_VOLATILITY_SQUEEZE: Final[str] = "volatility_squeeze"  # retired → consolidation_base
+_LEGACY_SETUP_TREND_RESUME: Final[str] = "trend_resume"           # retired → trend_continuation
+_LEGACY_SETUP_HIGH_TIGHT_FLAG: Final[str] = "high_tight_flag"     # retired → breakout
+_LEGACY_SETUP_MOMENTUM_EXTENSION: Final[str] = "momentum_extension"  # retired
+_LEGACY_SETUP_UNKNOWN: Final[str] = "unknown"                     # retired
+
+# --------------------------------------------------------------------------- #
+# Risk label (output, never a config dimension — AD-22.19)
+# --------------------------------------------------------------------------- #
+RISK_LABEL_LOW: Final[str] = "low"
+RISK_LABEL_MEDIUM: Final[str] = "medium"
+RISK_LABEL_HIGH: Final[str] = "high"
+
+ALLOWED_RISK_LABELS: Final[tuple[str, ...]] = (
+    RISK_LABEL_LOW,
+    RISK_LABEL_MEDIUM,
+    RISK_LABEL_HIGH,
 )
 
 # --------------------------------------------------------------------------- #
-# Outcome horizons (MASTER_SPEC.md section 16). US trading business days.
+# Disposition (AD-22.18)
+# --------------------------------------------------------------------------- #
+DISPOSITION_BUY: Final[str] = "BUY"
+DISPOSITION_WATCHLIST_ONLY: Final[str] = "WATCHLIST_ONLY"
+DISPOSITION_REJECTED: Final[str] = "REJECTED"
+
+ALLOWED_DISPOSITIONS: Final[tuple[str, ...]] = (
+    DISPOSITION_BUY,
+    DISPOSITION_WATCHLIST_ONLY,
+    DISPOSITION_REJECTED,
+)
+
+# --------------------------------------------------------------------------- #
+# Outcome horizons
 # --------------------------------------------------------------------------- #
 OUTCOME_HORIZONS_BD: Final[tuple[int, ...]] = (5, 10, 20, 40)
 
 # --------------------------------------------------------------------------- #
-# Step 3 screening default block weights (MASTER_SPEC.md section 12).
-# Structural composition of the screening score; sums to 1.0.
-# --------------------------------------------------------------------------- #
-SCREENING_BLOCK_WEIGHTS: Final[dict[str, float]] = {
-    "trend": 0.30,
-    "momentum": 0.25,
-    "setup": 0.20,
-    "volume": 0.15,
-    "market": 0.10,
-}
-
-# --------------------------------------------------------------------------- #
-# Simulation vocabulary (MASTER_SPEC.md section 17)
+# Simulation vocabulary (AD-22.18)
 # --------------------------------------------------------------------------- #
 LIST_MEMBERSHIP_RAW_ONLY: Final[str] = "raw_only"
 LIST_MEMBERSHIP_DIVERSIFIED_ONLY: Final[str] = "diversified_only"
@@ -215,7 +404,7 @@ ALLOWED_LIST_TYPES: Final[tuple[str, ...]] = (
 )
 
 # --------------------------------------------------------------------------- #
-# AI review attribution (MASTER_SPEC.md section 19)
+# AI review attribution (AD-22.18)
 # --------------------------------------------------------------------------- #
 ATTRIBUTION_MECHANICAL_ONLY: Final[str] = "mechanical_only"
 ATTRIBUTION_HUMAN_ONLY: Final[str] = "human_only"
@@ -228,11 +417,8 @@ ALLOWED_ATTRIBUTIONS: Final[tuple[str, ...]] = (
 )
 
 # --------------------------------------------------------------------------- #
-# Logging (CODING_STANDARDS.md section 5)
-# Format: timestamp | level | module | run_id | message
+# Logging
 # --------------------------------------------------------------------------- #
 LOG_FORMAT: Final[str] = "%(asctime)s | %(levelname)s | %(name)s | %(run_id)s | %(message)s"
 LOG_DATE_FORMAT: Final[str] = "%Y-%m-%dT%H:%M:%S%z"
-
-# Default placeholder when no run_id is bound to a log record.
 DEFAULT_RUN_ID: Final[str] = "-"

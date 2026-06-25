@@ -20,7 +20,7 @@ Actions
 run_pipeline(db_role, run_date, run_type) -> ServiceResult
     Delegates to ``PipelineOrchestrator.run()``.
 
-export_ticker_review(db_role, signal_date, strategy_config_id, proposal_ids)
+export_ticker_review(db_role, signal_date, setup_config_id, proposal_ids)
     Delegates to ``ExportPackageEngine.export_ticker_review()``.
     Produces a reviewer-facing ZIP and records one ``ai_reviews`` row.
 
@@ -30,16 +30,16 @@ send_ticker_review(db_role, ai_review_id) -> ServiceResult
 record_human_action(db_role, ai_review_id, human_action) -> ServiceResult
     Delegates to ``AiReviewEngine.record_human_action()``.
 
-activate_strategy_config(db_role, config_id, activated_by, reason)
-    Delegates to ``ConfigService.activate_strategy_config()``.
+activate_setup_config(db_role, config_id, activated_by, reason)
+    Delegates to ``ConfigService.activate_setup_config()``.
 
-clone_strategy_config(db_role, strategy_name, config_json, version, ...)
-    Delegates to ``ConfigService.create_strategy_config_version()``.
+clone_setup_config(db_role, setup_name, config_json, version, ...)
+    Delegates to ``ConfigService.create_setup_config_version()``.
 
-export_strategy_config_csv(db_role, config_id) -> ServiceResult
-    Reads one strategy config and returns CSV bytes in metadata.
+export_setup_config_csv(db_role, config_id) -> ServiceResult
+    Reads one setup config and returns CSV bytes in metadata.
 
-export_proposals_csv(db_role, signal_date, strategy_config_id, proposal_ids)
+export_proposals_csv(db_role, signal_date, setup_config_id, proposal_ids)
     Reads live DB rows for the supplied proposal ids and returns CSV bytes.
 """
 
@@ -75,7 +75,7 @@ class _PipelineOrchestratorLike(Protocol):
         run_type: str,
         db_role: str,
         force_rerun: bool,
-        strategy_configs: dict | None,
+        setup_configs: dict | None,
         run_id: str | None,
     ) -> ServiceResult: ...
 
@@ -84,7 +84,7 @@ class _ExportEngineLike(Protocol):
     def export_ticker_review(
         self,
         signal_date: date,
-        strategy_config_id: str,
+        setup_config_id: str,
         proposal_ids: list[str],
         db_role: str,
         run_id: str | None,
@@ -106,7 +106,7 @@ class _AiReviewEngineLike(Protocol):
 
 
 class _ConfigServiceLike(Protocol):
-    def activate_strategy_config(
+    def activate_setup_config(
         self,
         config_id: str,
         db_role: str,
@@ -114,10 +114,10 @@ class _ConfigServiceLike(Protocol):
         reason: str | None,
     ) -> ServiceResult: ...
 
-    def create_strategy_config_version(
+    def create_setup_config_version(
         self,
         db_role: str,
-        strategy_name: str,
+        setup_name: str,
         config_json: dict[str, Any],
         version: str | None,
         parent_config_id: str | None,
@@ -126,12 +126,12 @@ class _ConfigServiceLike(Protocol):
         activate: bool,
     ) -> ServiceResult: ...
 
-    def get_strategy_config(
+    def get_setup_config(
         self, config_id: str, db_role: str
     ) -> ServiceResult: ...
 
-    def list_strategy_configs(
-        self, db_role: str, strategy_name: str | None
+    def list_setup_configs(
+        self, db_role: str, setup_name: str | None
     ) -> ServiceResult: ...
 
 
@@ -141,7 +141,7 @@ class _ConfigServiceLike(Protocol):
 
 _STRATEGY_CSV_COLS = [
     "config_id",
-    "strategy_name",
+    "setup_name",
     "version",
     "active_flag",
     "config_hash",
@@ -154,7 +154,7 @@ _PROPOSALS_CSV_COLS = [
     "proposal_id",
     "signal_date",
     "ticker",
-    "strategy_config_id",
+    "setup_config_id",
     "raw_rank",
     "diversified_rank",
     "proposal_score_raw",
@@ -335,7 +335,7 @@ class DashboardActionService:
         run_date: date | None = None,
         run_type: str = "manual",
         force_rerun: bool = False,
-        strategy_configs: dict | None = None,
+        setup_configs: dict | None = None,
         run_id: str | None = None,
     ) -> ServiceResult:
         """Trigger a pipeline run.
@@ -357,7 +357,6 @@ class DashboardActionService:
                 run_type=run_type,
                 db_role=db_role,
                 force_rerun=force_rerun,
-                strategy_configs=strategy_configs,
                 run_id=rid,
             )
         except Exception as exc:  # noqa: BLE001
@@ -367,7 +366,7 @@ class DashboardActionService:
     def export_ticker_review(
         self,
         signal_date: date,
-        strategy_config_id: str,
+        setup_config_id: str,
         proposal_ids: list[str],
         db_role: str = "prod",
         run_id: str | None = None,
@@ -381,15 +380,15 @@ class DashboardActionService:
         role_err = self._validate_write_role(db_role, rid)
         if role_err:
             return self._failed(rid, role_err, {"db_role": db_role, "action": "export_ticker_review"})
-        if not strategy_config_id:
-            return self._failed(rid, "strategy_config_id must not be empty", {"db_role": db_role, "action": "export_ticker_review"})
+        if not setup_config_id:
+            return self._failed(rid, "setup_config_id must not be empty", {"db_role": db_role, "action": "export_ticker_review"})
         if not proposal_ids:
             return self._failed(rid, "proposal_ids must not be empty; select at least one row", {"db_role": db_role, "action": "export_ticker_review"})
 
         _LOG.info(
             "dashboard action: export_ticker_review date=%s config=%s proposals=%d role=%s rid=%s",
             signal_date,
-            strategy_config_id,
+            setup_config_id,
             len(proposal_ids),
             db_role,
             rid,
@@ -397,7 +396,7 @@ class DashboardActionService:
         try:
             result = self._get_export().export_ticker_review(
                 signal_date=signal_date,
-                strategy_config_id=strategy_config_id,
+                setup_config_id=setup_config_id,
                 proposal_ids=proposal_ids,
                 db_role=db_role,
                 run_id=rid,
@@ -464,7 +463,7 @@ class DashboardActionService:
             return self._failed(rid, f"{type(exc).__name__}: {exc}", {"db_role": db_role, "action": "record_human_action"})
         return result
 
-    def activate_strategy_config(
+    def activate_setup_config(
         self,
         config_id: str,
         db_role: str,
@@ -472,30 +471,30 @@ class DashboardActionService:
         reason: str | None = None,
         run_id: str | None = None,
     ) -> ServiceResult:
-        """Activate a strategy config version; deactivates same-name siblings."""
+        """Activate a setup config version; deactivates same-setup-type siblings."""
         rid = run_id or str(uuid.uuid4())
         role_err = self._validate_write_role(db_role, rid)
         if role_err:
-            return self._failed(rid, role_err, {"db_role": db_role, "action": "activate_strategy_config"})
+            return self._failed(rid, role_err, {"db_role": db_role, "action": "activate_setup_config"})
         if not config_id:
-            return self._failed(rid, "config_id must not be empty", {"db_role": db_role, "action": "activate_strategy_config"})
+            return self._failed(rid, "config_id must not be empty", {"db_role": db_role, "action": "activate_setup_config"})
 
-        _LOG.info("dashboard action: activate_strategy_config id=%s role=%s rid=%s", config_id, db_role, rid)
+        _LOG.info("dashboard action: activate_setup_config id=%s role=%s rid=%s", config_id, db_role, rid)
         try:
-            result = self._get_config().activate_strategy_config(
+            result = self._get_config().activate_setup_config(
                 config_id=config_id,
                 db_role=db_role,
                 activated_by=activated_by,
                 reason=reason,
             )
         except Exception as exc:  # noqa: BLE001
-            return self._failed(rid, f"{type(exc).__name__}: {exc}", {"db_role": db_role, "action": "activate_strategy_config"})
+            return self._failed(rid, f"{type(exc).__name__}: {exc}", {"db_role": db_role, "action": "activate_setup_config"})
         return result
 
-    def clone_strategy_config(
+    def clone_setup_config(
         self,
         db_role: str,
-        strategy_name: str,
+        setup_name: str,
         config_json: dict[str, Any],
         version: str | None = None,
         parent_config_id: str | None = None,
@@ -504,32 +503,32 @@ class DashboardActionService:
         activate: bool = False,
         run_id: str | None = None,
     ) -> ServiceResult:
-        """Create a new strategy config version (clone / save-as).
+        """Create a new setup config version (clone / save-as).
 
         ``activate=False`` by default; the caller must call
-        :meth:`activate_strategy_config` separately to make the new version
+        :meth:`activate_setup_config` separately to make the new version
         active, or pass ``activate=True`` to do it atomically.
         """
         rid = run_id or str(uuid.uuid4())
         role_err = self._validate_write_role(db_role, rid)
         if role_err:
-            return self._failed(rid, role_err, {"db_role": db_role, "action": "clone_strategy_config"})
-        if not strategy_name:
-            return self._failed(rid, "strategy_name must not be empty", {"db_role": db_role, "action": "clone_strategy_config"})
+            return self._failed(rid, role_err, {"db_role": db_role, "action": "clone_setup_config"})
+        if not setup_name:
+            return self._failed(rid, "setup_name must not be empty", {"db_role": db_role, "action": "clone_setup_config"})
         if not config_json:
-            return self._failed(rid, "config_json must not be empty", {"db_role": db_role, "action": "clone_strategy_config"})
+            return self._failed(rid, "config_json must not be empty", {"db_role": db_role, "action": "clone_setup_config"})
 
         _LOG.info(
-            "dashboard action: clone_strategy_config name=%s role=%s activate=%s rid=%s",
-            strategy_name,
+            "dashboard action: clone_setup_config name=%s role=%s activate=%s rid=%s",
+            setup_name,
             db_role,
             activate,
             rid,
         )
         try:
-            result = self._get_config().create_strategy_config_version(
+            result = self._get_config().create_setup_config_version(
                 db_role=db_role,
-                strategy_name=strategy_name,
+                setup_name=setup_name,
                 config_json=config_json,
                 version=version,
                 parent_config_id=parent_config_id,
@@ -538,10 +537,10 @@ class DashboardActionService:
                 activate=activate,
             )
         except Exception as exc:  # noqa: BLE001
-            return self._failed(rid, f"{type(exc).__name__}: {exc}", {"db_role": db_role, "action": "clone_strategy_config"})
+            return self._failed(rid, f"{type(exc).__name__}: {exc}", {"db_role": db_role, "action": "clone_setup_config"})
         return result
 
-    def export_strategy_config_csv(
+    def export_setup_config_csv(
         self,
         config_id: str,
         db_role: str = "prod",
@@ -551,29 +550,29 @@ class DashboardActionService:
 
         The CSV covers config metadata only (``config_json`` is omitted to keep
         the download human-readable; it is available separately via
-        :meth:`get_strategy_config`).
+        :meth:`get_setup_config`).
         """
         rid = run_id or str(uuid.uuid4())
         # Read-only; prod and debug are both fine.
         if db_role not in _WRITE_ROLES:
-            return self._failed(rid, f"db_role {db_role!r} not in {sorted(_WRITE_ROLES)}", {"db_role": db_role, "action": "export_strategy_config_csv"})
+            return self._failed(rid, f"db_role {db_role!r} not in {sorted(_WRITE_ROLES)}", {"db_role": db_role, "action": "export_setup_config_csv"})
         if not config_id:
-            return self._failed(rid, "config_id must not be empty", {"db_role": db_role, "action": "export_strategy_config_csv"})
+            return self._failed(rid, "config_id must not be empty", {"db_role": db_role, "action": "export_setup_config_csv"})
 
-        _LOG.info("dashboard action: export_strategy_config_csv id=%s role=%s rid=%s", config_id, db_role, rid)
+        _LOG.info("dashboard action: export_setup_config_csv id=%s role=%s rid=%s", config_id, db_role, rid)
         try:
-            sr = self._get_config().get_strategy_config(config_id=config_id, db_role=db_role)
+            sr = self._get_config().get_setup_config(config_id=config_id, db_role=db_role)
         except Exception as exc:  # noqa: BLE001
-            return self._failed(rid, f"{type(exc).__name__}: {exc}", {"db_role": db_role, "action": "export_strategy_config_csv"})
+            return self._failed(rid, f"{type(exc).__name__}: {exc}", {"db_role": db_role, "action": "export_setup_config_csv"})
 
         if sr.status == service_result.STATUS_FAILED:
             return sr
 
         cfg = sr.metadata.get("config", {})
         csv_bytes = _dict_to_csv([_config_row_to_csv_dict(cfg)], _STRATEGY_CSV_COLS)
-        strategy_name = cfg.get("strategy_name", "unknown")
+        setup_name = cfg.get("setup_name", "unknown")
         version = cfg.get("version", "v?")
-        filename = f"strategy_{strategy_name}_{version}.csv".replace(" ", "_")
+        filename = f"setup_{setup_name}_{version}.csv".replace(" ", "_")
         return ServiceResult(
             status=service_result.STATUS_SUCCESS,
             run_id=rid,
@@ -581,7 +580,7 @@ class DashboardActionService:
             metadata={
                 "db_role": db_role,
                 "config_id": config_id,
-                "strategy_name": strategy_name,
+                "setup_name": setup_name,
                 "version": version,
                 "csv_bytes": csv_bytes,
                 "filename": filename,
@@ -593,7 +592,7 @@ class DashboardActionService:
         signal_date: date,
         proposal_ids: list[str],
         db_role: str = "prod",
-        strategy_config_id: str | None = None,
+        setup_config_id: str | None = None,
         run_id: str | None = None,
     ) -> ServiceResult:
         """Query live DB rows for *proposal_ids* and return CSV bytes.
@@ -653,7 +652,7 @@ class DashboardActionService:
         placeholders = ", ".join(["?"] * len(proposal_ids))
         sql = (
             "SELECT "
-            "p.proposal_id, p.signal_date, p.ticker, p.strategy_config_id, "
+            "p.proposal_id, p.signal_date, p.ticker, p.setup_config_id, "
             "p.raw_rank, p.diversified_rank, "
             "p.proposal_score_raw, p.proposal_score_final, "
             "p.in_raw_top_n, p.in_diversified_top_n, "
@@ -664,7 +663,7 @@ class DashboardActionService:
             "LEFT JOIN step4_analysis a "
             "  ON a.run_id = p.run_id AND a.ticker = p.ticker "
             "  AND a.signal_date = p.signal_date "
-            "  AND a.strategy_config_id = p.strategy_config_id "
+            "  AND a.setup_config_id = p.setup_config_id "
             "LEFT JOIN ticker_master m ON m.ticker = p.ticker "
             f"WHERE p.proposal_id IN ({placeholders}) "
             "AND p.signal_date = ? "

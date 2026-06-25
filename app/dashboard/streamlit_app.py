@@ -211,7 +211,7 @@ _CONFIG_SECTIONS = [
         ("Simulation Mode",           "simulation.mode",                   False),
     ]),
     ("System / General", "⚙", "#f1f5f9", [
-        ("Strategy Name",             "strategy_name",                     False),
+        ("Setup Name",                "setup_name",                        False),
         ("Version",                   "version",                           False),
     ]),
 ]
@@ -257,7 +257,7 @@ def _fmt(val: Any) -> str:
 # Feature enrichment — joins daily_features + daily_prices to proposals.
 # ------------------------------------------------------------------ #
 
-def _enrich_proposals(rows: list[dict], signal_date: date, db_role: str, strategy_config_id: str | None = None) -> list[dict]:
+def _enrich_proposals(rows: list[dict], signal_date: date, db_role: str, setup_config_id: str | None = None) -> list[dict]:
     """Add price/feature/company columns to proposal rows.
 
     - company_name: direct query from ticker_master (always populated if
@@ -334,31 +334,10 @@ def _enrich_proposals(rows: list[dict], signal_date: date, db_role: str, strateg
                 else:
                     feature_map[t] = {"ticker": t, "price": p}
 
-            # ---- Stop / target prices from step4_analysis ----
-            # No strategy_config_id filter: when "(all)" is selected it is None.
-            # Pick the most recent row per ticker for this signal_date.
-            cur4 = conn.execute(
-                f"""
-                SELECT ticker,
-                    ROUND(stop_price_raw, 2)   AS stop_price,
-                    ROUND(target_price_raw, 2) AS target_price
-                FROM (
-                    SELECT *, ROW_NUMBER() OVER (
-                        PARTITION BY ticker ORDER BY created_at DESC
-                    ) AS rn
-                    FROM step4_analysis
-                    WHERE signal_date = ?
-                      AND ticker IN ({placeholders})
-                ) sub WHERE rn = 1
-                """,
-                [signal_date] + tickers,
-            )
-            for t, stop_p, target_p in cur4.fetchall():
-                if t in feature_map:
-                    feature_map[t]["stop_price"]   = stop_p
-                    feature_map[t]["target_price"] = target_p
-                else:
-                    feature_map[t] = {"ticker": t, "stop_price": stop_p, "target_price": target_p}
+            # stop/target are read from step5_proposals via data_access (already on
+            # proposal row as stop_price_raw / target_price_raw). step4_analysis is
+            # NOT queried here; using step4 values would bypass diversification and
+            # show the wrong trade plan for multi-route tickers.
 
         finally:
             conn.close()
@@ -366,27 +345,9 @@ def _enrich_proposals(rows: list[dict], signal_date: date, db_role: str, strateg
     except Exception:
         pass  # enrichment failure → blanks, no crash
 
-    # Fill missing company names from yfinance (read-only; no write-back
-    # to avoid opening a write connection while a read connection is live,
-    # which causes DuckDB ConnectionException on Windows).
-    missing_names = [t for t in tickers if not company_map.get(t)]
-    if missing_names:
-        try:
-            import yfinance as yf
-            for t in missing_names:
-                try:
-                    info = yf.Ticker(t).info
-                    name = (
-                        info.get("longName")
-                        or info.get("shortName")
-                        or ""
-                    )
-                    if name:
-                        company_map[t] = name
-                except Exception:
-                    pass
-        except Exception:
-            pass
+    # Company name fallback via yfinance intentionally removed.
+    # Live yfinance calls block dashboard rendering for 5-10s per render.
+    # Populate ticker_master.company_name via universe ingestion instead.
 
     enriched = []
     for r in rows:
@@ -395,8 +356,11 @@ def _enrich_proposals(rows: list[dict], signal_date: date, db_role: str, strateg
         feat = feature_map.get(tk, {})
         out["company_name"]     = company_map.get(tk) or ""
         out["price"]            = feat.get("price")
-        out["stop_price"]       = feat.get("stop_price")
-        out["target_price"]     = feat.get("target_price")
+        # stop/target/entry: prefer step5 proposal fields (already on row via
+        # data_access SQL); step4 enrichment values are NOT used here —
+        # the step5 values are authoritative for the final trade plan.
+        out["stop_price"]       = feat.get("step4_stop_price")    # explicit fallback only
+        out["target_price"]     = feat.get("step4_target_price")  # explicit fallback only
         out["ema_spread_pct"]   = feat.get("ema_spread_pct")
         out["rsi14"]            = feat.get("rsi14")
         out["roc20"]            = feat.get("roc20")
@@ -597,12 +561,12 @@ def _render_daily_proposals() -> None:  # noqa: C901
             default_date=default_date,
             highlighted_dates=dates,
         )
-    configs = loader.list_strategy_configs()
+    configs = loader.list_setup_configs()
     with strat_col:
-        st.markdown('<span class="da-label">Strategy</span>', unsafe_allow_html=True)
+        st.markdown('<span class="da-label">Setup Config</span>', unsafe_allow_html=True)
         cfg_choice: str = st.selectbox(
-            "strategy_sel", options=["(all)"] + configs,
-            index=0, label_visibility="collapsed", key="dp_strategy",
+            "setup_cfg_sel", options=["(all)"] + configs,
+            index=0, label_visibility="collapsed", key="dp_setup_config",
         )  # type: ignore[assignment]
     with lv_col:
         st.markdown('<span class="da-label">List View</span>', unsafe_allow_html=True)
@@ -620,14 +584,14 @@ def _render_daily_proposals() -> None:  # noqa: C901
     # show_diversified=False → filter on in_raw_top_n (Raw only)
     show_div: bool = (list_view != "Raw only")
 
-    strategy_config_id = None if cfg_choice == "(all)" else cfg_choice
+    setup_config_id = None if cfg_choice == "(all)" else cfg_choice
 
     if run_clicked:
         _do_run_pipeline(role, signal_date)
 
     view = loader.load_daily_proposals(
         signal_date=signal_date,
-        strategy_config_id=strategy_config_id,
+        setup_config_id=setup_config_id,
         show_diversified=show_div,
     )
 
@@ -641,22 +605,17 @@ def _render_daily_proposals() -> None:  # noqa: C901
     display_rows, flags = data_access.build_proposals_display(view)
 
     # Enrich with price + feature columns
-    enriched = _enrich_proposals(display_rows, signal_date, role, strategy_config_id)
+    enriched = _enrich_proposals(display_rows, signal_date, role, setup_config_id)
     all_tickers = [r.get("ticker", "") for r in enriched if r.get("ticker")]
 
     # Build dropdown options as "TICKER (A/N/C)" — one entry per row so duplicates
     # with different strategies are distinguishable.
-    def _strat_letter(cfg_id: str | None) -> str:
-        cid = (cfg_id or "").lower()
-        if "aggressive"   in cid: return "A"
-        if "conservative" in cid: return "C"
-        return "N"
-
     # Map label → enriched row (first occurrence wins for duplicate labels)
     doc_option_map: dict[str, dict] = {}
     for r in enriched:
-        tk  = r.get("ticker", "")
-        lbl = f"{tk} ({_strat_letter(r.get('strategy_config_id'))})"
+        tk       = r.get("ticker", "")
+        setup    = r.get("setup_type") or ""
+        lbl      = f"{tk} ({setup})" if setup else tk
         # Make label unique if duplicated (shouldn't happen but guard anyway)
         if lbl in doc_option_map:
             lbl = f"{lbl}*"
@@ -681,12 +640,12 @@ def _render_daily_proposals() -> None:  # noqa: C901
     with hdr_btn:
         sel_row = doc_option_map.get(doc_label)
         if sel_row:
-            _doc_strategy = sel_row.get("strategy_config_id") or ""
+            _doc_strategy = sel_row.get("setup_config_id") or ""
             _doc_bytes, _doc_filename = _build_ticker_document(
                 row=sel_row,
                 signal_date=signal_date,
                 db_role=role,
-                strategy_config_id=_doc_strategy,
+                setup_config_id=_doc_strategy,
             )
             st.download_button(
                 label="⬇ Download Report",
@@ -701,28 +660,23 @@ def _render_daily_proposals() -> None:  # noqa: C901
             st.button("⬇ Download Report", key="btn_gen_doc_disabled", disabled=True, use_container_width=True)
     export_clicked = False
 
-    def _strategy_prefix(cfg_id: str | None) -> str:
-        if not cfg_id:
-            return ""
-        cid = (cfg_id or "").lower()
-        if "aggressive" in cid:
-            return "a"
-        if "conservative" in cid:
-            return "c"
-        return "n"  # normal / default
-
     # Build display DataFrame for st.data_editor (checkbox column)
     table_rows = []
     for i, row in enumerate(enriched):
         rank_num = row.get("diversified_rank") if show_div else row.get("raw_rank")
-        prefix   = _strategy_prefix(row.get("strategy_config_id"))
-        rank_str = f"{prefix}{int(rank_num)}" if rank_num is not None else f"{prefix}{i+1}"
+        rank_str = str(int(rank_num)) if rank_num is not None else str(i + 1)
         score = row.get("proposal_score_final") or row.get("proposal_score_raw")
         ema_spread = row.get("ema_spread_pct")
         roc  = row.get("roc20")   # replaces MACD (not in schema)
         vol  = row.get("volume_ratio")
         rel  = row.get("rel_strength_pct")
         atr  = row.get("atr_pct")
+
+        # Stop/Target/Entry: use step5 proposal fields (authoritative trade plan).
+        # step4 enrichment values are NOT used; they would bypass diversification.
+        _stop   = row.get("stop_price_raw")   or row.get("stop_price")
+        _target = row.get("target_price_raw") or row.get("target_price")
+        _entry  = row.get("entry_price_raw")
 
         table_rows.append({
             "✓":             True,
@@ -731,11 +685,13 @@ def _render_daily_proposals() -> None:  # noqa: C901
             "Company":       row.get("company_name") or "",
             "Sector":        row.get("sector") or "",
             "Score":         round(float(score), 1) if score is not None else None,
+            "Status":        row.get("final_display_status") or row.get("disposition") or "",
             "RR":            round(float(row["estimated_rr"]), 2) if row.get("estimated_rr") is not None else None,
             "Signal":        row.get("setup_type") or "",
+            "Entry":         round(float(_entry), 2) if _entry is not None else None,
             "Price":         round(float(row["price"]), 2) if row.get("price") is not None else None,
-            "Target":        round(float(row["target_price"]), 2) if row.get("target_price") is not None else None,
-            "Stop":          round(float(row["stop_price"]), 2) if row.get("stop_price") is not None else None,
+            "Target":        round(float(_target), 2) if _target is not None else None,
+            "Stop":          round(float(_stop), 2) if _stop is not None else None,
             "EMA spread":    f"+{ema_spread:.1f}%" if ema_spread is not None and ema_spread >= 0 else (f"{ema_spread:.1f}%" if ema_spread is not None else "—"),
             "RSI14":         round(float(row["rsi14"]), 1) if row.get("rsi14") is not None else None,
             "ROC20 %":       f"+{roc:.1f}%" if roc is not None and roc >= 0 else (f"{roc:.1f}%" if roc is not None else "—"),
@@ -765,11 +721,16 @@ def _render_daily_proposals() -> None:  # noqa: C901
             "Company":       st.column_config.TextColumn("Company",        width=160),
             "Sector":        st.column_config.TextColumn("Sector",         width=140),
             "Score":         st.column_config.NumberColumn("Score",        format="%.1f", width=70),
-            "RR":            st.column_config.NumberColumn("RR",           format="%.2f", width=70),
+            # Status = final_display_status: "BUY", "BUY (excluded)", "WATCHLIST_ONLY", "REJECTED"
+            "Status":        st.column_config.TextColumn("Status",         width=110),
+            "RR":            st.column_config.NumberColumn("RR",           format="%.2f", width=55),
             "Signal":        st.column_config.TextColumn("Signal",         width=90),
-            "Price":         st.column_config.NumberColumn("Price",        format="%.2f", width=80),
-            "Target":        st.column_config.NumberColumn("Target",       format="%.2f", width=75),
-            "Stop":          st.column_config.NumberColumn("Stop",         format="%.2f", width=75),
+            # Entry = entry_price_raw from step5_proposals (signal-date close proxy)
+            "Entry":         st.column_config.NumberColumn("Entry",        format="%.2f", width=70),
+            "Price":         st.column_config.NumberColumn("Price",        format="%.2f", width=70),
+            # Target / Stop: from step5_proposals (structural trade plan)
+            "Target":        st.column_config.NumberColumn("Target",       format="%.2f", width=70),
+            "Stop":          st.column_config.NumberColumn("Stop",         format="%.2f", width=70),
             "EMA spread":    st.column_config.TextColumn("EMA\nspread",    width=80),
             "RSI14":         st.column_config.NumberColumn("RSI14",        format="%.1f", width=70),
             "ROC20 %":       st.column_config.TextColumn("ROC20\n%",       width=75),
@@ -788,7 +749,7 @@ def _render_daily_proposals() -> None:  # noqa: C901
 
     # ---- Export CSV ----
     if export_clicked:
-        _do_export_proposals(role, loader, view, checked_tickers or list(df_display["Ticker"]), strategy_config_id)
+        _do_export_proposals(role, loader, view, checked_tickers or list(df_display["Ticker"]), setup_config_id)
 
 
 
@@ -797,7 +758,7 @@ def _build_ticker_document(
     row: dict,
     signal_date: "date",
     db_role: str,
-    strategy_config_id: str,
+    setup_config_id: str,
 ) -> "tuple[bytes, str]":
     """Delegate to the standalone ticker_report module."""
     from app.dashboard.ticker_report import build_ticker_report
@@ -805,7 +766,7 @@ def _build_ticker_document(
         row=row,
         signal_date=signal_date,
         db_role=db_role,
-        strategy_config_id=strategy_config_id,
+        setup_config_id=setup_config_id,
     )
 
 
@@ -902,7 +863,7 @@ def _do_run_pipeline(role: str, run_date: date | None = None) -> None:
         "validation":               "✅ Validating price data",
         "mutation_detection":       "🔍 Detecting price mutations",
         "feature_calculation":      "⚙ Calculating technical features",
-        "step3_screening":          "🔎 Screening candidates (Step 3)",
+        "step3_screening":          "🔎 Universal eligibility + routing (Step 3)",
         "step4_analysis":           "📊 Analysing setups (Step 4)",
         "step5_proposals":          "💡 Generating proposals (Step 5)",
         "outcome_queue_creation":   "📋 Creating outcome queue",
@@ -991,7 +952,7 @@ def _do_export_proposals(
     loader: DashboardDataLoader,
     view: data_access.ProposalsView,
     tickers: list[str],
-    strategy_config_id: str | None,
+    setup_config_id: str | None,
 ) -> None:
     """Build CSV bytes directly and render download_button immediately."""
     if not tickers:
@@ -1006,7 +967,7 @@ def _do_export_proposals(
         run_id=view.run_id,
         signal_date=view.signal_date,
         tickers=tickers,
-        strategy_config_id=strategy_config_id,
+        setup_config_id=setup_config_id,
     )
     if not proposal_ids:
         st.warning("Could not resolve proposal IDs for the selected tickers.")
@@ -1016,7 +977,7 @@ def _do_export_proposals(
         signal_date=view.signal_date,
         proposal_ids=proposal_ids,
         db_role=role,
-        strategy_config_id=strategy_config_id,
+        setup_config_id=setup_config_id,
     )
 
     if result.status != "success":
@@ -1045,19 +1006,19 @@ def _render_settings() -> None:  # noqa: C901
     versions: list[dict] = []
     try:
         from app.services.config.config_service import ConfigService
-        sr = ConfigService().list_strategy_configs(db_role=role)
+        sr = ConfigService().list_setup_configs(db_role=role)
         if sr.status == "success":
             versions = sr.metadata.get("versions", [])
     except Exception as exc:
-        st.error(f"Could not load strategy configs: {exc}")
+        st.error(f"Could not load setup configs: {exc}")
         return
 
     if not versions:
-        st.info("No strategy configs found. Run `python tools/init_prod_db.py` to seed defaults.")
+        st.info("No setup configs found. Run `python tools/init_prod_db.py` to seed defaults.")
         return
 
     def _cfg_label(v: dict) -> str:
-        return f"{v['strategy_name']} / {v['version']}{' (Active)' if v['active_flag'] else ''}"
+        return f"{v.get('setup_name', v.get('config_id','?'))} / {v['version']}{' (Active)' if v['active_flag'] else ''}"
 
     cfg_labels   = [_cfg_label(v) for v in versions]
     cfg_id_by_lbl = {_cfg_label(v): v["config_id"] for v in versions}
@@ -1078,7 +1039,7 @@ def _render_settings() -> None:  # noqa: C901
     st.markdown('<div class="da-card">', unsafe_allow_html=True)
     sel_cols = st.columns([3, 1, 1, 1, 1])
     with sel_cols[0]:
-        st.markdown('<span class="da-label">Select Strategy (Configuration)</span>', unsafe_allow_html=True)
+        st.markdown('<span class="da-label">Select Setup Config</span>', unsafe_allow_html=True)
         sel_label: str = st.selectbox("cfg_picker", options=cfg_labels, index=0, label_visibility="collapsed", key="cfg_label_sel")  # type: ignore[assignment]
 
     sel_cfg_id  = cfg_id_by_lbl.get(sel_label, "")
@@ -1108,8 +1069,8 @@ def _render_settings() -> None:  # noqa: C901
         st.markdown('<div class="da-clonebar">', unsafe_allow_html=True)
         cc = st.columns([3, 3, 1, 1])
         with cc[0]:
-            st.markdown('<span class="da-label">New Strategy Name</span>', unsafe_allow_html=True)
-            new_name: str = st.text_input("newname", value=f"{sel_meta.get('strategy_name','')}_v2", label_visibility="collapsed", key="clone_new_name")  # type: ignore[assignment]
+            st.markdown('<span class="da-label">New Setup Name</span>', unsafe_allow_html=True)
+            new_name: str = st.text_input("newname", value=f"{sel_meta.get('setup_name','')}_v2", label_visibility="collapsed", key="clone_new_name")  # type: ignore[assignment]
         with cc[1]:
             st.markdown('<span class="da-label" style="color:#94a3b8">Tunable settings editable in clone mode.</span>', unsafe_allow_html=True)
         with cc[2]:
@@ -1126,7 +1087,7 @@ def _render_settings() -> None:  # noqa: C901
 
     # Button actions
     if active_clicked and sel_cfg_id:
-        result = _svc().activate_strategy_config(
+        result = _svc().activate_setup_config(
             config_id=sel_cfg_id, db_role=role,
             activated_by="dashboard", reason="activated via dashboard",
         )
@@ -1135,7 +1096,7 @@ def _render_settings() -> None:  # noqa: C901
             st.rerun()
 
     if export_clicked and sel_cfg_id:
-        result = _svc().export_strategy_config_csv(config_id=sel_cfg_id, db_role=role)
+        result = _svc().export_setup_config_csv(config_id=sel_cfg_id, db_role=role)
         if result.status == "success":
             st.download_button(
                 label=f"⬇ Download {result.metadata['filename']}",
@@ -1169,7 +1130,7 @@ def _render_settings() -> None:  # noqa: C901
     if sel_cfg_id:
         try:
             from app.services.config.config_service import ConfigService
-            gr = ConfigService().get_strategy_config(config_id=sel_cfg_id, db_role=role)
+            gr = ConfigService().get_setup_config(config_id=sel_cfg_id, db_role=role)
             if gr.status == "success":
                 config_json = gr.metadata.get("config", {}).get("config_json", {}) or {}
         except Exception:
@@ -1219,7 +1180,7 @@ def _do_save_clone(role: str, source_meta: dict, new_name: str) -> None:
     if source_id:
         try:
             from app.services.config.config_service import ConfigService
-            gr = ConfigService().get_strategy_config(config_id=source_id, db_role=role)
+            gr = ConfigService().get_setup_config(config_id=source_id, db_role=role)
             if gr.status == "success":
                 base_json = dict(gr.metadata.get("config", {}).get("config_json", {}) or {})
         except Exception:
@@ -1252,9 +1213,9 @@ def _do_save_clone(role: str, source_meta: dict, new_name: str) -> None:
                         cur[parts[-1]] = edited
                 except (ValueError, TypeError):
                     pass
-    result = _svc().clone_strategy_config(
+    result = _svc().clone_setup_config(
         db_role=role,
-        strategy_name=new_name.strip() or source_meta.get("strategy_name", "clone"),
+        setup_name=new_name.strip() or source_meta.get("setup_name", "clone"),
         config_json=base_json,
         parent_config_id=source_id or None,
         created_by="dashboard",

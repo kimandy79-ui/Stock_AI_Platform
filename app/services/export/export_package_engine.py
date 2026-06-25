@@ -4,7 +4,7 @@ Builds reviewer-facing export ZIP packages and records a single manual review
 row, for two flows:
 
 ``ExportPackageEngine.export_ticker_review``
-    For one ``signal_date`` / ``strategy_config_id`` and an explicit list of
+    For one ``signal_date`` / ``setup_config_id`` and an explicit list of
     ``proposal_ids`` (``prod`` / ``debug`` roles only), assembles a ticker-review
     ZIP (``prices.csv``, ``features.csv``, ``step3.csv``, ``step4.csv``,
     ``step5.csv``, ``explanation.txt``, ``metadata.json``) under
@@ -99,7 +99,7 @@ TICKER_METADATA_KEYS: Final[tuple[str, ...]] = (
     "export_type",
     "db_role",
     "signal_date",
-    "strategy_config_id",
+    "setup_config_id",
     "proposal_ids",
     "zip_filename",
     "zip_path",
@@ -196,7 +196,7 @@ class ExportPackageEngine:
     def export_ticker_review(
         self,
         signal_date: date,
-        strategy_config_id: str,
+        setup_config_id: str,
         proposal_ids: list[str],
         db_role: str = "prod",
         run_id: str | None = None,
@@ -207,7 +207,7 @@ class ExportPackageEngine:
         ----------
         signal_date:
             Signal date scoping ``step3`` / ``step4`` / ``step5`` reads.
-        strategy_config_id:
+        setup_config_id:
             Strategy config id scoping the same reads.
         proposal_ids:
             Explicit Step 5 proposal ids to export. Must be non-empty.
@@ -233,12 +233,12 @@ class ExportPackageEngine:
         # --- pre-DB validation (no I/O). ---------------------------------- #
         try:
             self._validate_ticker_inputs(
-                db_role, proposal_ids, strategy_config_id
+                db_role, proposal_ids, setup_config_id
             )
         except _ValidationError as exc:
             log.error("ticker export validation failed: %s", exc)
             return self._ticker_failed(
-                run_id, db_role, signal_iso, strategy_config_id,
+                run_id, db_role, signal_iso, setup_config_id,
                 proposal_ids, str(exc),
             )
 
@@ -247,13 +247,13 @@ class ExportPackageEngine:
         # before reading step3/step4/features/prices.
         try:
             step5 = self._fetch_step5_proposals(
-                db_role, signal_date, strategy_config_id, proposal_ids
+                db_role, signal_date, setup_config_id, proposal_ids
             )
         except Exception as exc:  # noqa: BLE001 - surface DB read failure
             message = f"read failed: {type(exc).__name__}: {exc}"
             log.error("ticker export %s", message)
             return self._ticker_failed(
-                run_id, db_role, signal_iso, strategy_config_id,
+                run_id, db_role, signal_iso, setup_config_id,
                 proposal_ids, message,
             )
 
@@ -264,12 +264,12 @@ class ExportPackageEngine:
             missing = sorted(requested_ids - fetched_ids)
             unexpected = sorted(fetched_ids - requested_ids)
             message = (
-                f"proposal_id mismatch (wrong signal_date, strategy_config_id, "
+                f"proposal_id mismatch (wrong signal_date, setup_config_id, "
                 f"or non-existent): missing={missing}, unexpected={unexpected}"
             )
             log.error("ticker export %s", message)
             return self._ticker_failed(
-                run_id, db_role, signal_iso, strategy_config_id,
+                run_id, db_role, signal_iso, setup_config_id,
                 proposal_ids, message,
             )
 
@@ -286,13 +286,13 @@ class ExportPackageEngine:
         tickers = [r["ticker"] for r in step5]
         try:
             remaining = self._read_ticker_remaining(
-                db_role, signal_date, strategy_config_id, tickers
+                db_role, signal_date, setup_config_id, tickers
             )
         except Exception as exc:  # noqa: BLE001
             message = f"read failed: {type(exc).__name__}: {exc}"
             log.error("ticker export %s", message)
             return self._ticker_failed(
-                run_id, db_role, signal_iso, strategy_config_id,
+                run_id, db_role, signal_iso, setup_config_id,
                 proposal_ids, message,
             )
 
@@ -302,14 +302,14 @@ class ExportPackageEngine:
         zip_filename = f"ticker_review_{signal_iso}_{run_id[:8]}.zip"
         try:
             zip_path = self._build_ticker_zip(
-                zip_filename, signal_date, strategy_config_id,
+                zip_filename, signal_date, setup_config_id,
                 proposal_ids, run_id, data,
             )
         except Exception as exc:  # noqa: BLE001 - surface ZIP failure
             message = f"zip build failed: {type(exc).__name__}: {exc}"
             log.error("ticker export %s", message)
             return self._ticker_failed(
-                run_id, db_role, signal_iso, strategy_config_id,
+                run_id, db_role, signal_iso, setup_config_id,
                 proposal_ids, message,
             )
 
@@ -319,7 +319,7 @@ class ExportPackageEngine:
         first_exported_pid = step5[0]["proposal_id"]
         exported_tickers = [r["ticker"] for r in step5]
         prompt_text = self._ticker_prompt_text_v1(
-            signal_iso, strategy_config_id, data
+            signal_iso, setup_config_id, data
         )
         try:
             self._write_ticker_review_row(
@@ -332,14 +332,14 @@ class ExportPackageEngine:
             )
             log.error("ticker export %s", message)
             return self._ticker_failed(
-                run_id, db_role, signal_iso, strategy_config_id,
+                run_id, db_role, signal_iso, setup_config_id,
                 proposal_ids, message,
                 zip_filename=zip_filename, zip_path=str(zip_path),
             )
 
         log.info("ticker export ok run_id=%s zip=%s", run_id, zip_filename)
         return self._ticker_success(
-            run_id, db_role, signal_iso, strategy_config_id, proposal_ids,
+            run_id, db_role, signal_iso, setup_config_id, proposal_ids,
             zip_filename, str(zip_path), rows_processed=len(data["step5"]),
         )
 
@@ -414,15 +414,15 @@ class ExportPackageEngine:
     # ------------------------------------------------------------------ #
     @staticmethod
     def _validate_ticker_inputs(
-        db_role: str, proposal_ids: list[str], strategy_config_id: str
+        db_role: str, proposal_ids: list[str], setup_config_id: str
     ) -> None:
         if db_role not in TICKER_ALLOWED_ROLES:
             raise _ValidationError(
                 f"Unsupported db_role {db_role!r}; ticker review targets "
                 f"{list(TICKER_ALLOWED_ROLES)}."
             )
-        if not strategy_config_id:
-            raise _ValidationError("strategy_config_id must be non-empty.")
+        if not setup_config_id:
+            raise _ValidationError("setup_config_id must be non-empty.")
         if not proposal_ids:
             raise _ValidationError("proposal_ids must be non-empty.")
         if len(set(proposal_ids)) != len(proposal_ids):
@@ -450,7 +450,7 @@ class ExportPackageEngine:
         self,
         db_role: str,
         signal_date: date,
-        strategy_config_id: str,
+        setup_config_id: str,
         proposal_ids: list[str],
     ) -> list[dict[str, Any]]:
         """Read step5 rows with all 3 exact filters; closed read-only connection."""
@@ -458,16 +458,18 @@ class ExportPackageEngine:
         try:
             return self._fetch_dicts(
                 connection,
-                "SELECT proposal_id, ticker, signal_date, proposal_score_raw, "
-                "proposal_score_final, raw_rank, diversified_rank, "
-                "in_raw_top_n, in_diversified_top_n, rank_position, "
+                "SELECT proposal_id, ticker, signal_date, "
+                "setup_type, setup_score, risk_label, disposition, "
+                "entry_price_raw, stop_price_raw, target_price_raw, estimated_rr, "
+                "proposal_score_raw, proposal_score_final, raw_rank, diversified_rank, "
+                "in_raw_top_n, in_diversified_top_n, "
                 "mechanical_explanation "
                 "FROM step5_proposals "
                 f"WHERE proposal_id IN ({_placeholders(len(proposal_ids))}) "
                 "AND signal_date = ? "
-                "AND strategy_config_id = ? "
+                "AND setup_config_id = ? "
                 "ORDER BY proposal_id",
-                [*proposal_ids, signal_date, strategy_config_id],
+                [*proposal_ids, signal_date, setup_config_id],
             )
         finally:
             connection.close()
@@ -476,7 +478,7 @@ class ExportPackageEngine:
         self,
         db_role: str,
         signal_date: date,
-        strategy_config_id: str,
+        setup_config_id: str,
         tickers: list[str],
     ) -> dict[str, Any]:
         """Read step3/step4/features/prices for a validated, non-empty ticker list.
@@ -488,23 +490,23 @@ class ExportPackageEngine:
         try:
             step3 = self._fetch_dicts(
                 connection,
-                "SELECT candidate_id, ticker, signal_date, screening_score, "
-                "passed_hard_filters "
+                "SELECT candidate_id, ticker, signal_date, eligibility_score, "
+                "passed_eligibility, routing_status, routed_setup_types "
                 "FROM step3_candidates "
-                "WHERE signal_date = ? AND strategy_config_id = ? "
+                "WHERE signal_date = ? "
                 f"AND ticker IN ({_placeholders(len(tickers))}) "
                 "ORDER BY ticker",
-                [signal_date, strategy_config_id, *tickers],
+                [signal_date, *tickers],
             )
             step4 = self._fetch_dicts(
                 connection,
                 "SELECT analysis_id, ticker, signal_date, setup_type, "
                 "setup_score, estimated_rr, stop_price_raw, target_price_raw "
                 "FROM step4_analysis "
-                "WHERE signal_date = ? AND strategy_config_id = ? "
+                "WHERE signal_date = ? AND setup_config_id = ? "
                 f"AND ticker IN ({_placeholders(len(tickers))}) "
                 "ORDER BY ticker",
-                [signal_date, strategy_config_id, *tickers],
+                [signal_date, setup_config_id, *tickers],
             )
             features = self._read_features(connection, signal_date, tickers)
             prices = self._read_prices_window(connection, signal_date, tickers)
@@ -584,7 +586,7 @@ class ExportPackageEngine:
         self,
         zip_filename: str,
         signal_date: date,
-        strategy_config_id: str,
+        setup_config_id: str,
         proposal_ids: list[str],
         run_id: str,
         data: dict[str, Any],
@@ -596,14 +598,15 @@ class ExportPackageEngine:
         metadata = {
             "run_id": run_id,
             "signal_date": signal_date.isoformat(),
-            "strategy_config_id": strategy_config_id,
+            "setup_config_id": setup_config_id,
             "proposal_ids": list(proposal_ids),
             "export_timestamp": _now_iso(),
         }
 
         step3_rows = [
             [r["candidate_id"], r["ticker"], r["signal_date"],
-             r["screening_score"], r["passed_hard_filters"]]
+             r.get("eligibility_score"), r.get("passed_eligibility"),
+             r.get("routing_status"), r.get("routed_setup_types")]
             for r in data["step3"]
         ]
         step4_rows = [
@@ -614,9 +617,13 @@ class ExportPackageEngine:
         ]
         step5_rows = [
             [r["proposal_id"], r["ticker"], r["signal_date"],
+             r.get("setup_type"), r.get("setup_score"), r.get("risk_label"),
+             r.get("disposition"),
+             r.get("entry_price_raw"), r.get("stop_price_raw"),
+             r.get("target_price_raw"), r.get("estimated_rr"),
              r["proposal_score_raw"], r["proposal_score_final"],
-             r["raw_rank"], r["diversified_rank"], r["in_raw_top_n"],
-             r["in_diversified_top_n"], r["rank_position"]]
+             r["raw_rank"], r["diversified_rank"],
+             r["in_raw_top_n"], r["in_diversified_top_n"]]
             for r in data["step5"]
         ]
 
@@ -642,8 +649,9 @@ class ExportPackageEngine:
             zf.writestr(
                 "step3.csv",
                 _rows_to_csv_bytes(
-                    ["candidate_id", "ticker", "signal_date", "screening_score",
-                     "passed_hard_filters"], step3_rows,
+                    ["candidate_id", "ticker", "signal_date", "eligibility_score",
+                     "passed_eligibility", "routing_status",
+                     "routed_setup_types"], step3_rows,
                 ),
             )
             zf.writestr(
@@ -658,9 +666,11 @@ class ExportPackageEngine:
                 "step5.csv",
                 _rows_to_csv_bytes(
                     ["proposal_id", "ticker", "signal_date",
-                     "proposal_score_raw", "proposal_score_final", "raw_rank",
-                     "diversified_rank", "in_raw_top_n", "in_diversified_top_n",
-                     "rank_position"], step5_rows,
+                     "setup_type", "setup_score", "risk_label", "disposition",
+                     "entry_price_raw", "stop_price_raw", "target_price_raw",
+                     "estimated_rr", "proposal_score_raw", "proposal_score_final",
+                     "raw_rank", "diversified_rank",
+                     "in_raw_top_n", "in_diversified_top_n"], step5_rows,
                 ),
             )
             zf.writestr("explanation.txt", self._format_explanations(data["step5"]))
@@ -689,7 +699,7 @@ class ExportPackageEngine:
     # ------------------------------------------------------------------ #
     @staticmethod
     def _ticker_prompt_text_v1(
-        signal_iso: str, strategy_config_id: str, data: dict[str, Any]
+        signal_iso: str, setup_config_id: str, data: dict[str, Any]
     ) -> str:
         step5 = data["step5"]
         step4 = data["step4"]
@@ -711,10 +721,10 @@ class ExportPackageEngine:
         )
         summary = (
             f"{len(step4)} step4 row(s), {len(step5)} step5 proposal(s) "
-            f"for {strategy_config_id}."
+            f"for {setup_config_id}."
         )
         return (
-            f"[TICKER REVIEW — {signal_iso} — {strategy_config_id}]\n"
+            f"[TICKER REVIEW — {signal_iso} — {setup_config_id}]\n"
             f"Proposals: {', '.join(tickers) if tickers else '(none)'}\n"
             f"Top proposal score: {top_score if top_score is not None else 'n/a'}\n"
             f"Setup types: {', '.join(setups) if setups else '(none)'}\n"
@@ -781,7 +791,7 @@ class ExportPackageEngine:
             )
             step3_scores = self._fetch_dicts(
                 connection,
-                "SELECT screening_score FROM sim_step3_candidates "
+                "SELECT eligibility_score FROM sim_step3_candidates "
                 "WHERE sim_run_id = ?",
                 [sim_run_id],
             )
@@ -793,7 +803,8 @@ class ExportPackageEngine:
             )
             outcomes = self._fetch_dicts(
                 connection,
-                "SELECT proposal_id, ticker, strategy_config_id, signal_date, "
+                "SELECT proposal_id, ticker, setup_config_id, setup_type, "
+                "risk_label, signal_date, "
                 "return_5bd_pct, return_10bd_pct, return_20bd_pct, "
                 "return_40bd_pct, list_membership, outcome_status "
                 "FROM sim_signal_outcomes WHERE sim_run_id = ? "
@@ -802,7 +813,7 @@ class ExportPackageEngine:
             )
             step4 = self._fetch_dicts(
                 connection,
-                "SELECT ticker, strategy_config_id, signal_date, setup_type "
+                "SELECT ticker, setup_config_id, signal_date, setup_type "
                 "FROM sim_step4_analysis WHERE sim_run_id = ?",
                 [sim_run_id],
             )
@@ -860,7 +871,7 @@ class ExportPackageEngine:
     ) -> dict[str, Any]:
         """configs.json: config_ids + sim_run metadata.
 
-        G-CONFIGS-SOURCE: full ``strategy_configs`` JSON is not available in the
+        G-CONFIGS-SOURCE: full ``setup_configs`` JSON is not available in the
         simulation database and ``ATTACH`` to prod is out of scope for Module 18,
         so only ``config_ids`` and the ``sim_runs`` metadata are emitted.
         """
@@ -887,7 +898,7 @@ class ExportPackageEngine:
             "sim_run_id": sim_run_id,
             "config_ids": config_ids,
             "sim_run": run_meta,
-            "strategy_configs": None,
+            "setup_configs": None,
             "export_timestamp": _now_iso(),
         }
 
@@ -908,7 +919,7 @@ class ExportPackageEngine:
         header = ["source", "bucket_low", "bucket_high", "count"]
         counts: dict[tuple[str, int, int], int] = {}
         for source, key, rows in (
-            ("step3", "screening_score", step3_scores),
+            ("step3", "eligibility_score", step3_scores),
             ("step5", "proposal_score_final", step5_scores),
         ):
             for row in rows:
@@ -934,13 +945,13 @@ class ExportPackageEngine:
             if s["setup_type"] is None:
                 continue
             setup_by_key[
-                (s["strategy_config_id"], s["ticker"], s["signal_date"])
+                (s["setup_config_id"], s["ticker"], s["signal_date"])
             ] = s["setup_type"]
 
         grouped: dict[tuple[str, int], list[float]] = {}
         for o in outcomes:
             setup = setup_by_key.get(
-                (o["strategy_config_id"], o["ticker"], o["signal_date"])
+                (o["setup_config_id"], o["ticker"], o["signal_date"])
             )
             if setup is None:
                 continue
@@ -971,7 +982,7 @@ class ExportPackageEngine:
     def _build_drawdowns_csv(outcomes: list[dict[str, Any]]) -> bytes:
         """Per-config 40bd equity-curve drawdowns over the diversified list."""
         header = [
-            "strategy_config_id", "peak_date", "trough_date", "drawdown_pct"
+            "setup_config_id", "peak_date", "trough_date", "drawdown_pct"
         ]
         by_config: dict[str, list[dict[str, Any]]] = {}
         for o in outcomes:
@@ -979,7 +990,7 @@ class ExportPackageEngine:
                 continue
             if o["return_40bd_pct"] is None:
                 continue
-            by_config.setdefault(o["strategy_config_id"], []).append(o)
+            by_config.setdefault(o["setup_config_id"], []).append(o)
 
         rows: list[list[Any]] = []
         for config_id in sorted(by_config):
@@ -991,7 +1002,7 @@ class ExportPackageEngine:
             worst_peak_date = peak_date
             worst_trough_date = peak_date
             for point in series:
-                equity *= 1.0 + (point["return_40bd_pct"] / 100.0)
+                equity *= 1.0 + point["return_40bd_pct"]  # decimal fraction from M17
                 if equity > peak:
                     peak = equity
                     peak_date = point["signal_date"]
@@ -1012,11 +1023,11 @@ class ExportPackageEngine:
     @staticmethod
     def _build_unresolved_csv(outcomes: list[dict[str, Any]]) -> bytes:
         header = [
-            "proposal_id", "ticker", "strategy_config_id", "signal_date",
+            "proposal_id", "ticker", "setup_config_id", "signal_date",
             "outcome_status",
         ]
         rows = [
-            [o["proposal_id"], o["ticker"], o["strategy_config_id"],
+            [o["proposal_id"], o["ticker"], o["setup_config_id"],
              str(o["signal_date"]), o["outcome_status"]]
             for o in outcomes
             if o["outcome_status"] == "partial"
@@ -1039,9 +1050,9 @@ class ExportPackageEngine:
                 best = c
             if c["max_drawdown_pct"] is not None and (
                 worst_dd is None
-                or c["max_drawdown_pct"] < worst_dd["max_drawdown_pct"]
+                or c["max_drawdown_pct"] > worst_dd["max_drawdown_pct"]
             ):
-                worst_dd = c
+                worst_dd = c  # largest positive magnitude = worst drawdown
             if c["resolved_outcomes_pct"] is not None:
                 resolved_vals.append(c["resolved_outcomes_pct"])
 
@@ -1118,7 +1129,7 @@ class ExportPackageEngine:
     # ------------------------------------------------------------------ #
     def _ticker_success(
         self, run_id: str, db_role: str, signal_iso: str,
-        strategy_config_id: str, proposal_ids: list[str],
+        setup_config_id: str, proposal_ids: list[str],
         zip_filename: str, zip_path: str, *, rows_processed: int,
     ) -> ServiceResult:
         return ServiceResult(
@@ -1126,14 +1137,14 @@ class ExportPackageEngine:
             run_id=run_id,
             rows_processed=rows_processed,
             metadata=self._ticker_metadata(
-                run_id, db_role, signal_iso, strategy_config_id, proposal_ids,
+                run_id, db_role, signal_iso, setup_config_id, proposal_ids,
                 zip_filename, zip_path, STATUS_SUCCESS_META, None,
             ),
         )
 
     def _ticker_failed(
         self, run_id: str, db_role: str, signal_iso: str,
-        strategy_config_id: str, proposal_ids: list[str], message: str,
+        setup_config_id: str, proposal_ids: list[str], message: str,
         *, zip_filename: str | None = None, zip_path: str | None = None,
     ) -> ServiceResult:
         return ServiceResult(
@@ -1142,14 +1153,14 @@ class ExportPackageEngine:
             rows_processed=0,
             errors=[message],
             metadata=self._ticker_metadata(
-                run_id, db_role, signal_iso, strategy_config_id, proposal_ids,
+                run_id, db_role, signal_iso, setup_config_id, proposal_ids,
                 zip_filename, zip_path, STATUS_FAILED_META, message,
             ),
         )
 
     @staticmethod
     def _ticker_metadata(
-        run_id: str, db_role: str, signal_iso: str, strategy_config_id: str,
+        run_id: str, db_role: str, signal_iso: str, setup_config_id: str,
         proposal_ids: list[str], zip_filename: str | None, zip_path: str | None,
         status: str, error: str | None,
     ) -> dict[str, Any]:
@@ -1158,7 +1169,7 @@ class ExportPackageEngine:
             "export_type": EXPORT_TYPE_TICKER,
             "db_role": db_role,
             "signal_date": signal_iso,
-            "strategy_config_id": strategy_config_id,
+            "setup_config_id": setup_config_id,
             "proposal_ids": proposal_ids,
             "zip_filename": zip_filename,
             "zip_path": zip_path,

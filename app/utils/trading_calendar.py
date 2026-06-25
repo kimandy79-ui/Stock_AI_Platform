@@ -1,4 +1,4 @@
-"""NYSE trading-calendar utility (PIPELINE/73_Trading_Calendar_Spec.md).
+﻿"""NYSE trading-calendar utility (PIPELINE/73_Trading_Calendar_Spec.md).
 
 Single source of truth for US (NYSE) trading-session date arithmetic across the
 platform. Per the trading-calendar spec it is backed by

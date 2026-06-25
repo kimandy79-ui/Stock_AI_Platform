@@ -91,8 +91,12 @@ class TestServiceResult:
 class TestConstants:
     """Validate structural constants required by Module 01."""
 
+    @pytest.mark.skip(
+        reason="RETIRED (setup-mode AD-22.8/22.19): FEATURE_SCHEMA_VERSION bumped "
+               "to 'features_v02'. Legacy 'features_v01' assertion no longer valid."
+    )
     def test_feature_schema_version_exact(self) -> None:
-        # Required exact value; zero-padded per DECISIONS_LOG.md.
+        # Retired: value is now "features_v02" per AD-22.8/22.19.
         assert constants.FEATURE_SCHEMA_VERSION == "features_v01"
 
     def test_db_filenames(self) -> None:
@@ -131,7 +135,12 @@ class TestConstants:
             "neutral",
         )
 
+    @pytest.mark.skip(
+        reason='RETIRED (setup-mode AD-22.20): ALLOWED_SETUP_TYPES now carries exactly 4 '
+               'active values. SETUP_UNKNOWN and legacy six-value vocab are retired.'
+    )
     def test_setup_types(self) -> None:
+        # Retired legacy six-value enum.
         assert constants.SETUP_UNKNOWN in constants.ALLOWED_SETUP_TYPES
         assert "trend_resume" in constants.ALLOWED_SETUP_TYPES
         assert len(constants.ALLOWED_SETUP_TYPES) == 6
@@ -139,7 +148,12 @@ class TestConstants:
     def test_outcome_horizons(self) -> None:
         assert constants.OUTCOME_HORIZONS_BD == (5, 10, 20, 40)
 
+    @pytest.mark.skip(
+        reason='RETIRED (setup-mode AD-22.20): SCREENING_BLOCK_WEIGHTS removed; '
+               'step3 universal eligibility no longer uses a block-weights score model.'
+    )
     def test_screening_block_weights_sum_to_one(self) -> None:
+        # Retired: block-weights concept replaced by setup routing.
         total = sum(constants.SCREENING_BLOCK_WEIGHTS.values())
         assert total == pytest.approx(1.0)
 

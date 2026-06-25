@@ -1,43 +1,22 @@
-"""Schema Manager (Module 03) for the Swing Trading Stock Analyzer.
+"""Schema Manager (Module 03) — setup-mode migration (AD-22.19–22.24).
 
-This module creates the **final merged DuckDB schema** on fresh databases. The
-column-level source of truth is ``docs/SCHEMA_SPEC.md``; every PATCH 1 and
-MINI-PATCH 2 column is already inlined into the ``CREATE TABLE`` statements
-below. There is no base-schema-then-patch step and there are no
-``ALTER TABLE`` statements: the merged schema is created directly.
+Creates the final merged DuckDB schema for setup mode directly. No base-schema
++ ALTER patching on a fresh DB. Old strategy_configs table is replaced by
+setup_configs + risk_label_config. All setup-mode columns are created inline.
 
-Scope (per the Module 03 task and ``ARCHITECTURE.md`` section 3):
+Scope:
+- Production schema for prod and debug roles (setup-mode tables, indexes, views).
+- Simulation schema (sim_* tables + shared config tables).
+- Seeds one schema_versions row per database.
 
-- Create the production schema for the ``prod`` and ``debug`` roles
-  (24 tables incl. ``schema_versions``, 9 indexes, 2 views). The M21 Config
-  Management Addendum added ``runtime_configs``, ``config_activation_log`` and
-  ``sector_alias_map``, extended ``strategy_configs`` with ``db_role`` /
-  ``created_by``, and added config-traceability columns to ``pipeline_runs``.
-- Create the narrower simulation schema (``sim_*`` tables + the four shared
-  config tables: ``strategy_configs``, ``runtime_configs``,
-  ``config_activation_log``, ``sector_alias_map``).
-- Create the simulation schema for the ``simulation`` role
-  (9 tables incl. ``schema_versions``, 2 indexes, no views).
-- Seed exactly one ``schema_versions`` row per database recording the database
-  schema version ``schema_v01``.
+Does NOT:
+- Open DuckDB connections directly (all access via duckdb_manager).
+- Create DuckDB ENUM types (service-layer validation).
+- Run migrations, ALTER TABLE, or any trading/pipeline logic.
 
-This module deliberately does NOT:
-
-- open DuckDB connections directly (all access goes through
-  :mod:`app.database.duckdb_manager`);
-- create DuckDB ``ENUM`` types (enum domains are validated at the service
-  layer, see ``SCHEMA_SPEC.md`` section 5);
-- run migrations, ``ALTER TABLE``, or any provider / screening / scoring /
-  trading / simulation / AI-review / dashboard logic.
-
-Two distinct version values must not be confused (``SCHEMA_SPEC.md`` section 2):
-
-- the **database schema version** ``schema_v01`` seeded into
-  ``schema_versions`` by this module; and
-- the per-row **feature schema version** ``features_v01`` from
-  :data:`app.config.constants.FEATURE_SCHEMA_VERSION`, which is written into
-  ``daily_features.feature_schema_version`` by a later module. Module 03 only
-  creates that column; it does not populate feature rows.
+Two distinct versions (never confused):
+- DATABASE_SCHEMA_VERSION = "schema_v02" — seeded into schema_versions.
+- FEATURE_SCHEMA_VERSION = "features_v02" — written into daily_features rows by M11.
 """
 
 from __future__ import annotations
@@ -51,31 +30,21 @@ from app.utils import logging_config
 from app.utils import service_result
 from app.utils.service_result import ServiceResult
 
-if TYPE_CHECKING:  # pragma: no cover - typing only, no runtime import needed
+if TYPE_CHECKING:  # pragma: no cover
     from duckdb import DuckDBPyConnection
 
 _LOG = logging_config.get_logger(__name__)
 
-# --------------------------------------------------------------------------- #
-# Version / seed constants
-# --------------------------------------------------------------------------- #
-# Database schema version seeded into ``schema_versions`` on first creation.
-# This is the *database* schema version and is intentionally distinct from
-# ``constants.FEATURE_SCHEMA_VERSION`` (the per-row feature schema version).
-DATABASE_SCHEMA_VERSION: Final[str] = "schema_v01"
+DATABASE_SCHEMA_VERSION: Final[str] = "schema_v02"
+_SEED_NOTES: Final[str] = "setup-mode schema (AD-22.19-22.24)"
 
-# Informational notes column for the seed row. Tests only assert it is
-# non-empty (see SCHEMA_SPEC.md section 7.2), so the exact wording is free.
-_SEED_NOTES: Final[str] = "initial merged schema"
-
-# Approved roles handled by this module (mirror duckdb_manager roles).
 DB_ROLE_PROD: Final[str] = duckdb_manager.DB_ROLE_PROD
 DB_ROLE_DEBUG: Final[str] = duckdb_manager.DB_ROLE_DEBUG
 DB_ROLE_SIMULATION: Final[str] = duckdb_manager.DB_ROLE_SIMULATION
 
 
 # --------------------------------------------------------------------------- #
-# Shared metadata table (created in every database role)
+# Shared
 # --------------------------------------------------------------------------- #
 _SCHEMA_VERSIONS_DDL: Final[str] = """
 CREATE TABLE IF NOT EXISTS schema_versions (
@@ -87,9 +56,8 @@ CREATE TABLE IF NOT EXISTS schema_versions (
 );
 """
 
-
 # --------------------------------------------------------------------------- #
-# Production tables (SCHEMA_SPEC.md section 3) — merged final form
+# Production tables (01b_SCHEMA_AND_DATA.md — setup-mode final form)
 # --------------------------------------------------------------------------- #
 _PROD_TABLE_DDL: Final[tuple[str, ...]] = (
     """
@@ -103,9 +71,6 @@ _PROD_TABLE_DDL: Final[tuple[str, ...]] = (
         duration_sec DOUBLE,
         steps_completed JSON,
         error_message TEXT,
-        strategy_config_ids_json JSON,
-        runtime_config_ids_json JSON,
-        config_snapshot_hash VARCHAR,
         created_at TIMESTAMP NOT NULL
     );
     """,
@@ -182,8 +147,7 @@ _PROD_TABLE_DDL: Final[tuple[str, ...]] = (
         PRIMARY KEY (ticker, date)
     );
     """,
-    # daily_features: PATCH 03 feature_schema_version is part of the merged
-    # primary key. Module 03 creates the column only; it does not populate rows.
+    # features_v02 adds structural-level columns (AD-22.19; 01b schema)
     """
     CREATE TABLE IF NOT EXISTS daily_features (
         ticker VARCHAR NOT NULL,
@@ -195,6 +159,8 @@ _PROD_TABLE_DDL: Final[tuple[str, ...]] = (
         ema50 DOUBLE,
         ema200 DOUBLE,
         ema_alignment_score DOUBLE,
+        ema20_slope DOUBLE,
+        ema50_slope DOUBLE,
         distance_to_ema20_pct DOUBLE,
         distance_to_ema50_pct DOUBLE,
         distance_to_ema200_pct DOUBLE,
@@ -202,13 +168,28 @@ _PROD_TABLE_DDL: Final[tuple[str, ...]] = (
         roc20 DOUBLE,
         atr14 DOUBLE,
         atr_pct DOUBLE,
+        atr_compression_score DOUBLE,
         rvol20 DOUBLE,
         avg_volume_20d DOUBLE,
         avg_dollar_volume_20d DOUBLE,
         distance_from_52w_high_pct DOUBLE,
         pullback_from_recent_high_pct DOUBLE,
+        pullback_depth_pct DOUBLE,
         breakout_proximity DOUBLE,
         consolidation_score DOUBLE,
+        swing_high DOUBLE,
+        swing_low DOUBLE,
+        support_level DOUBLE,
+        resistance_level DOUBLE,
+        next_resistance_level DOUBLE,
+        base_high DOUBLE,
+        base_low DOUBLE,
+        range_width_pct DOUBLE,
+        range_duration INTEGER,
+        range_tightness_score DOUBLE,
+        volume_dry_up_score DOUBLE,
+        volume_expansion_score DOUBLE,
+        relative_strength_vs_spy DOUBLE,
         sector_relative_strength DOUBLE,
         market_regime VARCHAR,
         days_to_earnings_bd INTEGER,
@@ -218,57 +199,35 @@ _PROD_TABLE_DDL: Final[tuple[str, ...]] = (
         PRIMARY KEY (ticker, feature_date, feature_schema_version)
     );
     """,
-    # strategy_configs: M21 Config Management Addendum §3.1 adds db_role (for
-    # db-role-scoped active configs) and created_by (provenance). Result tables
-    # continue to reference strategy_config_id (= config_id).
+    # setup_configs replaces strategy_configs (AD-22.22)
+    # Activation constraint: exactly one active_flag=TRUE per setup_type in prod/debug.
+    # Enforced by service layer (not DB constraint).
     """
-    CREATE TABLE IF NOT EXISTS strategy_configs (
+    CREATE TABLE IF NOT EXISTS setup_configs (
         config_id VARCHAR PRIMARY KEY,
-        db_role VARCHAR NOT NULL,
-        strategy_name VARCHAR NOT NULL,
+        setup_type VARCHAR NOT NULL,
         version VARCHAR NOT NULL,
         parent_config_id VARCHAR,
         config_json JSON NOT NULL,
         config_hash VARCHAR NOT NULL,
         active_flag BOOLEAN NOT NULL DEFAULT FALSE,
         created_at TIMESTAMP NOT NULL,
-        created_by VARCHAR,
         notes TEXT
     );
     """,
-    # runtime_configs: M21 Config Management Addendum §3.2 — generic versioned
-    # store for non-strategy runtime settings (pipeline/provider/etc.).
+    # risk_label_config: one active row per prod/debug (AD-22.22)
     """
-    CREATE TABLE IF NOT EXISTS runtime_configs (
+    CREATE TABLE IF NOT EXISTS risk_label_config (
         config_id VARCHAR PRIMARY KEY,
-        db_role VARCHAR NOT NULL,
-        config_type VARCHAR NOT NULL,
         version VARCHAR NOT NULL,
-        parent_config_id VARCHAR,
         config_json JSON NOT NULL,
         config_hash VARCHAR NOT NULL,
         active_flag BOOLEAN NOT NULL DEFAULT FALSE,
         created_at TIMESTAMP NOT NULL,
-        created_by VARCHAR,
         notes TEXT
     );
     """,
-    # config_activation_log: M21 Config Management Addendum §3.3 — append-only
-    # audit trail of config activations (strategy and runtime).
-    """
-    CREATE TABLE IF NOT EXISTS config_activation_log (
-        activation_id VARCHAR PRIMARY KEY,
-        config_id VARCHAR NOT NULL,
-        db_role VARCHAR NOT NULL,
-        config_type VARCHAR NOT NULL,
-        profile_name VARCHAR,
-        activated_at TIMESTAMP NOT NULL,
-        activated_by VARCHAR,
-        reason TEXT
-    );
-    """,
-    # sector_alias_map: M21 Config Management Addendum §3.4 — raw->canonical
-    # sector normalization, seeded from constants.SECTOR_ALIAS_MAP.
+    # sector_alias_map: raw->canonical sector normalization (retained from legacy)
     """
     CREATE TABLE IF NOT EXISTS sector_alias_map (
         source VARCHAR NOT NULL,
@@ -279,58 +238,88 @@ _PROD_TABLE_DDL: Final[tuple[str, ...]] = (
         PRIMARY KEY (source, raw_sector)
     );
     """,
+    # step3_candidates: universal eligibility + setup routing (AD-22.21)
+    # routing_status NOT NULL: 'routed' | 'no_route' | 'ineligible'
     """
     CREATE TABLE IF NOT EXISTS step3_candidates (
         candidate_id VARCHAR PRIMARY KEY,
         run_id VARCHAR NOT NULL,
-        strategy_config_id VARCHAR NOT NULL,
         ticker VARCHAR NOT NULL,
         signal_date DATE NOT NULL,
-        screening_score DOUBLE,
-        passed_hard_filters BOOLEAN NOT NULL,
-        hard_filter_fail_reasons JSON,
-        soft_score_components JSON,
+        eligibility_score DOUBLE,
+        passed_eligibility BOOLEAN NOT NULL,
+        routing_status VARCHAR NOT NULL,
+        routing_fail_reason VARCHAR,
+        eligibility_fail_reasons JSON,
+        routed_setup_types JSON,
         feature_snapshot_json JSON,
         created_at TIMESTAMP NOT NULL
     );
     """,
+    # step4_analysis: per (ticker, setup_type) — setup_type NOT NULL (AD-22.21)
+    # target_is_structural: TRUE=structural target, FALSE=fixed-R fallback
+    # market_regime: NULL if unavailable — NEVER defaulted to neutral
     """
     CREATE TABLE IF NOT EXISTS step4_analysis (
         analysis_id VARCHAR PRIMARY KEY,
         candidate_id VARCHAR NOT NULL,
         run_id VARCHAR NOT NULL,
-        strategy_config_id VARCHAR NOT NULL,
+        setup_config_id VARCHAR NOT NULL,
         ticker VARCHAR NOT NULL,
         signal_date DATE NOT NULL,
-        setup_type VARCHAR,
+        setup_type VARCHAR NOT NULL,
         setup_score DOUBLE,
-        breakout_quality_score DOUBLE,
-        squeeze_score DOUBLE,
-        timing_score DOUBLE,
-        confirmation_score DOUBLE,
-        estimated_rr DOUBLE,
+        setup_passed BOOLEAN NOT NULL,
+        setup_reasons JSON,
+        setup_fail_reason VARCHAR,
+        entry_price_raw DOUBLE,
         stop_price_raw DOUBLE,
         target_price_raw DOUBLE,
+        estimated_rr DOUBLE,
+        target_is_structural BOOLEAN,
+        stop_distance_pct DOUBLE,
+        support_level DOUBLE,
+        resistance_level DOUBLE,
+        next_resistance_level DOUBLE,
+        atr_pct DOUBLE,
+        distance_to_ema20_pct DOUBLE,
+        distance_to_ema50_pct DOUBLE,
+        rvol DOUBLE,
+        earnings_days INTEGER,
+        market_regime VARCHAR,
         earnings_penalty DOUBLE,
         macro_penalty DOUBLE,
         explanation_json JSON,
         created_at TIMESTAMP NOT NULL
     );
     """,
-    # step5_proposals: PATCH 06 ranking fields merged in. The legacy
-    # selected_top_n / selected_flag columns are kept; their semantics are
-    # enforced by Module 15 at write time, NOT by DB constraints here.
+    # step5_proposals: setup/risk/disposition columns (AD-22.21)
     """
     CREATE TABLE IF NOT EXISTS step5_proposals (
         proposal_id VARCHAR PRIMARY KEY,
         run_id VARCHAR NOT NULL,
-        strategy_config_id VARCHAR NOT NULL,
+        setup_config_id VARCHAR NOT NULL,
         ticker VARCHAR NOT NULL,
         signal_date DATE NOT NULL,
+        setup_type VARCHAR NOT NULL,
+        setup_score DOUBLE,
+        risk_score DOUBLE,
+        risk_label VARCHAR,
+        risk_reasons JSON,
+        disposition VARCHAR NOT NULL,
+        entry_price_raw DOUBLE,
+        stop_price_raw DOUBLE,
+        target_price_raw DOUBLE,
+        estimated_rr DOUBLE,
+        target_is_structural BOOLEAN,
+        support_level DOUBLE,
+        resistance_level DOUBLE,
+        next_resistance_level DOUBLE,
+        earnings_days INTEGER,
+        market_regime VARCHAR,
         proposal_score_raw DOUBLE,
         diversity_penalty DOUBLE,
         proposal_score_final DOUBLE,
-        rank_position INTEGER,
         raw_rank INTEGER,
         diversified_rank INTEGER,
         in_raw_top_n BOOLEAN NOT NULL DEFAULT FALSE,
@@ -341,6 +330,7 @@ _PROD_TABLE_DDL: Final[tuple[str, ...]] = (
         ai_reviewed BOOLEAN NOT NULL DEFAULT FALSE,
         executed_flag BOOLEAN NOT NULL DEFAULT FALSE,
         rejection_reason VARCHAR,
+        setup_reasons JSON,
         mechanical_explanation TEXT,
         sector_count_at_selection INTEGER,
         industry_count_at_selection INTEGER,
@@ -363,23 +353,29 @@ _PROD_TABLE_DDL: Final[tuple[str, ...]] = (
         completed_at TIMESTAMP
     );
     """,
-    # signal_outcomes: PATCH 01 entry_price_sim merged in.
+    # signal_outcomes: setup_type + risk_label + stop/target hit (AD-22.21)
     """
     CREATE TABLE IF NOT EXISTS signal_outcomes (
         outcome_id VARCHAR PRIMARY KEY,
         proposal_id VARCHAR NOT NULL,
         ticker VARCHAR NOT NULL,
-        strategy_config_id VARCHAR NOT NULL,
+        setup_config_id VARCHAR NOT NULL,
+        setup_type VARCHAR NOT NULL,
+        risk_label VARCHAR,
         signal_date DATE NOT NULL,
         entry_date DATE NOT NULL,
         entry_price_raw DOUBLE,
         entry_price_sim DOUBLE,
+        stop_price_raw DOUBLE,
+        target_price_raw DOUBLE,
         return_5bd_pct DOUBLE,
         return_10bd_pct DOUBLE,
         return_20bd_pct DOUBLE,
         return_40bd_pct DOUBLE,
         mfe_40bd_pct DOUBLE,
         mae_40bd_pct DOUBLE,
+        stop_hit BOOLEAN,
+        target_hit BOOLEAN,
         realized_r_multiple DOUBLE,
         earnings_within_window BOOLEAN DEFAULT FALSE,
         cross_fold_outcome BOOLEAN DEFAULT FALSE,
@@ -440,6 +436,7 @@ _PROD_TABLE_DDL: Final[tuple[str, ...]] = (
         review_type VARCHAR NOT NULL,
         proposal_id VARCHAR,
         sim_run_id VARCHAR,
+        setup_type VARCHAR,
         provider VARCHAR NOT NULL,
         model VARCHAR NOT NULL,
         prompt_version VARCHAR NOT NULL,
@@ -461,46 +458,60 @@ _PROD_TABLE_DDL: Final[tuple[str, ...]] = (
         created_at TIMESTAMP NOT NULL
     );
     """,
+    # Setup-mode funnel diagnostics (Phase 6 — M20/M22).
+    # Stores per-step, per-setup_type metric rows for every pipeline run.
+    # setup_type is nullable (NULL = pipeline-level metrics, not per-setup).
+    # reason is nullable (populated for rejection/failure breakdowns).
+    # metadata_json holds ancillary counts or detail JSON for the metric.
+    """
+    CREATE TABLE IF NOT EXISTS pipeline_run_diagnostics (
+        diag_id VARCHAR PRIMARY KEY,
+        run_id VARCHAR NOT NULL,
+        signal_date DATE NOT NULL,
+        db_role VARCHAR NOT NULL,
+        step_name VARCHAR NOT NULL,
+        setup_type VARCHAR,
+        metric_name VARCHAR NOT NULL,
+        metric_value DOUBLE,
+        reason VARCHAR,
+        metadata_json JSON,
+        created_at TIMESTAMP NOT NULL
+    );
+    """,
 )
 
-# Production indexes (SCHEMA_SPEC.md section 3.21): base indexes plus the two
-# PATCH 06 ranking indexes.
 _PROD_INDEX_DDL: Final[tuple[str, ...]] = (
-    "CREATE INDEX IF NOT EXISTS idx_daily_prices_ticker_date "
-    "ON daily_prices(ticker, date);",
-    "CREATE INDEX IF NOT EXISTS idx_daily_features_ticker_date "
-    "ON daily_features(ticker, feature_date);",
-    "CREATE INDEX IF NOT EXISTS idx_step3_run_date "
-    "ON step3_candidates(run_id, signal_date);",
-    "CREATE INDEX IF NOT EXISTS idx_step5_run_date_selected "
-    "ON step5_proposals(run_id, signal_date, selected_flag);",
-    "CREATE INDEX IF NOT EXISTS idx_outcomes_config_date "
-    "ON signal_outcomes(strategy_config_id, signal_date);",
-    "CREATE INDEX IF NOT EXISTS idx_queue_status_eval "
-    "ON outcome_tracking_queue(status, eval_date);",
-    "CREATE INDEX IF NOT EXISTS idx_repair_status "
-    "ON data_repair_queue(status, repair_date);",
-    "CREATE INDEX IF NOT EXISTS idx_step5_run_raw_rank "
-    "ON step5_proposals(run_id, signal_date, raw_rank);",
-    "CREATE INDEX IF NOT EXISTS idx_step5_run_div_rank "
-    "ON step5_proposals(run_id, signal_date, diversified_rank);",
+    "CREATE INDEX IF NOT EXISTS idx_daily_prices_ticker_date ON daily_prices(ticker, date);",
+    "CREATE INDEX IF NOT EXISTS idx_daily_features_ticker_date ON daily_features(ticker, feature_date);",
+    "CREATE INDEX IF NOT EXISTS idx_step3_run_date ON step3_candidates(run_id, signal_date);",
+    "CREATE INDEX IF NOT EXISTS idx_step4_run_setup ON step4_analysis(run_id, signal_date, setup_type);",
+    "CREATE INDEX IF NOT EXISTS idx_step5_run_date_selected ON step5_proposals(run_id, signal_date, selected_flag);",
+    "CREATE INDEX IF NOT EXISTS idx_step5_run_setup ON step5_proposals(run_id, signal_date, setup_type);",
+    "CREATE INDEX IF NOT EXISTS idx_step5_run_raw_rank ON step5_proposals(run_id, signal_date, raw_rank);",
+    "CREATE INDEX IF NOT EXISTS idx_step5_run_div_rank ON step5_proposals(run_id, signal_date, diversified_rank);",
+    "CREATE INDEX IF NOT EXISTS idx_outcomes_setup_date ON signal_outcomes(setup_config_id, setup_type, signal_date);",
+    "CREATE INDEX IF NOT EXISTS idx_queue_status_eval ON outcome_tracking_queue(status, eval_date);",
+    "CREATE INDEX IF NOT EXISTS idx_repair_status ON data_repair_queue(status, repair_date);",
+    "CREATE INDEX IF NOT EXISTS idx_diag_run_date ON pipeline_run_diagnostics(run_id, signal_date);",
+    "CREATE INDEX IF NOT EXISTS idx_diag_run_step ON pipeline_run_diagnostics(run_id, step_name, setup_type);",
 )
 
 _PROD_INDEX_NAMES: Final[tuple[str, ...]] = (
     "idx_daily_prices_ticker_date",
     "idx_daily_features_ticker_date",
     "idx_step3_run_date",
+    "idx_step4_run_setup",
     "idx_step5_run_date_selected",
-    "idx_outcomes_config_date",
-    "idx_queue_status_eval",
-    "idx_repair_status",
+    "idx_step5_run_setup",
     "idx_step5_run_raw_rank",
     "idx_step5_run_div_rank",
+    "idx_outcomes_setup_date",
+    "idx_queue_status_eval",
+    "idx_repair_status",
+    "idx_diag_run_date",
+    "idx_diag_run_step",
 )
 
-# Production views (SCHEMA_SPEC.md section 3.22). selected_proposals_current
-# uses the PATCH 10 condition (in_diversified_top_n = TRUE), NOT the legacy
-# selected_flag = TRUE condition. CREATE OR REPLACE VIEW is naturally idempotent.
 _PROD_VIEW_DDL: Final[tuple[str, ...]] = (
     """
     CREATE OR REPLACE VIEW daily_features_current AS
@@ -523,30 +534,17 @@ _PROD_VIEW_NAMES: Final[tuple[str, ...]] = (
     "selected_proposals_current",
 )
 
-
 # --------------------------------------------------------------------------- #
-# Simulation tables (SCHEMA_SPEC.md section 4) — merged final form
+# Simulation tables (01b §SCHEMA/11)
 # --------------------------------------------------------------------------- #
-# Config tables shared with the production schema (M21 Config Management
-# Addendum): strategy_configs, runtime_configs, config_activation_log,
-# sector_alias_map. Referenced by sim_* tables via strategy_config_id.
-_SIM_CONFIG_TABLE_DDL: Final[tuple[str, ...]] = _PROD_TABLE_DDL[
-    # Slice: strategy_configs, runtime_configs, config_activation_log,
-    # sector_alias_map are items 10-13 in _PROD_TABLE_DDL (0-indexed).
-    # Using a filter by DDL content keeps this robust to future reordering.
-    # We include all four config tables and only those.
-    :  # all items filtered below
-]
-# Rather than fragile index slicing, grab the four config DDL strings by name.
-_SIM_CONFIG_TABLE_DDL = tuple(
+_SIM_CONFIG_TABLE_DDL: tuple[str, ...] = tuple(
     ddl
     for ddl in _PROD_TABLE_DDL
     if any(
         marker in ddl
         for marker in (
-            "CREATE TABLE IF NOT EXISTS strategy_configs",
-            "CREATE TABLE IF NOT EXISTS runtime_configs",
-            "CREATE TABLE IF NOT EXISTS config_activation_log",
+            "CREATE TABLE IF NOT EXISTS setup_configs",
+            "CREATE TABLE IF NOT EXISTS risk_label_config",
             "CREATE TABLE IF NOT EXISTS sector_alias_map",
         )
     )
@@ -584,13 +582,14 @@ _SIM_TABLE_DDL: Final[tuple[str, ...]] = _SIM_CONFIG_TABLE_DDL + (
         candidate_id VARCHAR PRIMARY KEY,
         sim_run_id VARCHAR NOT NULL,
         fold_id VARCHAR,
-        strategy_config_id VARCHAR NOT NULL,
         ticker VARCHAR NOT NULL,
         signal_date DATE NOT NULL,
-        screening_score DOUBLE,
-        passed_hard_filters BOOLEAN NOT NULL,
-        hard_filter_fail_reasons JSON,
-        soft_score_components JSON,
+        eligibility_score DOUBLE,
+        passed_eligibility BOOLEAN NOT NULL,
+        routing_status VARCHAR NOT NULL,
+        routing_fail_reason VARCHAR,
+        eligibility_fail_reasons JSON,
+        routed_setup_types JSON,
         created_at TIMESTAMP NOT NULL
     );
     """,
@@ -600,41 +599,60 @@ _SIM_TABLE_DDL: Final[tuple[str, ...]] = _SIM_CONFIG_TABLE_DDL + (
         candidate_id VARCHAR NOT NULL,
         sim_run_id VARCHAR NOT NULL,
         fold_id VARCHAR,
-        strategy_config_id VARCHAR NOT NULL,
+        setup_config_id VARCHAR NOT NULL,
         ticker VARCHAR NOT NULL,
         signal_date DATE NOT NULL,
-        setup_type VARCHAR,
+        setup_type VARCHAR NOT NULL,
         setup_score DOUBLE,
+        setup_passed BOOLEAN NOT NULL,
         estimated_rr DOUBLE,
+        target_is_structural BOOLEAN,
+        entry_price_raw DOUBLE,
         stop_price_raw DOUBLE,
         target_price_raw DOUBLE,
         created_at TIMESTAMP NOT NULL
     );
     """,
-    # sim_step5_proposals: PATCH 06 ranking fields merged in.
+    # sim_step5_proposals: prod-equivalent fields for audit/debug parity (fix 8)
     """
     CREATE TABLE IF NOT EXISTS sim_step5_proposals (
         proposal_id VARCHAR PRIMARY KEY,
         sim_run_id VARCHAR NOT NULL,
         fold_id VARCHAR,
-        strategy_config_id VARCHAR NOT NULL,
+        setup_config_id VARCHAR NOT NULL,
         ticker VARCHAR NOT NULL,
         signal_date DATE NOT NULL,
+        setup_type VARCHAR NOT NULL,
+        setup_score DOUBLE,
+        risk_score DOUBLE,
+        risk_label VARCHAR,
+        risk_reasons JSON,
+        disposition VARCHAR NOT NULL,
+        entry_price_raw DOUBLE,
+        stop_price_raw DOUBLE,
+        target_price_raw DOUBLE,
+        estimated_rr DOUBLE,
+        target_is_structural BOOLEAN,
+        support_level DOUBLE,
+        resistance_level DOUBLE,
+        next_resistance_level DOUBLE,
+        market_regime VARCHAR,
+        earnings_days INTEGER,
         proposal_score_raw DOUBLE,
         diversity_penalty DOUBLE,
         proposal_score_final DOUBLE,
-        rank_position INTEGER,
-        selected_top_n BOOLEAN NOT NULL,
         raw_rank INTEGER,
         diversified_rank INTEGER,
         in_raw_top_n BOOLEAN NOT NULL DEFAULT FALSE,
         in_diversified_top_n BOOLEAN NOT NULL DEFAULT FALSE,
         diversification_applied BOOLEAN NOT NULL DEFAULT TRUE,
+        selected_top_n BOOLEAN NOT NULL,
+        selected_flag BOOLEAN NOT NULL DEFAULT FALSE,
         rejection_reason VARCHAR,
         created_at TIMESTAMP NOT NULL
     );
     """,
-    # sim_signal_outcomes: PATCH 01 entry_price_sim + PATCH 08 list_membership.
+    # sim_signal_outcomes: stop/target prices for hit-rate audit
     """
     CREATE TABLE IF NOT EXISTS sim_signal_outcomes (
         outcome_id VARCHAR PRIMARY KEY,
@@ -642,39 +660,48 @@ _SIM_TABLE_DDL: Final[tuple[str, ...]] = _SIM_CONFIG_TABLE_DDL + (
         fold_id VARCHAR,
         proposal_id VARCHAR NOT NULL,
         ticker VARCHAR NOT NULL,
-        strategy_config_id VARCHAR NOT NULL,
+        setup_config_id VARCHAR NOT NULL,
+        setup_type VARCHAR NOT NULL,
+        risk_label VARCHAR,
         signal_date DATE NOT NULL,
         entry_date DATE NOT NULL,
         entry_price_raw DOUBLE,
         entry_price_sim DOUBLE,
+        stop_price_raw DOUBLE,
+        target_price_raw DOUBLE,
+        list_membership VARCHAR,
         return_5bd_pct DOUBLE,
         return_10bd_pct DOUBLE,
         return_20bd_pct DOUBLE,
         return_40bd_pct DOUBLE,
         mfe_40bd_pct DOUBLE,
         mae_40bd_pct DOUBLE,
+        stop_hit BOOLEAN,
+        target_hit BOOLEAN,
         realized_r_multiple DOUBLE,
-        list_membership VARCHAR,
         cross_fold_outcome BOOLEAN NOT NULL DEFAULT FALSE,
         outcome_status VARCHAR NOT NULL,
         calculated_at TIMESTAMP
     );
     """,
-    # sim_config_comparisons: PATCH 08 list_type (default 'diversified').
     """
     CREATE TABLE IF NOT EXISTS sim_config_comparisons (
         comparison_id VARCHAR PRIMARY KEY,
         sim_run_id VARCHAR NOT NULL,
         config_id VARCHAR NOT NULL,
+        setup_type VARCHAR NOT NULL,
+        risk_label VARCHAR,
         horizon_bd INTEGER NOT NULL,
+        list_type VARCHAR NOT NULL DEFAULT 'diversified',
         expectancy DOUBLE,
         win_rate DOUBLE,
         avg_win DOUBLE,
         avg_loss DOUBLE,
         profit_factor DOUBLE,
+        stop_hit_rate DOUBLE,
+        target_hit_rate DOUBLE,
         max_drawdown_pct DOUBLE,
         resolved_outcomes_pct DOUBLE,
-        list_type VARCHAR NOT NULL DEFAULT 'diversified',
         created_at TIMESTAMP NOT NULL
     );
     """,
@@ -693,17 +720,14 @@ _SIM_TABLE_DDL: Final[tuple[str, ...]] = _SIM_CONFIG_TABLE_DDL + (
     """,
 )
 
-# Simulation indexes (SCHEMA_SPEC.md section 4.10).
 _SIM_INDEX_DDL: Final[tuple[str, ...]] = (
-    "CREATE INDEX IF NOT EXISTS idx_sim_props_run_date "
-    "ON sim_step5_proposals(sim_run_id, signal_date);",
-    "CREATE INDEX IF NOT EXISTS idx_sim_outcomes_config_date "
-    "ON sim_signal_outcomes(strategy_config_id, signal_date);",
+    "CREATE INDEX IF NOT EXISTS idx_sim_props_run_date ON sim_step5_proposals(sim_run_id, signal_date);",
+    "CREATE INDEX IF NOT EXISTS idx_sim_outcomes_setup_date ON sim_signal_outcomes(setup_config_id, setup_type, signal_date);",
 )
 
 _SIM_INDEX_NAMES: Final[tuple[str, ...]] = (
     "idx_sim_props_run_date",
-    "idx_sim_outcomes_config_date",
+    "idx_sim_outcomes_setup_date",
 )
 
 
@@ -712,12 +736,6 @@ _SIM_INDEX_NAMES: Final[tuple[str, ...]] = (
 # --------------------------------------------------------------------------- #
 @dataclass(frozen=True)
 class _RoleSchema:
-    """Immutable bundle of the DDL and expected object names for a role.
-
-    ``schema_versions`` is shared across all roles and is prepended to
-    ``table_ddl`` so that every database gets its own version table.
-    """
-
     table_ddl: tuple[str, ...]
     index_ddl: tuple[str, ...]
     view_ddl: tuple[str, ...]
@@ -741,7 +759,6 @@ _SIMULATION_SCHEMA: Final[_RoleSchema] = _RoleSchema(
     view_names=(),
 )
 
-# prod and debug share the identical production schema (SCHEMA_SPEC.md section 1).
 _ROLE_SCHEMAS: Final[dict[str, _RoleSchema]] = {
     DB_ROLE_PROD: _PRODUCTION_SCHEMA,
     DB_ROLE_DEBUG: _PRODUCTION_SCHEMA,
@@ -753,7 +770,6 @@ _ROLE_SCHEMAS: Final[dict[str, _RoleSchema]] = {
 # Introspection helpers
 # --------------------------------------------------------------------------- #
 def _present_base_tables(connection: "DuckDBPyConnection") -> set[str]:
-    """Return the set of user base-table names in the ``main`` schema."""
     rows = connection.execute(
         "SELECT table_name FROM information_schema.tables "
         "WHERE table_schema = 'main' AND table_type = 'BASE TABLE'"
@@ -762,7 +778,6 @@ def _present_base_tables(connection: "DuckDBPyConnection") -> set[str]:
 
 
 def _present_views(connection: "DuckDBPyConnection") -> set[str]:
-    """Return the set of user view names in the ``main`` schema."""
     rows = connection.execute(
         "SELECT table_name FROM information_schema.tables "
         "WHERE table_schema = 'main' AND table_type = 'VIEW'"
@@ -771,58 +786,26 @@ def _present_views(connection: "DuckDBPyConnection") -> set[str]:
 
 
 def _present_indexes(connection: "DuckDBPyConnection") -> set[str]:
-    """Return the set of explicitly-created index names known to DuckDB.
-
-    Primary-key / unique constraints may produce implicit indexes; those are
-    ignored by callers, which intersect this set with the explicit index names
-    they created, yielding a deterministic count.
-    """
     rows = connection.execute("SELECT index_name FROM duckdb_indexes()").fetchall()
     return {row[0] for row in rows}
 
 
 # --------------------------------------------------------------------------- #
-# Core application logic
+# Core logic
 # --------------------------------------------------------------------------- #
-def _seed_schema_version(
-    connection: "DuckDBPyConnection",
-    schema_name: str,
-) -> bool:
-    """Insert the ``schema_versions`` seed row if it is not already present.
-
-    Uses an explicit ``INSERT ... SELECT ... WHERE NOT EXISTS`` guard keyed on
-    the composite ``(schema_name, version)`` so repeated application never
-    duplicates the row and never relies on swallowing a primary-key conflict.
-
-    Returns
-    -------
-    bool
-        ``True`` if a new seed row was inserted on this call, ``False`` if the
-        row already existed (idempotent re-application).
-    """
+def _seed_schema_version(connection: "DuckDBPyConnection", schema_name: str) -> bool:
     existing = connection.execute(
-        "SELECT COUNT(*) FROM schema_versions "
-        "WHERE schema_name = ? AND version = ?",
+        "SELECT COUNT(*) FROM schema_versions WHERE schema_name = ? AND version = ?",
         [schema_name, DATABASE_SCHEMA_VERSION],
     ).fetchone()
     already_present = bool(existing and existing[0])
-
-    # CAST(now() AS TIMESTAMP) keeps the value's type aligned with the
-    # TIMESTAMP column (now() is TIMESTAMP WITH TIME ZONE in DuckDB).
     connection.execute(
         "INSERT INTO schema_versions (schema_name, version, applied_at, notes) "
         "SELECT ?, ?, CAST(now() AS TIMESTAMP), ? "
         "WHERE NOT EXISTS ("
-        "    SELECT 1 FROM schema_versions "
-        "    WHERE schema_name = ? AND version = ?"
+        "    SELECT 1 FROM schema_versions WHERE schema_name = ? AND version = ?"
         ")",
-        [
-            schema_name,
-            DATABASE_SCHEMA_VERSION,
-            _SEED_NOTES,
-            schema_name,
-            DATABASE_SCHEMA_VERSION,
-        ],
+        [schema_name, DATABASE_SCHEMA_VERSION, _SEED_NOTES, schema_name, DATABASE_SCHEMA_VERSION],
     )
     return not already_present
 
@@ -832,11 +815,6 @@ def _apply_role_schema(
     db_role: str,
     schema: _RoleSchema,
 ) -> dict[str, Any]:
-    """Create all schema objects for ``db_role`` and return metadata.
-
-    Order is tables -> indexes -> views -> seed row, so views can reference
-    the tables they depend on. Every statement is intrinsically idempotent.
-    """
     for ddl in schema.table_ddl:
         connection.execute(ddl)
     for ddl in schema.index_ddl:
@@ -867,23 +845,7 @@ def _apply_role_schema(
 # Public API
 # --------------------------------------------------------------------------- #
 def apply_schema(db_role: str) -> ServiceResult:
-    """Create the final merged schema for ``db_role`` on its DuckDB database.
-
-    Parameters
-    ----------
-    db_role:
-        One of ``prod``, ``debug``, ``simulation``. ``prod`` and ``debug``
-        receive the identical production schema; ``simulation`` receives the
-        narrower simulation schema.
-
-    Returns
-    -------
-    ServiceResult
-        ``success`` on first creation and on idempotent re-application;
-        ``failed`` only on a hard error. The ``metadata`` carries the keys
-        described in ``SCHEMA_SPEC.md`` section 7.1 and ``rows_processed`` is
-        the number of tables present after the call.
-    """
+    """Create the final setup-mode schema for db_role on its DuckDB database."""
     run_id = str(uuid.uuid4())
     log = logging_config.get_logger(__name__, run_id)
 
@@ -902,14 +864,14 @@ def apply_schema(db_role: str) -> ServiceResult:
             metadata={"db_role": db_role},
         )
 
-    log.info("applying merged schema role=%s version=%s", db_role, DATABASE_SCHEMA_VERSION)
+    log.info("applying setup-mode schema role=%s version=%s", db_role, DATABASE_SCHEMA_VERSION)
     try:
         connection = duckdb_manager.connect(db_role)
         try:
             metadata = _apply_role_schema(connection, db_role, schema)
         finally:
             connection.close()
-    except Exception as exc:  # noqa: BLE001 - surface as a failed ServiceResult
+    except Exception as exc:  # noqa: BLE001
         log.error("schema application failed for role=%s: %s", db_role, exc)
         return ServiceResult(
             status=service_result.STATUS_FAILED,
@@ -937,15 +899,15 @@ def apply_schema(db_role: str) -> ServiceResult:
 
 
 def apply_prod_schema() -> ServiceResult:
-    """Create the production schema on the ``prod`` database."""
+    """Create the production schema on the prod database."""
     return apply_schema(DB_ROLE_PROD)
 
 
 def apply_debug_schema() -> ServiceResult:
-    """Create the production schema on the ``debug`` database."""
+    """Create the production schema on the debug database."""
     return apply_schema(DB_ROLE_DEBUG)
 
 
 def apply_simulation_schema() -> ServiceResult:
-    """Create the simulation schema on the ``simulation`` database."""
+    """Create the simulation schema on the simulation database."""
     return apply_schema(DB_ROLE_SIMULATION)

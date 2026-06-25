@@ -1,17 +1,13 @@
-"""Validation + deterministic hashing helpers for the ConfigService.
+"""Validation + deterministic hashing helpers for ConfigService (setup mode).
 
-This module is dependency-light on purpose: it imports no DuckDB, no provider,
-and no Streamlit. It exposes pure functions that the ConfigService (and tests)
-can call without any I/O.
+Setup-mode migration (AD-22.19–22.24):
+- validate_setup_type() replaces validate_strategy_name()
+- ALLOWED_SETUP_TYPES: exactly 4 values (breakout/pullback/trend_continuation/consolidation_base)
+- validate_risk_label_config_id() for the single risk-label config
+- ALLOWED_CONFIG_DB_ROLES: prod/debug/simulation (unchanged)
+- No strategy/aggressive/normal/conservative references as active identifiers
 
-Two responsibilities:
-
-1. **Validation** of the architecture-bound enum values that must never become
-   DB-editable: ``db_role`` and ``config_type`` (M21 Config Management Addendum
-   §9). Strategy names are validated against the addendum's required set.
-2. **Deterministic hashing** of a config payload so the same logical config
-   always produces the same ``config_hash`` regardless of key insertion order
-   (canonical JSON: sorted keys, no insignificant whitespace).
+Pure functions, no I/O.
 """
 
 from __future__ import annotations
@@ -21,22 +17,21 @@ import json
 from typing import Any, Final
 
 from app.database import duckdb_manager
+from app.config import constants
 
-# db_roles that hold config tables in V1.
 ALLOWED_CONFIG_DB_ROLES: Final[tuple[str, ...]] = (
     duckdb_manager.DB_ROLE_PROD,
     duckdb_manager.DB_ROLE_DEBUG,
     duckdb_manager.DB_ROLE_SIMULATION,
 )
 
-# Required strategy names (addendum §3.1 / §5.1).
-ALLOWED_STRATEGY_NAMES: Final[tuple[str, ...]] = (
-    "normal",
-    "aggressive",
-    "conservative",
-)
+# Active setup types — the four-value selection unit (AD-22.20)
+ALLOWED_SETUP_TYPES: Final[tuple[str, ...]] = constants.ALLOWED_SETUP_TYPES
 
-# Required runtime config types (addendum §3.2 / §5.2).
+# Risk label config has a single well-known seed id
+RISK_LABEL_CONFIG_SEED_ID: Final[str] = "risk_label_config_v1"
+
+# Runtime config types (retained for pipeline/provider/debug/sim/dashboard/ai_review/export)
 ALLOWED_CONFIG_TYPES: Final[tuple[str, ...]] = (
     "pipeline",
     "provider",
@@ -54,7 +49,7 @@ class ConfigValidationError(ValueError):
 
 
 def validate_db_role(db_role: Any) -> str:
-    """Return ``db_role`` if it is a config-bearing role, else raise."""
+    """Return db_role if it is a config-bearing role, else raise."""
     if db_role not in ALLOWED_CONFIG_DB_ROLES:
         raise ConfigValidationError(
             f"Unsupported config db_role {db_role!r}; "
@@ -63,8 +58,18 @@ def validate_db_role(db_role: Any) -> str:
     return db_role
 
 
+def validate_setup_type(setup_type: Any) -> str:
+    """Return setup_type if it is one of the four active types, else raise."""
+    if setup_type not in ALLOWED_SETUP_TYPES:
+        raise ConfigValidationError(
+            f"Unknown setup_type {setup_type!r}; "
+            f"valid: {list(ALLOWED_SETUP_TYPES)}"
+        )
+    return setup_type
+
+
 def validate_config_type(config_type: Any) -> str:
-    """Return ``config_type`` if it is an approved runtime type, else raise."""
+    """Return config_type if it is an approved runtime type, else raise."""
     if config_type not in ALLOWED_CONFIG_TYPES:
         raise ConfigValidationError(
             f"Unknown config_type {config_type!r}; "
@@ -73,18 +78,8 @@ def validate_config_type(config_type: Any) -> str:
     return config_type
 
 
-def validate_strategy_name(strategy_name: Any) -> str:
-    """Return ``strategy_name`` if it is an approved strategy, else raise."""
-    if strategy_name not in ALLOWED_STRATEGY_NAMES:
-        raise ConfigValidationError(
-            f"Unknown strategy_name {strategy_name!r}; "
-            f"valid: {list(ALLOWED_STRATEGY_NAMES)}"
-        )
-    return strategy_name
-
-
 def validate_config_payload(config_json: Any) -> dict[str, Any]:
-    """Return ``config_json`` if it is a non-empty JSON-serializable dict."""
+    """Return config_json if it is a non-empty JSON-serializable dict."""
     if not isinstance(config_json, dict) or not config_json:
         raise ConfigValidationError("config_json must be a non-empty dict")
     try:
@@ -97,11 +92,7 @@ def validate_config_payload(config_json: Any) -> dict[str, Any]:
 
 
 def canonical_json(config_json: dict[str, Any]) -> str:
-    """Return canonical JSON text for a config payload.
-
-    Keys are sorted recursively and separators are tight, so two dicts that are
-    logically equal but differ only in key order serialize identically.
-    """
+    """Return canonical JSON text (sorted keys, tight separators)."""
     return json.dumps(
         config_json,
         sort_keys=True,
@@ -112,19 +103,10 @@ def canonical_json(config_json: dict[str, Any]) -> str:
 
 
 def deterministic_hash(config_json: dict[str, Any]) -> str:
-    """Return a stable SHA-256 hex digest of the canonical config JSON.
-
-    Same logical config -> same hash; any change to the payload -> different
-    hash (M21 Config Management Addendum §6).
-    """
+    """Return a stable SHA-256 hex digest of the canonical config JSON."""
     return hashlib.sha256(canonical_json(config_json).encode("utf-8")).hexdigest()
 
 
 def snapshot_hash(configs: dict[str, dict[str, Any]]) -> str:
-    """Return a deterministic hash over a *set* of resolved configs.
-
-    Used for ``pipeline_runs.config_snapshot_hash``: the mapping of
-    ``{strategy_name: config_json}`` (or any config bundle) is canonicalized as
-    a whole, so the snapshot hash is order-independent and reproducible.
-    """
+    """Return a deterministic hash over a set of resolved configs."""
     return hashlib.sha256(canonical_json(configs).encode("utf-8")).hexdigest()

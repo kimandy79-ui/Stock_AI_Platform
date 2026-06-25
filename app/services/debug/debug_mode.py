@@ -1,4 +1,4 @@
-"""Module 22 — Debug Mode.
+"""Module 22 — Debug Mode (setup-mode).
 
 Fast, local debug/testing mode for *partial*, *sampled* pipeline runs. Module 22
 is a thin **control plane** on top of the frozen Module 20 pipeline orchestrator;
@@ -9,20 +9,21 @@ Guarantees
 ----------
 * **Write isolation.** ``db_role="debug"`` / ``run_type="debug"`` always forwarded;
   ``prod`` and ``simulation`` roles rejected before any orchestrator is constructed.
+* **Setup-mode config loading.** Active setup configs are loaded from
+  ``debug.duckdb`` via ``ConfigService.get_all_active_setup_configs("debug")``.
+  The caller selects which of the four canonical setup types
+  (``breakout``, ``pullback``, ``trend_continuation``, ``consolidation_base``)
+  to activate for this debug run.
 * **Real ticker scoping for partial runs.**
 
   * **Feature start** (``indicator_validation``):
     :class:`_ScopedFeatureEngine` calls
-    ``FeatureEngine.calculate(tickers=selected_tickers, ...)`` — ``daily_prices``
-    is only read for sampled tickers.  ``FeatureEngine.calculate`` already accepts
-    a ``tickers`` keyword so Module 11 is not modified.
+    ``FeatureEngine.calculate(tickers=selected_tickers, ...)``.
 
   * **Step3 start** (``config_tuning_test``):
-    :class:`_ScopedStep3ScreeningProxy` wraps a *dynamically-created subclass*
-    of ``Step3ScreeningEngine`` that overrides the private ``_read()`` method to
-    apply a polars ticker filter before the parent's ``screen()`` evaluates and
-    writes candidates.  The **public** ``screen()`` signature of
-    ``Step3ScreeningEngine`` is **completely unchanged** — Module 13 is frozen.
+    :class:`_ScopedStep3UniversalProxy` wraps the real
+    ``Step3UniversalEligibilityEngine`` so that only sampled tickers are
+    evaluated.
 
 * **Rerunnability.** ``force_rerun=True`` forwarded by default.
 * **Bounded scope.** ``sample_count`` / unique watchlist size hard-capped at
@@ -31,12 +32,12 @@ Guarantees
 
 Lazy imports
 ------------
-Heavy dependencies (orchestrator, YahooProvider, FeatureEngine,
-Step3ScreeningEngine, polars) are imported only inside factory callables, never
-at module import time.  Tests inject lightweight fakes so no ``duckdb`` /
-``polars`` import occurs offline.
+Heavy dependencies (orchestrator, YahooProvider, FeatureEngine, polars) are
+imported only inside factory callables, never at module import time.  Tests
+inject lightweight fakes so no ``duckdb`` / ``polars`` import occurs offline.
 
-Contract source of truth: ``M22_DEBUG_MODE_SPEC.md``.
+Contract source of truth: ``M22_DEBUG_MODE_SPEC.md``, ``02b_ARCHITECTURE_DECISIONS.md``
+§22.19–22.24.
 """
 
 from __future__ import annotations
@@ -57,42 +58,50 @@ FORBIDDEN_DB_ROLES: Final[tuple[str, ...]] = ("prod", "simulation")
 DEFAULT_DEBUG_SAMPLE: Final[int] = 20
 MAX_DEBUG_SAMPLE: Final[int] = 500
 
+# Canonical active setup types (AD-22.20).
+CANONICAL_SETUP_TYPES: Final[tuple[str, ...]] = (
+    "breakout",
+    "pullback",
+    "trend_continuation",
+    "consolidation_base",
+)
+
 # Local copy of orchestrator step names (avoids importing orchestrator → duckdb).
 STEP_NAMES: Final[tuple[str, ...]] = (
-    "benchmark_etf_ingestion",   # 0
-    "universe_ingestion",        # 1
-    "price_ingestion",           # 2
-    "validation",                # 3
-    "mutation_detection",        # 4
-    "feature_calculation",       # 5
-    "step3_screening",           # 6
-    "step4_analysis",            # 7
-    "step5_proposals",           # 8
-    "outcome_queue_creation",    # 9
-    "outcome_processing",        # 10
-    "dashboard_materialization", # 11  internal, not injectable
-    "backup",                    # 12  internal, not injectable
+    "benchmark_etf_ingestion",       # 0
+    "universe_ingestion",            # 1
+    "price_ingestion",               # 2
+    "validation",                    # 3
+    "mutation_detection",            # 4
+    "feature_calculation",           # 5
+    "step3_universal_eligibility",   # 6  — M13 setup-mode
+    "step4_setup_validation",        # 7  — M14 setup-mode
+    "step5_proposals",               # 8  — M15 setup-mode
+    "outcome_queue_creation",        # 9
+    "outcome_processing",            # 10
+    "dashboard_materialization",     # 11  internal, not injectable
+    "backup",                        # 12  internal, not injectable
 )
 
 _UNIVERSE_STEP_IDX: Final[int] = STEP_NAMES.index("universe_ingestion")
 
 # Injectable step → PipelineOrchestrator.__init__ kwarg.
 _STEP_ENGINE_KWARG: Final[Mapping[str, str]] = {
-    "benchmark_etf_ingestion": "benchmark_loader",
-    "universe_ingestion":      "universe_engine",
-    "price_ingestion":         "ingestion_engine",
-    "validation":              "validation_engine",
-    "mutation_detection":      "mutation_engine",
-    "feature_calculation":     "feature_engine",
-    "step3_screening":         "screening_engine",
-    "step4_analysis":          "analysis_engine",
-    "step5_proposals":         "proposal_engine",
-    "outcome_queue_creation":  "outcome_creator",
-    "outcome_processing":      "outcome_processor",
+    "benchmark_etf_ingestion":     "benchmark_loader",
+    "universe_ingestion":          "universe_engine",
+    "price_ingestion":             "ingestion_engine",
+    "validation":                  "validation_engine",
+    "mutation_detection":          "mutation_engine",
+    "feature_calculation":         "feature_engine",
+    "step3_universal_eligibility": "eligibility_engine",   # M13 setup-mode
+    "step4_setup_validation":      "setup_validation_engine",  # M14 setup-mode
+    "step5_proposals":             "proposal_engine",
+    "outcome_queue_creation":      "outcome_creator",
+    "outcome_processing":          "outcome_processor",
 }
 
 _STEP_FEATURES:  Final[str] = "feature_calculation"
-_STEP_SCREEN:    Final[str] = "step3_screening"
+_STEP_SCREEN:    Final[str] = "step3_universal_eligibility"
 _STEP_PRICE:     Final[str] = "price_ingestion"
 _STEP_PROPOSALS: Final[str] = "step5_proposals"
 _STEP_FIRST:     Final[str] = STEP_NAMES[0]
@@ -100,15 +109,9 @@ _STEP_LAST:      Final[str] = STEP_NAMES[-1]
 
 
 # --------------------------------------------------------------------------- #
-# Scope-detection helpers (used by plan, controller, and tests).
+# Scope-detection helpers.
 # --------------------------------------------------------------------------- #
 def _needs_feature_scope(plan: "DebugRunPlan") -> bool:
-    """``True`` when feature_calculation is in range but price_ingestion was
-    skipped (bridge no-op).
-
-    Without scoping, ``FeatureEngine.calculate(tickers=None)`` reads ALL tickers
-    from ``daily_prices``.
-    """
     return (
         not plan._is_noop(_STEP_FEATURES)
         and plan._is_noop(_STEP_PRICE)
@@ -116,12 +119,6 @@ def _needs_feature_scope(plan: "DebugRunPlan") -> bool:
 
 
 def _needs_step3_scope(plan: "DebugRunPlan") -> bool:
-    """``True`` when step3_screening is in range but feature_calculation was
-    skipped (bridge no-op).
-
-    Without scoping, ``Step3ScreeningEngine.screen()`` reads ALL rows from
-    ``daily_features_current``.
-    """
     return (
         not plan._is_noop(_STEP_SCREEN)
         and plan._is_noop(_STEP_FEATURES)
@@ -140,7 +137,7 @@ class DebugPreset:
     trading_days: int
     start_step: str
     end_step: str
-    strategy_names: tuple[str, ...]
+    setup_types: tuple[str, ...]   # canonical setup types to activate
     description: str
 
 
@@ -151,7 +148,7 @@ DEBUG_PRESETS: Final[Mapping[str, DebugPreset]] = {
         trading_days=5,
         start_step=_STEP_FIRST,
         end_step=_STEP_LAST,
-        strategy_names=("normal",),
+        setup_types=("breakout", "pullback", "trend_continuation", "consolidation_base"),
         description="20 tickers, 5 trading days, full pipeline.",
     ),
     "indicator_validation": DebugPreset(
@@ -160,7 +157,7 @@ DEBUG_PRESETS: Final[Mapping[str, DebugPreset]] = {
         trading_days=90,
         start_step=_STEP_FEATURES,
         end_step=_STEP_FEATURES,
-        strategy_names=("normal",),
+        setup_types=("breakout", "pullback", "trend_continuation", "consolidation_base"),
         description="10 tickers, 90 trading days, indicators (Step2) only.",
     ),
     "pipeline_sanity": DebugPreset(
@@ -169,7 +166,7 @@ DEBUG_PRESETS: Final[Mapping[str, DebugPreset]] = {
         trading_days=30,
         start_step=_STEP_FIRST,
         end_step=_STEP_PROPOSALS,
-        strategy_names=("normal",),
+        setup_types=("breakout", "pullback", "trend_continuation", "consolidation_base"),
         description="100 tickers, 30 trading days, Step1-Step5.",
     ),
     "config_tuning_test": DebugPreset(
@@ -178,7 +175,7 @@ DEBUG_PRESETS: Final[Mapping[str, DebugPreset]] = {
         trading_days=126,
         start_step=_STEP_SCREEN,
         end_step=_STEP_PROPOSALS,
-        strategy_names=("normal", "aggressive", "conservative"),
+        setup_types=("breakout", "pullback", "trend_continuation", "consolidation_base"),
         description="500 tickers, ~6 months, Step3-Step5.",
     ),
 }
@@ -193,13 +190,18 @@ class DebugRunPlan:
 
     ``db_role`` / ``run_type`` fixed to ``"debug"``.  ``force_rerun`` defaults
     to ``True`` so the same ``run_date`` can be debugged repeatedly.
+
+    ``setup_types`` selects which canonical setup configs to activate for this
+    run (subset of ``CANONICAL_SETUP_TYPES``).  The orchestrator loads all active
+    setup configs from ``debug.duckdb``; the debug metadata records which types
+    were requested by the caller.
     """
 
     run_date: date
     sample_count: int
     start_step: str
     end_step: str
-    strategy_names: tuple[str, ...]
+    setup_types: tuple[str, ...]     # canonical setup types requested
     watchlist: tuple[str, ...] | None = None
     preset_name: str | None = None
     db_role: str = DB_ROLE_DEBUG
@@ -217,9 +219,6 @@ class DebugRunPlan:
 
     @property
     def effective_start_step(self) -> str:
-        """When ``start_step > universe_ingestion``, lower to ``universe_ingestion``
-        so the debug universe snapshot is updated to the sampled set before
-        downstream steps run.  Bridge steps fill the gap with no-ops."""
         if self.start_index > _UNIVERSE_STEP_IDX:
             return STEP_NAMES[_UNIVERSE_STEP_IDX]
         return self.start_step
@@ -234,7 +233,6 @@ class DebugRunPlan:
         return None if eff_idx == 0 else self.effective_start_step
 
     def _is_noop(self, step: str) -> bool:
-        """``True`` when ``step`` receives a ``_NoOpStepEngine``."""
         s_idx = STEP_NAMES.index(step)
         if s_idx > self.end_index:
             return True
@@ -262,12 +260,7 @@ class DebugRunPlan:
 # SamplingProvider.
 # --------------------------------------------------------------------------- #
 class SamplingProvider:
-    """Provider decorator that limits ``list_symbols`` to the sampled set.
-
-    Handles plain strings, dicts with a ``"symbol"``/``"ticker"`` key, and
-    objects with a ``.ticker`` attribute (``TickerInfo``).  All other provider
-    methods delegate unchanged.
-    """
+    """Provider decorator that limits ``list_symbols`` to the sampled set."""
 
     def __init__(
         self,
@@ -358,12 +351,7 @@ class _NoOpStepEngine:
 
 
 class _ScopedFeatureEngine:
-    """Wraps a real FeatureEngine and always supplies ``selected_tickers`` to
-    ``calculate()``.
-
-    ``FeatureEngine.calculate`` already accepts a ``tickers`` keyword; Module 11
-    is not modified.  ``selected_tickers`` is exposed for test assertion.
-    """
+    """Wraps a real FeatureEngine and always supplies ``selected_tickers``."""
 
     def __init__(self, real_engine: Any, selected_tickers: list[str]) -> None:
         self._real = real_engine
@@ -380,44 +368,37 @@ class _ScopedFeatureEngine:
         return self._real.calculate(
             start_date=start_date,
             end_date=end_date,
-            tickers=self.selected_tickers,  # always override with scoped list
+            tickers=self.selected_tickers,
             db_role=db_role,
             run_id=run_id,
         )
 
 
-class _ScopedStep3ScreeningProxy:
-    """Proxy for Step3 scoping that keeps the public ``screen()`` API frozen.
+class _ScopedStep3UniversalProxy:
+    """Proxy for Step3 scoping.
 
-    The ``screen()`` method delegates to ``self._real.screen()`` with the
-    **identical signature** the orchestrator uses — no extra arguments.  Ticker
-    filtering is not done here; it is applied inside ``self._real`` at the
-    private ``_read()`` level (see :func:`_make_filtered_step3_engine`).
-
-    In production, ``self._real`` is an instance of a dynamic subclass created
-    by the default factory (``_resolve_scoped_step3_factory``).  In offline
-    tests, the injected fake factory returns any object with ``selected_tickers``
-    and ``screen()``.  ``selected_tickers`` is exposed for test assertion.
+    Delegates to the real ``Step3UniversalEligibilityEngine`` with the standard
+    setup-mode ``run()`` API signature.  Ticker filtering is applied inside the
+    wrapped engine at the data-read level (``_make_filtered_step3_engine``).
+    ``selected_tickers`` is exposed for test assertion.
     """
 
     def __init__(self, real_engine: Any, selected_tickers: list[str]) -> None:
         self._real = real_engine
         self.selected_tickers: list[str] = list(selected_tickers)
 
-    def screen(
+    def run(
         self,
         signal_date: date,
-        strategy_config: dict,
-        strategy_config_id: str,
+        setup_config_id: str,
+        setup_config: dict,
         db_role: str,
         run_id: str | None = None,
     ) -> ServiceResult:
-        # Call the real engine with the standard Step3 signature — no tickers kwarg.
-        # Filtering is done inside self._real._read() via the dynamic subclass.
-        return self._real.screen(
+        return self._real.run(
             signal_date=signal_date,
-            strategy_config=strategy_config,
-            strategy_config_id=strategy_config_id,
+            setup_config_id=setup_config_id,
+            setup_config=setup_config,
             db_role=db_role,
             run_id=run_id,
         )
@@ -430,9 +411,12 @@ class DebugModeController:
     """Drive fast, sampled, partial pipeline runs against ``debug.duckdb`` only.
 
     All dependencies are injectable.  Real defaults (orchestrator, YahooProvider,
-    FeatureEngine, Step3ScreeningEngine, polars) are imported only inside lazy
-    factory callables — never at module import time — so offline tests that inject
-    fakes never trigger those imports.
+    FeatureEngine, polars) are imported only inside lazy factory callables.
+
+    ``setup_configs`` (optional injection): ``{setup_type: config_dict}`` mapping.
+    When ``None`` (default), active configs are loaded from ``debug.duckdb`` via
+    ``ConfigService.get_all_active_setup_configs("debug")``.  The orchestrator
+    itself always self-loads from the DB regardless.
     """
 
     def __init__(
@@ -440,7 +424,7 @@ class DebugModeController:
         db_manager: Any | None = None,
         provider: Any | None = None,
         orchestrator_factory: Callable[..., Any] | None = None,
-        strategy_configs: Mapping[str, dict] | None = None,
+        setup_configs: Mapping[str, dict] | None = None,
         scoped_feature_engine_factory: Callable[..., Any] | None = None,
         scoped_screening_engine_factory: Callable[..., Any] | None = None,
         config_service: Any | None = None,
@@ -448,7 +432,7 @@ class DebugModeController:
         self._db_manager = db_manager
         self._provider = provider
         self._orchestrator_factory = orchestrator_factory
-        self._strategy_configs = strategy_configs
+        self._setup_configs = setup_configs        # {setup_type: config_dict} or None
         self._scoped_feat_factory = scoped_feature_engine_factory
         self._scoped_step3_factory = scoped_screening_engine_factory
         self._config_service = config_service
@@ -463,7 +447,7 @@ class DebugModeController:
         *,
         sample_count: int | None = None,
         watchlist: Sequence[str] | None = None,
-        strategy_names: Sequence[str] | None = None,
+        setup_types: Sequence[str] | None = None,
         force_rerun: bool = True,
         run_id: str | None = None,
     ) -> ServiceResult:
@@ -477,7 +461,7 @@ class DebugModeController:
             )
         resolved_watchlist: tuple[str, ...] | None = None
         if watchlist is not None:
-            resolved_watchlist = tuple(dict.fromkeys(watchlist))  # ordered dedup
+            resolved_watchlist = tuple(dict.fromkeys(watchlist))
         plan = DebugRunPlan(
             run_date=run_date,
             sample_count=(
@@ -485,10 +469,10 @@ class DebugModeController:
             ),
             start_step=preset.start_step,
             end_step=preset.end_step,
-            strategy_names=(
-                tuple(strategy_names)
-                if strategy_names is not None
-                else preset.strategy_names
+            setup_types=(
+                tuple(setup_types)
+                if setup_types is not None
+                else preset.setup_types
             ),
             watchlist=resolved_watchlist,
             preset_name=preset.name,
@@ -506,10 +490,12 @@ class DebugModeController:
             log.error("debug-mode guard failed: %s", guard_error)
             return self._failed(run_id, guard_error, plan=plan)
 
-        configs = self._resolve_strategy_configs(plan.strategy_names)
-        if isinstance(configs, str):
-            log.error("debug-mode config resolution failed: %s", configs)
-            return self._failed(run_id, configs, plan=plan)
+        # Verify requested setup types exist as active configs in debug DB.
+        # This is informational — the orchestrator self-loads from DB anyway.
+        config_check = self._resolve_setup_configs(plan.setup_types)
+        if isinstance(config_check, str):
+            log.error("debug-mode setup config check failed: %s", config_check)
+            return self._failed(run_id, config_check, plan=plan)
 
         base_provider = self._resolve_base_provider()
         sampling_provider = SamplingProvider(
@@ -518,10 +504,6 @@ class DebugModeController:
             watchlist=plan.watchlist,
         )
 
-        # Resolve selected tickers before orchestrator construction when a partial
-        # run bypasses price ingestion (feature scope) or feature calculation (Step3
-        # scope).  The provider is called once here; the orchestrator will call it
-        # again during universe_ingestion — acceptable for a debug tool.
         selected_tickers: list[str] | None = None
         if _needs_feature_scope(plan) or _needs_step3_scope(plan):
             t_result = sampling_provider.list_symbols()
@@ -556,23 +538,24 @@ class DebugModeController:
 
         log.info(
             "debug run start preset=%s sample=%s steps=%s..%s "
-            "(eff=%s) strategies=%s force_rerun=%s scoped=%s",
+            "(eff=%s) setup_types=%s force_rerun=%s scoped=%s",
             plan.preset_name,
             "watchlist" if plan.watchlist else plan.sample_count,
             plan.start_step,
             plan.end_step,
             plan.effective_start_step,
-            ",".join(plan.strategy_names),
+            ",".join(plan.setup_types),
             plan.force_rerun,
             len(selected_tickers) if selected_tickers is not None else "n/a",
         )
 
+        # The orchestrator.run() has no setup_configs param — it self-loads
+        # from debug.duckdb via ConfigService.get_all_active_setup_configs().
         result = orchestrator.run(
             run_date=plan.run_date,
             run_type=RUN_TYPE_DEBUG,
             db_role=DB_ROLE_DEBUG,
             resume_from=plan.resume_from,
-            strategy_configs=configs,
             force_rerun=plan.force_rerun,
             run_id=run_id,
         )
@@ -598,8 +581,14 @@ class DebugModeController:
             return f"invalid end_step {plan.end_step!r}"
         if plan.start_index > plan.end_index:
             return f"start_step {plan.start_step!r} is after end_step {plan.end_step!r}"
-        if not plan.strategy_names:
-            return "strategy_names must be non-empty"
+        if not plan.setup_types:
+            return "setup_types must be non-empty"
+        invalid = [s for s in plan.setup_types if s not in CANONICAL_SETUP_TYPES]
+        if invalid:
+            return (
+                f"invalid setup_types {invalid}; "
+                f"must be a subset of {list(CANONICAL_SETUP_TYPES)}"
+            )
         if plan.watchlist is not None:
             unique_count = len(set(plan.watchlist))
             if unique_count > MAX_DEBUG_SAMPLE:
@@ -629,18 +618,9 @@ class DebugModeController:
         scoped_feat_factory: Callable[..., Any],
         scoped_step3_factory: Callable[..., Any],
     ) -> dict[str, Any]:
-        """Build the orchestrator engine kwargs dict.
-
-        Steps fall into four categories:
-
-        * **No-op** (bridge or after end): :class:`_NoOpStepEngine`.
-        * **Scoped feature**: :class:`_ScopedFeatureEngine` when needed.
-        * **Scoped Step3**: :class:`_ScopedStep3ScreeningProxy` when needed.
-        * **Real** (all other in-range steps): ``None`` — the orchestrator builds
-          the real engine via its own lazy imports.
-        """
-        do_feat_scope  = _needs_feature_scope(plan)  and selected_tickers is not None
-        do_step3_scope = _needs_step3_scope(plan)    and selected_tickers is not None
+        """Build the orchestrator engine kwargs dict."""
+        do_feat_scope  = _needs_feature_scope(plan) and selected_tickers is not None
+        do_step3_scope = _needs_step3_scope(plan)   and selected_tickers is not None
 
         kwargs: dict[str, Any] = {}
         for step, kwarg in _STEP_ENGINE_KWARG.items():
@@ -655,76 +635,88 @@ class DebugModeController:
         return kwargs
 
     # ------------------------------------------------------------------ #
-    # Lazy dependency resolution.
+    # Setup config resolution.
     # ------------------------------------------------------------------ #
-    def _resolve_strategy_configs(
-        self, names: tuple[str, ...]
+    def _resolve_setup_configs(
+        self, setup_types: tuple[str, ...]
     ) -> dict[str, dict] | str:
-        source = self._strategy_configs
-        if source is None:
-            # Runtime source of truth is the DB (debug role), not hardcoded
-            # DEFAULT_STRATEGY_CONFIGS (M21 Config Management Addendum §1/§7).
-            # Returns configs keyed by real DB config_id so that debug outputs
-            # store the same strategy_config_id written by the prod pipeline.
-            loaded = self._load_active_debug_configs()
-            if isinstance(loaded, str):
-                return loaded
-            # loaded = {config_id: (strategy_name, config_json)}
-            configs_id_map, config_ids_by_strategy = loaded
+        """Return ``{setup_type: config_dict}`` for the requested setup types.
+
+        Uses the injected ``setup_configs`` mapping when provided (tests /
+        manual overrides); otherwise loads all active configs from
+        ``debug.duckdb`` via ``ConfigService.get_all_active_setup_configs``.
+        The orchestrator always self-loads from the DB regardless.
+        """
+        source = self._setup_configs
+        if source is not None:
+            # Explicit override (tests / manual).
             selected: dict[str, dict] = {}
-            for name in names:
-                if name not in config_ids_by_strategy:
+            for st in setup_types:
+                if st not in source:
                     return (
-                        f"unknown strategy config {name!r}; "
-                        f"valid: {sorted(config_ids_by_strategy)}"
+                        f"unknown setup_type {st!r}; "
+                        f"valid: {sorted(source)}"
                     )
-                real_id = config_ids_by_strategy[name]
-                selected[real_id] = configs_id_map[real_id]
+                selected[st] = source[st]
             return selected
-        # Explicit override: caller controls the keys (tests/manual).
+
+        loaded = self._load_active_debug_setup_configs()
+        if isinstance(loaded, str):
+            return loaded
+        # loaded = {setup_type: config_dict}
+        configs_by_type = loaded
         selected = {}
-        for name in names:
-            if name not in source:
-                return f"unknown strategy config {name!r}; valid: {sorted(source)}"
-            selected[name] = source[name]
+        for st in setup_types:
+            if st not in configs_by_type:
+                return (
+                    f"no active debug setup config for setup_type={st!r}; "
+                    f"available: {sorted(configs_by_type)}. "
+                    f"Ensure debug.duckdb is seeded with setup_breakout_v1 / "
+                    f"setup_pullback_v1 / setup_trend_continuation_v1 / "
+                    f"setup_consolidation_base_v1."
+                )
+            selected[st] = configs_by_type[st]
         return selected
 
-    def _load_active_debug_configs(
+    def _load_active_debug_setup_configs(
         self,
-    ) -> tuple[dict[str, dict], dict[str, str]] | str:
-        """Load active debug strategy configs from the DB; seed if missing.
+    ) -> dict[str, dict] | str:
+        """Load active setup configs from debug.duckdb; seed if missing.
 
-        Returns ``(configs_by_id, config_ids_by_strategy)`` or an error string.
-        ``configs_by_id`` is keyed by the real DB ``config_id``.
-        ``config_ids_by_strategy`` maps strategy_name -> config_id for selection.
+        Returns ``{setup_type: config_dict}`` or an error string.
+        Calls ``ConfigService.get_all_active_setup_configs("debug")``.
         """
         service = self._config_service
         if service is None:
             from app.services.config.config_service import ConfigService
-
             service = ConfigService(db_manager=self._db_manager)
-        result = service.get_active_strategy_configs("debug")
-        if not result.is_ok():
-            return "; ".join(result.errors) or "failed to load debug configs"
-        configs_by_id = dict(result.metadata.get("configs_by_id") or {})
-        config_ids_by_strategy = dict(
-            result.metadata.get("config_ids_by_strategy") or {}
-        )
-        if not configs_by_id:
-            seed = service.seed_default_strategy_configs("debug")
-            if not seed.is_ok():
-                return "; ".join(seed.errors) or "failed to seed debug configs"
-            result = service.get_active_strategy_configs("debug")
-            if not result.is_ok():
-                return "; ".join(result.errors) or "failed to reload debug configs"
-            configs_by_id = dict(result.metadata.get("configs_by_id") or {})
-            config_ids_by_strategy = dict(
-                result.metadata.get("config_ids_by_strategy") or {}
-            )
-        if not configs_by_id:
-            return "no active debug strategy configs available after seeding"
-        return configs_by_id, config_ids_by_strategy
 
+        result = service.get_all_active_setup_configs("debug")
+        if not result.is_ok():
+            return "; ".join(result.errors) or "failed to load debug setup configs"
+
+        configs_by_type: dict[str, dict] = dict(
+            result.metadata.get("configs_by_type") or {}
+        )
+
+        if not configs_by_type:
+            # Attempt to seed defaults.
+            seed = service.seed_default_setup_configs("debug")
+            if not seed.is_ok():
+                return "; ".join(seed.errors) or "failed to seed debug setup configs"
+            result = service.get_all_active_setup_configs("debug")
+            if not result.is_ok():
+                return "; ".join(result.errors) or "failed to reload debug setup configs"
+            configs_by_type = dict(result.metadata.get("configs_by_type") or {})
+
+        if not configs_by_type:
+            return "no active setup configs available in debug.duckdb after seeding"
+
+        return configs_by_type
+
+    # ------------------------------------------------------------------ #
+    # Lazy dependency resolution.
+    # ------------------------------------------------------------------ #
     def _resolve_base_provider(self) -> Any:
         if self._provider is not None:
             return self._provider
@@ -753,35 +745,28 @@ class DebugModeController:
 
         def _default(
             db_manager: Any, tickers: list[str]
-        ) -> _ScopedStep3ScreeningProxy:
-            """Build a Step3 subclass that overrides the private ``_read()`` to
-            filter ``daily_features_current`` to the sampled tickers before the
-            inherited ``screen()`` evaluates and writes candidates.
-
-            The **public** ``screen()`` signature of ``Step3ScreeningEngine`` is
-            completely unchanged — Module 13 is frozen.  Filtering is applied
-            purely at the internal data-frame level.
-            """
-            from app.services.screening.step3_screening import Step3ScreeningEngine
+        ) -> _ScopedStep3UniversalProxy:
+            """Wrap Step3UniversalEligibilityEngine (M13) to scope to sampled tickers."""
+            from app.services.screening.step3_universal_eligibility import (
+                Step3UniversalEligibilityEngine,
+            )
             import polars as pl
 
             tickers_frozen = frozenset(tickers)
 
-            class _FilteredStep3(Step3ScreeningEngine):
-                """Override ``_read()`` only; everything else is inherited."""
+            class _FilteredStep3(Step3UniversalEligibilityEngine):
+                """Override ``_read_features()`` only; everything else inherited."""
 
                 def __init__(self_inner) -> None:  # noqa: N805
                     super().__init__(db_manager=db_manager)
 
-                def _read(  # noqa: N805
+                def _read_features(  # noqa: N805
                     self_inner, db_role: str, signal_date: date
                 ) -> Any:
-                    frame = super()._read(db_role, signal_date)
-                    return frame.filter(
-                        pl.col("ticker").is_in(tickers_frozen)
-                    )
+                    frame = super()._read_features(db_role, signal_date)
+                    return frame.filter(pl.col("ticker").is_in(tickers_frozen))
 
-            return _ScopedStep3ScreeningProxy(_FilteredStep3(), tickers)
+            return _ScopedStep3UniversalProxy(_FilteredStep3(), tickers)
 
         return _default
 
@@ -802,7 +787,7 @@ class DebugModeController:
             "start_step": plan.start_step,
             "effective_start_step": plan.effective_start_step,
             "end_step": plan.end_step,
-            "strategy_names": list(plan.strategy_names),
+            "setup_types": list(plan.setup_types),
             "trading_days": plan.trading_days,
             "executed_steps": plan.executed_steps(),
             "noop_steps": plan.noop_steps(),

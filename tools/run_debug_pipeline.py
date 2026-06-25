@@ -8,9 +8,7 @@ preset and forwards optional sampling overrides.
 
 Before the controller starts, the runner ensures ``debug.duckdb`` exists with
 the full schema applied (via the Module 03 schema manager, debug role only).
-Without this, a first-ever debug run fails when the orchestrator opens the
-pipeline lock read-only against a non-existent ``debug.duckdb``. The
-initialization is self-sufficient (no separate setup step required) and
+The initialization is self-sufficient (no separate setup step required) and
 idempotent — it is skipped when ``debug.duckdb`` already exists.
 
 Exit code: ``0`` on ``success`` / ``success_with_warnings``, ``1`` otherwise.
@@ -18,6 +16,9 @@ Exit code: ``0`` on ``success`` / ``success_with_warnings``, ``1`` otherwise.
 Usage::
 
     python tools/run_debug_pipeline.py --preset fast_smoke_test --date 2025-06-02
+    python tools/run_debug_pipeline.py --preset pipeline_sanity --sample-count 50
+    python tools/run_debug_pipeline.py --preset config_tuning_test \\
+        --setups breakout pullback
 """
 
 from __future__ import annotations
@@ -46,16 +47,23 @@ _PRESET_CHOICES = (
     "config_tuning_test",
 )
 
+# Canonical setup types (AD-22.20).
+_SETUP_TYPE_CHOICES = (
+    "breakout",
+    "pullback",
+    "trend_continuation",
+    "consolidation_base",
+)
+
 
 def _ensure_debug_db() -> str | None:
     """Apply the debug schema and seed defaults if ``debug.duckdb`` is missing.
 
     Reuses the Module 03 schema manager (no duplicated SQL/DDL) and the
-    ConfigService to seed strategy/runtime/sector-alias defaults. Targets the
-    **debug** role only and never opens ``prod.duckdb``. Idempotent: returns
-    early when the file already exists. Returns an error string on failure, or
-    ``None`` on success. Isolated behind a function so offline tests can
-    monkeypatch it.
+    ConfigService to seed setup config defaults. Targets the **debug** role
+    only and never opens ``prod.duckdb``. Idempotent: returns early when the
+    file already exists. Returns an error string on failure, or ``None`` on
+    success. Isolated behind a function so offline tests can monkeypatch it.
     """
     ensure_repo_root_on_path()
     from app.database import duckdb_manager, schema_manager
@@ -75,9 +83,6 @@ def _ensure_debug_db() -> str | None:
             f"errors={getattr(result, 'errors', [])}"
         )
 
-    # Seed strategy/runtime/sector-alias defaults (M21 Config Management
-    # Addendum §12). ConfigService lazy-imported to keep the module importable
-    # in offline tests.
     from app.services.config.config_service import ConfigService  # lazy
 
     seed = ConfigService().seed_defaults("debug")
@@ -89,19 +94,14 @@ def _ensure_debug_db() -> str | None:
             f"debug config seeding failed: "
             f"errors={getattr(seed, 'errors', [])}"
         )
-    print(f"Initialized debug.duckdb at {debug_path} (configs seeded).")
+    print(f"Initialized debug.duckdb at {debug_path} (setup configs seeded).")
     return None
 
 
 def _build_controller() -> Any:
-    """Construct the real Module 22 controller with default dependencies.
-
-    Isolated so offline tests can monkeypatch it without importing the real
-    orchestrator / engines / DuckDB.
-    """
+    """Construct the real Module 22 controller with default dependencies."""
     ensure_repo_root_on_path()
     from app.services.debug.debug_mode import DebugModeController
-
     return DebugModeController()
 
 
@@ -130,11 +130,16 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         help="Override the preset ticker sample count (1..500).",
     )
     parser.add_argument(
-        "--strategies",
+        "--setups",
         nargs="+",
+        choices=_SETUP_TYPE_CHOICES,
         default=None,
-        metavar="NAME",
-        help="Override strategy names (e.g. --strategies normal aggressive).",
+        metavar="SETUP_TYPE",
+        help=(
+            "Override the active setup types for this run. "
+            f"Choices: {', '.join(_SETUP_TYPE_CHOICES)}. "
+            "Default: all four setup types."
+        ),
     )
     return parser.parse_args(argv)
 
@@ -145,7 +150,7 @@ def main(argv: list[str] | None = None) -> int:
 
     print(
         f"Starting debug pipeline: preset={args.preset} run_date={args.run_date} "
-        f"sample_count={args.sample_count} strategies={args.strategies} db_role=debug"
+        f"sample_count={args.sample_count} setups={args.setups} db_role=debug"
     )
 
     try:
@@ -158,9 +163,9 @@ def main(argv: list[str] | None = None) -> int:
             args.preset,
             args.run_date,
             sample_count=args.sample_count,
-            strategy_names=args.strategies,
+            setup_types=args.setups,
         )
-    except Exception as exc:  # noqa: BLE001 - operator script reports any failure
+    except Exception as exc:  # noqa: BLE001
         print(f"FAILURE: debug pipeline raised an exception: {exc}")
         logger.exception("debug pipeline failed")
         return 1
@@ -177,6 +182,7 @@ def main(argv: list[str] | None = None) -> int:
             f"SUCCESS: debug pipeline finished (status={status}, "
             f"preset={debug_meta.get('preset', args.preset)}, "
             f"db_role={debug_meta.get('db_role', 'debug')}, "
+            f"setup_types={debug_meta.get('setup_types')}, "
             f"executed_steps={debug_meta.get('executed_steps')})."
         )
         if status == "success_with_warnings":

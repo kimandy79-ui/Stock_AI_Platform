@@ -1370,9 +1370,10 @@ def _expected_dates_5() -> list[_dt.date]:
     entirely, so the Saturday (Jan-6) is deliberately included as a "trading
     date" for unit-testing purposes.
 
-    Tests that call ``run_sample_completeness()`` with a date range that
-    includes Saturday must use a real Mon-Fri range (e.g. 2024-01-08..12) so
-    that the weekday-only fallback calendar also covers all 5 dates.
+    Tests that call ``run_sample_completeness()`` with a real date range must
+    use a Mon-Fri range (e.g. 2024-01-08..12) that contains only genuine NYSE
+    trading days, because ``_get_expected_dates()`` now raises RuntimeError if
+    the trading_calendar module is unavailable (weekday fallback is removed).
     """
     return [_d(f"2024-01-0{i}") for i in range(2, 7)]  # Jan 2..6
 
@@ -1904,7 +1905,7 @@ def test_sample_mode_spy_repair_uses_benchmark_loader_not_ingestion(
             ingest_tickers_called.extend(tickers or [])
             return ServiceResult(status=sr.STATUS_SUCCESS, run_id="r", rows_processed=0)
 
-    # Use a real Mon-Fri week so the weekday fallback covers all 5 dates.
+    # Use a real Mon-Fri week (Jan 8–12, 2024); all 5 are NYSE trading days.
     # Jan 8-12, 2024 = Mon-Fri. SPY missing Friday Jan-12.
     week_dates = [_d2(f"2024-01-{i:02d}") for i in range(8, 13)]
     rows: dict = {
@@ -2040,7 +2041,7 @@ def _bug_make_bf(rows: dict, active: list[str]):
     return bf, engs
 
 
-# Use a real Mon-Fri week to avoid weekday-fallback excluding Saturdays.
+# Use a real Mon-Fri week (all NYSE trading days; no holiday in this range).
 _BUG_W = [_d2(f"2024-01-{i:02d}") for i in range(8, 13)]  # Jan 8-12 2024 Mon-Fri
 
 
@@ -2327,3 +2328,374 @@ def test_run_repair_plan_passes_benchmark_symbols_static() -> None:
     assert "REQUIRED_BENCHMARK_SYMBOLS" in fn_body, (
         "run_repair_plan must build benchmark_symbols from REQUIRED_BENCHMARK_SYMBOLS"
     )
+
+
+# --------------------------------------------------------------------------- #
+# Trading-date write guard (required fix)
+# --------------------------------------------------------------------------- #
+
+class _TrackingConn(_FakeConn):
+    """Extends _FakeConn to record DELETE statements and control distinct-date
+    responses for non-trading-row cleanup tests."""
+
+    def __init__(self, *, has_schema=True, active=None, coverage_rows=None,
+                 daily_prices_dates=None):
+        super().__init__(has_schema=has_schema, active=active,
+                         coverage_rows=coverage_rows)
+        self.deletes: list[str] = []
+        self._daily_prices_dates = daily_prices_dates or []
+
+    def execute(self, sql: str, params=None):
+        sl = sql.strip().lower()
+        if sl.startswith("delete"):
+            self.deletes.append(sql)
+            self._last = []
+            return self
+        # Support both SELECT DISTINCT date and SELECT date, COUNT(*) GROUP BY date
+        # patterns used by _delete_non_trading_rows
+        if "from daily_prices" in sl and (
+            "select distinct date" in sl
+            or ("select date" in sl and "count" in sl)
+            or ("group by date" in sl)
+        ):
+            if "count" in sl or "group by" in sl:
+                # Return (date, 1) tuples for the GROUP BY COUNT(*) variant
+                self._last = [(d, 1) for d in self._daily_prices_dates]
+            else:
+                self._last = [(d,) for d in self._daily_prices_dates]
+            return self
+        return super().execute(sql, params)
+
+
+def _make_tracking_backfiller(*, active=None, daily_prices_dates=None,
+                               engines=None, coverage_rows=None):
+    """Like _make_backfiller but uses _TrackingConn so we can assert on DELETEs."""
+    conn = _TrackingConn(
+        has_schema=True,
+        active=active or ["AAPL"],
+        coverage_rows=coverage_rows or [],
+        daily_prices_dates=daily_prices_dates or [],
+    )
+    db = _FakeDb(conn)
+    from app.utils import service_result
+    eng = engines or {}
+    bf = bpf.Backfiller(
+        db_manager=db,
+        provider=_FakeProvider(),
+        benchmark_loader=eng.get("benchmark", _RecordingEngine()),
+        universe_engine=eng.get("universe", _RecordingEngine()),
+        ingestion_engine=eng.get("ingestion", _RecordingEngine()),
+        validation_engine=eng.get("validation", _RecordingEngine()),
+        mutation_engine=eng.get("mutation", _RecordingEngine()),
+        feature_engine=eng.get("features", _RecordingEngine()),
+        regime_engine=eng.get("regime", _RecordingEngine()),
+        service_result_mod=service_result,
+        sleeper=lambda _s: None,
+        jitter_fn=lambda _j: 0.0,
+    )
+    return bf, db, conn
+
+
+# ── Helper: a known NYSE holiday in the test period ──────────────────────────
+# 2026-05-25 = Memorial Day (NYSE closed)
+# 2026-06-19 = Juneteenth (NYSE closed)
+_NON_TRADING = date(2026, 5, 25)   # Memorial Day 2026
+_TRADING_1   = date(2026, 5, 22)   # Friday before Memorial Day
+_TRADING_2   = date(2026, 5, 27)   # Tuesday after Memorial Day
+
+
+def _is_weekend(d: datetime.date) -> bool:
+    return d.weekday() >= 5
+
+
+# ── Tests ──────────────────────────────────────────────────────────────────── #
+
+def test_single_non_trading_date_returns_warnings_no_benchmark_load() -> None:
+    """run() on a single non-trading day must return success_with_warnings and
+    must NOT call benchmark_loader.load()."""
+    bench = _RecordingEngine()
+    bf, _, _ = _make_tracking_backfiller(
+        engines={"benchmark": bench},
+    )
+    # Use a known non-trading date (weekend is simplest and calendar-independent)
+    sunday = date(2026, 6, 21)  # Sunday
+    assert sunday.weekday() == 6
+
+    result = bf.run(start_date=sunday, end_date=sunday)
+
+    assert result.status == bpf.STATUS_SUCCESS_WITH_WARNINGS
+    assert any("no nyse trading dates" in w.lower() for w in result.warnings)
+    assert bench.calls == [], "benchmark_loader.load() must NOT be called for non-trading date"
+
+
+def test_single_non_trading_date_no_stock_ingestion() -> None:
+    """run() on a non-trading day must not call stock ingestion."""
+    ingest = _RecordingEngine()
+    bf, _, _ = _make_tracking_backfiller(
+        active=["AAPL", "MSFT"],
+        engines={"ingestion": ingest},
+    )
+    saturday = date(2026, 6, 20)
+    assert saturday.weekday() == 5
+
+    bf.run(start_date=saturday, end_date=saturday)
+
+    assert ingest.calls == [], "ingestion must NOT be called for non-trading date"
+
+
+def test_single_non_trading_date_no_downstream_modules() -> None:
+    """run() on a non-trading day must not call validation, features, or regime."""
+    val = _RecordingEngine()
+    feat = _RecordingEngine()
+    reg = _RecordingEngine()
+    bf, _, _ = _make_tracking_backfiller(
+        engines={"validation": val, "features": feat, "regime": reg},
+    )
+    saturday = date(2026, 6, 20)
+
+    bf.run(start_date=saturday, end_date=saturday)
+
+    assert val.calls  == [], "validation must not run for non-trading date"
+    assert feat.calls == [], "features must not run for non-trading date"
+    assert reg.calls  == [], "regime must not run for non-trading date"
+
+
+def test_single_non_trading_date_no_db_writes() -> None:
+    """run() on a non-trading day must produce zero DB write connections."""
+    bf, db, _ = _make_tracking_backfiller()
+    saturday = date(2026, 6, 20)
+
+    bf.run(start_date=saturday, end_date=saturday)
+
+    # Only read-only connections are acceptable; no write connections
+    write_conns = [(role, ro) for role, ro in db.connect_calls if not ro]
+    assert write_conns == [], (
+        f"No write DB connections should be made for a non-trading date, got: {write_conns}"
+    )
+
+
+def test_no_resume_on_non_trading_date_no_writes() -> None:
+    """run(resume=False) on a non-trading date must also produce no DB writes."""
+    bench = _RecordingEngine()
+    bf, db, _ = _make_tracking_backfiller(
+        active=["AAPL"],
+        engines={"benchmark": bench},
+    )
+    saturday = date(2026, 6, 20)
+
+    result = bf.run(start_date=saturday, end_date=saturday, resume=False)
+
+    assert result.status == bpf.STATUS_SUCCESS_WITH_WARNINGS
+    assert bench.calls == [], "benchmark must not be called on non-trading date with resume=False"
+    write_conns = [(r, ro) for r, ro in db.connect_calls if not ro]
+    assert write_conns == [], "no write DB connections on non-trading date"
+
+
+def test_full_completeness_non_trading_date_no_writes() -> None:
+    """run_full_completeness() on a non-trading date must return warnings and no writes."""
+    bench = _RecordingEngine()
+    bf, db, _ = _make_tracking_backfiller(
+        active=["AAPL"],
+        engines={"benchmark": bench},
+    )
+    saturday = date(2026, 6, 20)
+
+    result = bf.run_full_completeness(start_date=saturday, end_date=saturday)
+
+    assert result.status == bpf.STATUS_SUCCESS_WITH_WARNINGS
+    assert any("no nyse trading dates" in w.lower() for w in result.warnings)
+    assert bench.calls == [], "benchmark must not be called for non-trading date in full-completeness"
+    write_conns = [(r, ro) for r, ro in db.connect_calls if not ro]
+    assert write_conns == [], "no write DB connections in full-completeness for non-trading date"
+
+
+def test_metadata_includes_skipped_reason_for_non_trading_date() -> None:
+    """Metadata must include skipped_reason='no_trading_dates' for clarity."""
+    bf, _, _ = _make_tracking_backfiller()
+    saturday = date(2026, 6, 20)
+
+    result = bf.run(start_date=saturday, end_date=saturday)
+
+    assert result.metadata.get("skipped_reason") == "no_trading_dates"
+    assert result.metadata.get("trading_dates") == 0
+
+
+def test_delete_non_trading_rows_removes_non_trading_dates() -> None:
+    """_delete_non_trading_rows must issue a DELETE for non-trading dates."""
+    trading   = date(2026, 6, 22)   # Monday
+    non_trade = date(2026, 6, 21)   # Sunday — not in expected_dates
+    bf, db, conn = _make_tracking_backfiller(
+        daily_prices_dates=[trading, non_trade],
+    )
+    expected = [trading]
+
+    deleted = bf._delete_non_trading_rows(
+        start_date=date(2026, 6, 21),
+        end_date=date(2026, 6, 22),
+        expected_dates=expected,
+    )
+
+    assert deleted == 1, f"expected 1 deleted, got {deleted}"
+    assert any("delete" in s.lower() for s in conn.deletes), (
+        "DELETE statement must have been issued"
+    )
+
+
+def test_delete_non_trading_rows_noop_when_all_trading() -> None:
+    """_delete_non_trading_rows must not DELETE when all dates are trading days."""
+    trading1 = date(2026, 6, 22)
+    trading2 = date(2026, 6, 23)
+    bf, _, conn = _make_tracking_backfiller(
+        daily_prices_dates=[trading1, trading2],
+    )
+
+    deleted = bf._delete_non_trading_rows(
+        start_date=trading1,
+        end_date=trading2,
+        expected_dates=[trading1, trading2],
+    )
+
+    assert deleted == 0
+    assert conn.deletes == [], "no DELETE when all dates are trading days"
+
+
+def test_run_daily_pipeline_after_skipped_on_non_trading_end_date() -> None:
+    """--run-daily-pipeline-after must be skipped when end_date is not a trading day.
+    The run itself succeeds (trading dates in range); only the post-pipeline is skipped.
+    Range: Mon Jun 22 – Sat Jun 27 2026 (Monday is a trading day; Saturday is not).
+    """
+    monday   = date(2026, 6, 22)  # trading day — start
+    saturday = date(2026, 6, 27)  # weekend   — end (non-trading)
+
+    daily_called: list = []
+
+    def _fake_daily(d: date) -> object:
+        daily_called.append(d)
+        return _ok()
+
+    bf, _, _ = _make_tracking_backfiller(active=["AAPL"])
+    bf._daily_runner = _fake_daily
+
+    result = bf.run(
+        start_date=monday, end_date=saturday,
+        run_daily_pipeline_after=True,
+        run_validation=False, run_mutation=False,
+        run_features=False, run_regime=False,
+        resume=False,
+    )
+
+    assert daily_called == [], "daily pipeline must not run when end_date is non-trading"
+    assert any("not a nyse trading day" in w.lower() for w in result.warnings), (
+        f"warning must be emitted when --run-daily-pipeline-after is skipped; got: {result.warnings}"
+    )
+
+
+def test_run_daily_pipeline_after_runs_when_end_date_is_trading_day() -> None:
+    """--run-daily-pipeline-after must call daily pipeline when end_date is a trading day."""
+    monday = date(2026, 6, 22)
+
+    daily_called = []
+
+    def _fake_daily(d: datetime.date):
+        daily_called.append(d)
+        return _ok()
+
+    bf, _, _ = _make_tracking_backfiller(active=["AAPL"])
+    bf._daily_runner = _fake_daily
+
+    bf.run(
+        start_date=monday, end_date=monday,
+        run_daily_pipeline_after=True,
+        run_validation=False, run_mutation=False,
+        run_features=False, run_regime=False,
+        resume=False,
+    )
+
+    assert daily_called == [monday], (
+        f"daily pipeline should be called once with {monday}, got: {daily_called}"
+    )
+
+
+# --------------------------------------------------------------------------- #
+# _get_expected_dates: no weekday fallback (required fix)
+# --------------------------------------------------------------------------- #
+
+def test_get_expected_dates_raises_if_trading_calendar_unavailable() -> None:
+    """_get_expected_dates must raise RuntimeError when trading_calendar fails.
+    The weekday-only fallback was removed because it silently treated NYSE
+    holidays (Memorial Day, Juneteenth) as trading days.
+    """
+    import sys
+    bf, _, _ = _make_tracking_backfiller()
+    real_module = sys.modules.get("app.utils.trading_calendar")
+    sys.modules["app.utils.trading_calendar"] = None  # type: ignore[assignment]
+    try:
+        with pytest.raises(RuntimeError, match="trading_calendar unavailable"):
+            bf._get_expected_dates(date(2026, 5, 25), date(2026, 5, 25))
+    finally:
+        if real_module is not None:
+            sys.modules["app.utils.trading_calendar"] = real_module
+        else:
+            sys.modules.pop("app.utils.trading_calendar", None)
+
+
+def test_get_expected_dates_raises_not_returns_weekday_list() -> None:
+    """A broken trading_calendar must raise, not return a weekday list."""
+    import sys
+    bf, _, _ = _make_tracking_backfiller()
+    real_module = sys.modules.get("app.utils.trading_calendar")
+    sys.modules["app.utils.trading_calendar"] = None  # type: ignore[assignment]
+    try:
+        returned = None
+        try:
+            returned = bf._get_expected_dates(date(2026, 5, 25), date(2026, 5, 29))
+        except RuntimeError:
+            pass  # correct behaviour
+        assert returned is None, (
+            "Expected RuntimeError; got a list — weekday fallback must be removed"
+        )
+    finally:
+        if real_module is not None:
+            sys.modules["app.utils.trading_calendar"] = real_module
+        else:
+            sys.modules.pop("app.utils.trading_calendar", None)
+
+
+def test_get_expected_dates_error_message_mentions_fix() -> None:
+    """RuntimeError message must tell the operator to fix trading_calendar.py."""
+    import sys
+    bf, _, _ = _make_tracking_backfiller()
+    real_module = sys.modules.get("app.utils.trading_calendar")
+    sys.modules["app.utils.trading_calendar"] = None  # type: ignore[assignment]
+    try:
+        with pytest.raises(RuntimeError) as exc_info:
+            bf._get_expected_dates(date(2026, 5, 25), date(2026, 5, 25))
+        msg = str(exc_info.value)
+        assert "trading_calendar" in msg
+        assert "fix" in msg.lower()
+    finally:
+        if real_module is not None:
+            sys.modules["app.utils.trading_calendar"] = real_module
+        else:
+            sys.modules.pop("app.utils.trading_calendar", None)
+
+
+def test_run_propagates_calendar_error_as_failed_result() -> None:
+    """If trading_calendar is broken, run() must return STATUS_FAILED with a
+    clear error — not silently skip or treat holidays as trading days."""
+    import sys
+    bf, _, _ = _make_tracking_backfiller(active=["AAPL"])
+    real_module = sys.modules.get("app.utils.trading_calendar")
+    sys.modules["app.utils.trading_calendar"] = None  # type: ignore[assignment]
+    try:
+        result = bf.run(start_date=date(2026, 5, 25), end_date=date(2026, 5, 25))
+        assert result.status == bpf.STATUS_FAILED
+        err = " ".join(result.errors)
+        assert "trading" in err.lower(), (
+            f"Error must reference trading_calendar; got: {err!r}"
+        )
+    finally:
+        if real_module is not None:
+            sys.modules["app.utils.trading_calendar"] = real_module
+        else:
+            sys.modules.pop("app.utils.trading_calendar", None)
