@@ -205,7 +205,7 @@ DEFAULT_RISK_LABEL_CONFIG: Final[dict[str, Any]] = {
     "ranking": {"top_n": 20},
     "diversification": {
         "hard_cap_enabled": True,
-        "sector_max_positions": 3,
+        "sector_max_positions": 4,
         "industry_max_positions": 2,
         "sector_penalty_factor": 0.9,
         "industry_penalty_factor": 0.85,

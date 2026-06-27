@@ -5,17 +5,18 @@ Coordinates one daily pipeline run end-to-end in setup mode.
 Setup-mode step sequence (01d_MODULES_AND_PIPELINE.md §70):
   1. benchmark_etf_ingestion      (critical)
   2. universe_ingestion            (recoverable)
-  3. price_ingestion               (critical)
-  4. validation                    (critical)
-  5. mutation_detection            (recoverable)
-  6. feature_calculation           (critical)
-  7. market_regime_classification  (recoverable)
-  8. step3_universal_eligibility   (critical, ONCE per signal_date — M13)
-  9. step4_setup_validation        (critical, ONCE per signal_date — M14, iterates setup configs internally)
- 10. step5_proposals               (critical, ONCE per signal_date — M15)
- 11. outcome_queue_creation        (critical)
- 12. outcome_processing            (recoverable)
- 13. dashboard_materialization     (recoverable, V1 no-op)
+  3. earnings_calendar_refresh     (recoverable) — skipped if calendar already updated today
+  4. price_ingestion               (critical)
+  5. validation                    (critical)
+  6. mutation_detection            (recoverable)
+  7. feature_calculation           (critical)
+  8. market_regime_classification  (recoverable)
+  9. step3_universal_eligibility   (critical, ONCE per signal_date — M13)
+ 10. step4_setup_validation        (critical, ONCE per signal_date — M14, iterates setup configs internally)
+ 11. step5_proposals               (critical, ONCE per signal_date — M15)
+ 12. outcome_queue_creation        (critical)
+ 13. outcome_processing            (recoverable)
+ 14. dashboard_materialization     (recoverable, V1 no-op)
 
 Hard boundaries:
 - No direct ``duckdb`` import.
@@ -25,6 +26,10 @@ Hard boundaries:
 - No market-data logic.
 - DB writes target only ``pipeline_runs``, ``pipeline_locks``, and
   ``pipeline_run_diagnostics``.  All domain tables are written by the step engines.
+  Exceptions: ``cleanup_calculated_outputs_for_date`` deletes stale rows from
+  ``daily_features``, ``step3_candidates``, ``step4_analysis``, and
+  ``step5_proposals`` before a (re-)run; ``_step_earnings`` upserts into
+  ``earnings_calendar`` when the calendar was not already refreshed today.
 - All step engines and the default provider are instantiated in ``__init__`` only.
 - The public surface always returns a ``ServiceResult``.
 - No legacy strategy-mode paths (aggressive / normal / conservative).
@@ -65,6 +70,7 @@ ALLOWED_RUN_TYPES: Final[tuple[str, ...]] = (
 STEP_NAMES: Final[tuple[str, ...]] = (
     "benchmark_etf_ingestion",
     "universe_ingestion",
+    "earnings_calendar_refresh",
     "price_ingestion",
     "validation",
     "mutation_detection",
@@ -94,6 +100,7 @@ CRITICAL_STEPS: Final[frozenset[str]] = frozenset(
 RECOVERABLE_STEPS: Final[frozenset[str]] = frozenset(
     {
         "universe_ingestion",
+        "earnings_calendar_refresh",
         "mutation_detection",
         "market_regime_classification",
         "outcome_queue_creation",   # M16 legacy API; full setup-mode migration is Phase 7
@@ -182,6 +189,47 @@ _INSERT_DIAG: Final[str] = (
     "(diag_id, run_id, signal_date, db_role, step_name, setup_type, "
     "metric_name, metric_value, reason, metadata_json, created_at) "
     "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CAST(now() AS TIMESTAMP))"
+)
+
+# --------------------------------------------------------------------------- #
+# SQL — date-scoped cleanup of calculated outputs (used by cleanup step).
+# Deletes are safe no-ops when the date has no rows.
+# --------------------------------------------------------------------------- #
+_DELETE_DAILY_FEATURES: Final[str] = (
+    "DELETE FROM daily_features WHERE feature_date = ?"
+)
+_DELETE_STEP3: Final[str] = (
+    "DELETE FROM step3_candidates WHERE signal_date = ?"
+)
+_DELETE_STEP4: Final[str] = (
+    "DELETE FROM step4_analysis WHERE signal_date = ?"
+)
+_DELETE_STEP5: Final[str] = (
+    "DELETE FROM step5_proposals WHERE signal_date = ?"
+)
+
+# --------------------------------------------------------------------------- #
+# SQL — earnings calendar refresh (used only by _step_earnings).
+# _SQL_EARNINGS_CHECK   : 1 = already refreshed today; 0 = needs refresh.
+# _SQL_EARNINGS_TICKERS : active stock tickers eligible for earnings lookup.
+# _SQL_EARNINGS_UPSERT  : insert or update one earnings event.
+# --------------------------------------------------------------------------- #
+_SQL_EARNINGS_CHECK: Final[str] = (
+    "SELECT COUNT(*) FROM earnings_calendar "
+    "WHERE CAST(updated_at AS DATE) = ?"
+)
+_SQL_EARNINGS_TICKERS: Final[str] = (
+    "SELECT ticker FROM ticker_master "
+    "WHERE symbol_type = 'stock' AND active_flag = TRUE "
+    "ORDER BY ticker"
+)
+_SQL_EARNINGS_UPSERT: Final[str] = (
+    "INSERT INTO earnings_calendar "
+    "(ticker, earnings_date, session, source, confidence, updated_at) "
+    "VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP) "
+    "ON CONFLICT (ticker, earnings_date) DO UPDATE SET "
+    "session = EXCLUDED.session, source = EXCLUDED.source, "
+    "confidence = EXCLUDED.confidence, updated_at = EXCLUDED.updated_at"
 )
 
 
@@ -415,37 +463,53 @@ class PipelineOrchestrator:
             resume_index = STEP_NAMES.index(resume_from) if resume_from is not None else 0
             step_timings: dict[str, float] = {}
 
-            # Linear steps 1–7.
-            linear_steps = (
-                ("benchmark_etf_ingestion",       self._step_benchmark),
-                ("universe_ingestion",             self._step_universe),
-                ("price_ingestion",                self._step_price),
-                ("validation",                     self._step_validation),
-                ("mutation_detection",             self._step_mutation),
-                ("feature_calculation",            self._step_features),
-                ("market_regime_classification",   self._step_market_regime),
-            )
-            for name, func in linear_steps:
-                idx = STEP_NAMES.index(name)
-                if idx < resume_index:
-                    log.info("step %s skipped (resume_from=%s)", name, resume_from)
-                    continue
-                _t0 = time.monotonic()
-                outcome = self._safe_step(name, func, log, run_date, db_role, run_id)
-                step_timings[name] = time.monotonic() - _t0
-                if outcome.failed_critical:
-                    failed_step = name
-                    error = outcome.error
-                    status = service_result.STATUS_FAILED
-                    break
-                warnings.extend(outcome.warnings)
-                if not outcome.ok or outcome.warnings:
-                    status = service_result.STATUS_SUCCESS_WITH_WARNINGS
-                db_err = self._record_step(name, steps_completed, db_role, run_id, log)
-                if db_err:
-                    error = db_err
-                    status = service_result.STATUS_FAILED
-                    break
+            # Cleanup stale calculated outputs for this date before recalculating.
+            # Runs in one transaction; scoped to steps that will actually execute.
+            try:
+                self.cleanup_calculated_outputs_for_date(db_role, run_date, resume_from)
+                log.info(
+                    "cleanup_calculated_outputs: cleared signal_date=%s resume_from=%s",
+                    run_date, resume_from,
+                )
+            except Exception as exc:  # noqa: BLE001
+                failed_step = "cleanup_calculated_outputs"
+                error = f"cleanup_calculated_outputs failed: {type(exc).__name__}: {exc}"
+                log.error(error)
+                status = service_result.STATUS_FAILED
+
+            # Linear steps 1–8.
+            if status != service_result.STATUS_FAILED:
+                linear_steps = (
+                    ("benchmark_etf_ingestion",       self._step_benchmark),
+                    ("universe_ingestion",             self._step_universe),
+                    ("earnings_calendar_refresh",      self._step_earnings),
+                    ("price_ingestion",                self._step_price),
+                    ("validation",                     self._step_validation),
+                    ("mutation_detection",             self._step_mutation),
+                    ("feature_calculation",            self._step_features),
+                    ("market_regime_classification",   self._step_market_regime),
+                )
+                for name, func in linear_steps:
+                    idx = STEP_NAMES.index(name)
+                    if idx < resume_index:
+                        log.info("step %s skipped (resume_from=%s)", name, resume_from)
+                        continue
+                    _t0 = time.monotonic()
+                    outcome = self._safe_step(name, func, log, run_date, db_role, run_id)
+                    step_timings[name] = time.monotonic() - _t0
+                    if outcome.failed_critical:
+                        failed_step = name
+                        error = outcome.error
+                        status = service_result.STATUS_FAILED
+                        break
+                    warnings.extend(outcome.warnings)
+                    if not outcome.ok or outcome.warnings:
+                        status = service_result.STATUS_SUCCESS_WITH_WARNINGS
+                    db_err = self._record_step(name, steps_completed, db_role, run_id, log)
+                    if db_err:
+                        error = db_err
+                        status = service_result.STATUS_FAILED
+                        break
 
             # Setup-mode pipeline steps 8–10 (once each per signal_date).
             if status != service_result.STATUS_FAILED:
@@ -643,6 +707,62 @@ class PipelineOrchestrator:
         return (row[0], row[1])
 
     # ------------------------------------------------------------------ #
+    # Calculated-output cleanup.
+    # ------------------------------------------------------------------ #
+    def cleanup_calculated_outputs_for_date(
+        self,
+        db_role: str,
+        signal_date: date,
+        resume_from: str | None = None,
+    ) -> None:
+        """Delete calculated outputs for *signal_date* in one atomic transaction.
+
+        Only tables corresponding to steps that will actually execute are
+        cleaned (respects *resume_from*). Safe on a clean DB — each DELETE
+        is a no-op when the date has no rows.
+
+        Cleaned tables (date-scoped only; raw data is never touched):
+          daily_features     (feature_date = signal_date)
+          step3_candidates   (signal_date = signal_date)
+          step4_analysis     (signal_date = signal_date)
+          step5_proposals    (signal_date = signal_date)
+        """
+        resume_idx = (
+            STEP_NAMES.index(resume_from)
+            if resume_from is not None and resume_from in STEP_NAMES
+            else 0
+        )
+
+        deletes: list[tuple[str, list[Any]]] = []
+        if resume_idx <= STEP_NAMES.index("feature_calculation"):
+            deletes.append((_DELETE_DAILY_FEATURES, [signal_date]))
+        if resume_idx <= STEP_NAMES.index("step3_universal_eligibility"):
+            deletes.append((_DELETE_STEP3, [signal_date]))
+        if resume_idx <= STEP_NAMES.index("step4_setup_validation"):
+            deletes.append((_DELETE_STEP4, [signal_date]))
+        if resume_idx <= STEP_NAMES.index("step5_proposals"):
+            deletes.append((_DELETE_STEP5, [signal_date]))
+
+        if not deletes:
+            return
+
+        connection = self._db.connect(db_role, read_only=False)
+        try:
+            connection.execute("BEGIN TRANSACTION")
+            try:
+                for sql, params in deletes:
+                    connection.execute(sql, params)
+                connection.execute("COMMIT")
+            except Exception:
+                try:
+                    connection.execute("ROLLBACK")
+                except Exception:  # noqa: BLE001
+                    pass
+                raise
+        finally:
+            connection.close()
+
+    # ------------------------------------------------------------------ #
     # DB write helper.
     # ------------------------------------------------------------------ #
     def _write(self, db_role: str, sql: str, params: list[Any]) -> None:
@@ -731,6 +851,121 @@ class PipelineOrchestrator:
             db_role=db_role,
             source=_UNIVERSE_SOURCE,
             run_id=run_id,
+        )
+
+    def _step_earnings(self, run_date: date, db_role: str, run_id: str, log: Any):
+        """Ensure the earnings calendar is refreshed for *run_date*.
+
+        Skips all provider calls if any row was already written today.
+        Otherwise fetches earnings for every active stock ticker via
+        ``provider.get_earnings()`` and batch-upserts results in one write
+        connection. Step is recoverable: failure leaves ``days_to_earnings_bd``
+        NULL (same as the pre-step state).
+        """
+        import gc
+
+        # Check whether the calendar was already refreshed today.
+        conn = self._db.connect(db_role, read_only=True)
+        try:
+            cursor = conn.execute(_SQL_EARNINGS_CHECK, [run_date])
+            row = cursor.fetchone()
+            already_refreshed = (row[0] > 0) if row else False
+        finally:
+            conn.close()
+
+        if already_refreshed:
+            log.info(
+                "earnings_calendar_refresh: calendar already updated today (%s); skipping",
+                run_date,
+            )
+            return ServiceResult(
+                status=service_result.STATUS_SUCCESS_WITH_WARNINGS,
+                run_id=run_id, rows_processed=0,
+                warnings=["earnings_calendar already refreshed today; skipped"],
+            )
+
+        # Load active stock tickers.
+        conn = self._db.connect(db_role, read_only=True)
+        try:
+            cursor = conn.execute(_SQL_EARNINGS_TICKERS)
+            tickers: list[str] = [r[0] for r in cursor.fetchall()]
+        finally:
+            conn.close()
+
+        if not tickers:
+            log.warning("earnings_calendar_refresh: no active stock tickers found")
+            return ServiceResult(
+                status=service_result.STATUS_SUCCESS_WITH_WARNINGS,
+                run_id=run_id, rows_processed=0,
+                warnings=["earnings_calendar_refresh: no active stock tickers"],
+            )
+
+        # Fetch earnings from provider and collect upsert rows.
+        upsert_rows: list[tuple] = []
+        fetch_warnings: list[str] = []
+        for ticker in tickers:
+            try:
+                result = self._provider.get_earnings(ticker)
+            except Exception as exc:  # noqa: BLE001
+                fetch_warnings.append(f"get_earnings({ticker}) raised: {exc}")
+                continue
+            if getattr(result, "status", None) == service_result.STATUS_FAILED:
+                fetch_warnings.append(
+                    f"get_earnings({ticker}) failed: "
+                    f"{(result.errors or ['unknown'])[0]}"
+                )
+                continue
+            events = (result.metadata or {}).get("events") or []
+            for evt in events:
+                upsert_rows.append((
+                    evt.ticker,
+                    evt.earnings_date,
+                    evt.session,
+                    evt.source_provider,
+                    evt.confidence,
+                ))
+
+        if not upsert_rows:
+            msg = f"earnings_calendar_refresh: 0 events fetched for {len(tickers)} tickers"
+            log.warning(msg)
+            return ServiceResult(
+                status=service_result.STATUS_SUCCESS_WITH_WARNINGS,
+                run_id=run_id, rows_processed=0,
+                warnings=[msg] + fetch_warnings,
+            )
+
+        # Batch-upsert in one write connection.
+        gc.collect()  # release Windows mmap regions from read connections
+        conn = self._db.connect(db_role, read_only=False)
+        try:
+            conn.execute("BEGIN TRANSACTION")
+            try:
+                for row in upsert_rows:
+                    conn.execute(_SQL_EARNINGS_UPSERT, list(row))
+                conn.execute("COMMIT")
+            except Exception:
+                try:
+                    conn.execute("ROLLBACK")
+                except Exception:  # noqa: BLE001
+                    pass
+                raise
+        finally:
+            conn.close()
+
+        all_warnings = fetch_warnings
+        status = (
+            service_result.STATUS_SUCCESS_WITH_WARNINGS
+            if all_warnings else service_result.STATUS_SUCCESS
+        )
+        log.info(
+            "earnings_calendar_refresh: upserted %d events for %d tickers",
+            len(upsert_rows), len(tickers),
+        )
+        return ServiceResult(
+            status=status,
+            run_id=run_id,
+            rows_processed=len(upsert_rows),
+            warnings=all_warnings,
         )
 
     def _step_price(self, run_date: date, db_role: str, run_id: str, log: Any):

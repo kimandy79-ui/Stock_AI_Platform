@@ -78,6 +78,10 @@ MODE_SAMPLE_COMPLETENESS = "sample-completeness"
 WRITE_MODE_TICKER = "ticker"   # write one ticker at a time (default, safer on Windows)
 WRITE_MODE_BATCH  = "batch"    # write full batch in one ingest() call
 
+# ─── Repair grouping modes ────────────────────────────────────────────────── #
+REPAIR_GROUPING_EXACT = "exact-range"  # group partial-repair tickers by exact date range
+REPAIR_GROUPING_NONE  = "none"         # original per-ticker-per-range behaviour
+
 # ─── Dashboard health status strings ─────────────────────────────────────── #
 DASHBOARD_STATUS_HEALTHY  = "Ticker Data Healthy"
 DASHBOARD_STATUS_UPDATING = "Updating Ticker Data"
@@ -811,6 +815,7 @@ class Backfiller:
         run_regime: bool = True,
         run_daily_pipeline_after: bool = False,
         write_mode: str = WRITE_MODE_TICKER,
+        repair_grouping: str = REPAIR_GROUPING_EXACT,
     ) -> Any:
         run_id = str(uuid.uuid4())
         log = logging.getLogger("tools.backfill_prod_history")
@@ -1061,6 +1066,7 @@ class Backfiller:
                         jitter_seconds=jitter_seconds, max_retries=max_retries,
                         retry_base_sleep=retry_base_sleep, write_mode=write_mode,
                         run_id=run_id, log=log, benchmark_symbols=bmark_set,
+                        repair_grouping=repair_grouping,
                     )
                     price_rows += rows
                     warnings.extend(repair_w)
@@ -1335,6 +1341,91 @@ class Backfiller:
         ok = not failed_tickers
         return ok, total_rows, all_warnings
 
+    def _ingest_grouped_batch_with_fallback(
+        self,
+        *,
+        batch: list[str],
+        start_date: datetime.date,
+        end_date: datetime.date,
+        run_id: str,
+        max_retries: int,
+        retry_base_sleep: float,
+        jitter_seconds: float,
+        log: Any,
+        write_mode: str,
+    ) -> tuple[bool, int, list[str]]:
+        """Download *batch* for *[start, end]* and write; fall back to ticker-by-ticker on batch write failure.
+
+        Used by the grouped repair path (``repair_grouping=exact-range``).  Handles
+        download retries internally so the caller only deals with the final outcome.
+        On ``WRITE_MODE_BATCH`` write failure the cache from the successful download
+        is reused for a ticker-by-ticker retry — no second network call.
+        """
+        warnings: list[str] = []
+        scoped = _ScopedBatchProvider(self._provider, self._sr)
+
+        attempt = 0
+        while True:
+            prime_result = scoped.prime(batch, start_date, end_date)
+            transient = (
+                prime_result is not None
+                and getattr(prime_result, "status", None) == STATUS_FAILED
+            )
+            if not transient:
+                break
+            if attempt >= max_retries:
+                warnings.append(
+                    f"batch download of {len(batch)} ticker(s) still failing after "
+                    f"{max_retries} retries: {self._errs(prime_result)}; skipping batch."
+                )
+                return False, 0, warnings
+            delay = retry_base_sleep * (2 ** attempt) + self._jitter(jitter_seconds)
+            log.warning(
+                "batch download failed (attempt %d/%d); backing off %.1fs",
+                attempt + 1, max_retries, delay,
+            )
+            self._sleep(delay)
+            attempt += 1
+
+        print(f"  batch download tickers={len(batch)}")
+        print(f"  ingest tickers_requested={len(batch)}")
+
+        if write_mode == WRITE_MODE_BATCH:
+            result = self._ingestion_engine.ingest(
+                provider=scoped,
+                start_date=start_date,
+                end_date=end_date,
+                db_role=DB_ROLE_PROD,
+                run_id=run_id,
+                tickers=batch,
+            )
+            rows = getattr(result, "rows_processed", 0)
+            warnings.extend(getattr(result, "warnings", []) or [])
+            print(f"  price_rows_written={rows}")
+            if self._ok(result):
+                return True, rows, warnings
+            log.warning(
+                "batch write failed range=%s→%s tickers=%d; retrying ticker-by-ticker",
+                start_date, end_date, len(batch),
+            )
+            warnings.append(
+                f"batch write failed {start_date}→{end_date} ({len(batch)} tickers); "
+                "retrying ticker-by-ticker"
+            )
+            ok2, rows2, w2 = self._ingest_ticker_by_ticker(
+                scoped, batch, start_date, end_date, run_id
+            )
+            warnings.extend(w2)
+            print(f"  price_rows_written(fallback)={rows2}")
+            return ok2, rows + rows2, warnings
+        else:
+            ok, rows, w = self._ingest_ticker_by_ticker(
+                scoped, batch, start_date, end_date, run_id
+            )
+            warnings.extend(w)
+            print(f"  price_rows_written={rows}")
+            return ok, rows, warnings
+
     # ------------------------------------------------------------------ #
     # DB helpers (read-only; through the approved manager only).
     # ------------------------------------------------------------------ #
@@ -1442,6 +1533,7 @@ class Backfiller:
         tickers_file: "Path | None" = None,
         dry_run: bool = False,
         write_mode: str = WRITE_MODE_TICKER,
+        repair_grouping: str = REPAIR_GROUPING_EXACT,
         run_validation: bool = True,
         run_mutation: bool = True,
         run_features: bool = True,
@@ -1605,6 +1697,7 @@ class Backfiller:
             max_retries=max_retries,
             retry_base_sleep=retry_base_sleep,
             write_mode=write_mode,
+            repair_grouping=repair_grouping,
             run_id=run_id,
             log=log,
             benchmark_symbols=bmark_set,
@@ -1668,6 +1761,7 @@ class Backfiller:
         retry_base_sleep: float = 10.0,
         sample_tickers: list[str] | None = None,
         write_mode: str = WRITE_MODE_TICKER,
+        repair_grouping: str = REPAIR_GROUPING_EXACT,
         run_validation: bool = True,
         run_mutation: bool = False,
         run_features: bool = False,
@@ -1706,6 +1800,7 @@ class Backfiller:
                 jitter_seconds=jitter_seconds, max_retries=max_retries,
                 retry_base_sleep=retry_base_sleep,
                 sample_tickers=sample_tickers, write_mode=write_mode,
+                repair_grouping=repair_grouping,
                 run_validation=run_validation, run_mutation=run_mutation,
                 run_features=run_features, run_regime=run_regime,
             )
@@ -1736,6 +1831,7 @@ class Backfiller:
         retry_base_sleep: float,
         sample_tickers: list[str] | None,
         write_mode: str,
+        repair_grouping: str,
         run_validation: bool,
         run_mutation: bool,
         run_features: bool,
@@ -1834,6 +1930,7 @@ class Backfiller:
             max_retries=max_retries,
             retry_base_sleep=retry_base_sleep,
             write_mode=write_mode,
+            repair_grouping=repair_grouping,
             run_id=run_id,
             log=log,
             benchmark_symbols=benchmark_symbols,   # ← routes ETFs through Module 7
@@ -2067,6 +2164,7 @@ class Backfiller:
         run_id: str,
         log: Any,
         benchmark_symbols: "set[str] | None" = None,
+        repair_grouping: str = REPAIR_GROUPING_EXACT,
     ) -> tuple[int, list[str]]:
         """Download + write only the missing / bad-data date ranges from *reports*.
 
@@ -2138,28 +2236,71 @@ class Backfiller:
                         self._sleep(sleep_seconds + self._jitter(jitter_seconds))
 
         # Range-by-range repair for partial stock tickers (missing + bad-data).
-        for report in partial_stock:
-            repair_ranges = self._all_repair_ranges(report)
-            if not repair_ranges:
-                continue
-            for mr in repair_ranges:
-                kind = "bad-data" if mr in report.bad_data_ranges else "missing"
+        if repair_grouping == REPAIR_GROUPING_EXACT:
+            # Group tickers that share an exact (start, end) repair range so they
+            # can be fetched and written together instead of one-ticker-at-a-time.
+            from collections import defaultdict
+            range_to_tickers: dict[
+                tuple[datetime.date, datetime.date], list[str]
+            ] = defaultdict(list)
+            for report in partial_stock:
+                for mr in self._all_repair_ranges(report):
+                    range_to_tickers[(mr.start, mr.end)].append(report.ticker)
+
+            group_items = sorted(range_to_tickers.items())
+            for g_idx, ((r_start, r_end), group_tickers) in enumerate(group_items):
+                batches = _split_batches(group_tickers, batch_size)
                 print(
-                    f"  Repairing stock {report.ticker} [{kind}]: "
-                    f"{mr.start}→{mr.end} ({mr.trading_days_count}d)"
+                    f"Repair group stock [missing]: {r_start}→{r_end} "
+                    f"tickers={len(group_tickers)} batches={len(batches)} "
+                    f"write_mode={write_mode}"
                 )
-                scoped = _ScopedBatchProvider(self._provider, self._sr)
-                ok_v, rows, w = self._ingest_batch_with_retry(
-                    scoped=scoped, batch=[report.ticker],
-                    start_date=mr.start, end_date=mr.end,
-                    run_id=run_id, max_retries=max_retries,
-                    retry_base_sleep=retry_base_sleep,
-                    jitter_seconds=jitter_seconds, log=log,
-                    write_mode=write_mode,
-                )
-                total_rows += rows
-                all_warnings.extend(w)
-                self._sleep(sleep_seconds + self._jitter(jitter_seconds))
+                for i, batch in enumerate(batches, 1):
+                    print(
+                        f"  Repair batch {i}/{len(batches)} "
+                        f"range={r_start}→{r_end} tickers={len(batch)}"
+                    )
+                    ok_v, rows, w = self._ingest_grouped_batch_with_fallback(
+                        batch=batch,
+                        start_date=r_start,
+                        end_date=r_end,
+                        run_id=run_id,
+                        max_retries=max_retries,
+                        retry_base_sleep=retry_base_sleep,
+                        jitter_seconds=jitter_seconds,
+                        log=log,
+                        write_mode=write_mode,
+                    )
+                    total_rows += rows
+                    all_warnings.extend(w)
+                    if i < len(batches):
+                        self._sleep(sleep_seconds + self._jitter(jitter_seconds))
+                if g_idx < len(group_items) - 1:
+                    self._sleep(sleep_seconds + self._jitter(jitter_seconds))
+        else:
+            # REPAIR_GROUPING_NONE: original per-ticker-per-range behaviour.
+            for report in partial_stock:
+                repair_ranges = self._all_repair_ranges(report)
+                if not repair_ranges:
+                    continue
+                for mr in repair_ranges:
+                    kind = "bad-data" if mr in report.bad_data_ranges else "missing"
+                    print(
+                        f"  Repairing stock {report.ticker} [{kind}]: "
+                        f"{mr.start}→{mr.end} ({mr.trading_days_count}d)"
+                    )
+                    scoped = _ScopedBatchProvider(self._provider, self._sr)
+                    ok_v, rows, w = self._ingest_batch_with_retry(
+                        scoped=scoped, batch=[report.ticker],
+                        start_date=mr.start, end_date=mr.end,
+                        run_id=run_id, max_retries=max_retries,
+                        retry_base_sleep=retry_base_sleep,
+                        jitter_seconds=jitter_seconds, log=log,
+                        write_mode=write_mode,
+                    )
+                    total_rows += rows
+                    all_warnings.extend(w)
+                    self._sleep(sleep_seconds + self._jitter(jitter_seconds))
 
         return total_rows, all_warnings
 
@@ -2344,6 +2485,7 @@ def run_sample_completeness_check(
     sleep_seconds: float = 1.0,
     jitter_seconds: float = 1.0,
     write_mode: str = WRITE_MODE_TICKER,
+    repair_grouping: str = REPAIR_GROUPING_EXACT,
     acquire_lock: bool = True,
     db_manager: Any | None = None,
     provider: Any | None = None,
@@ -2397,6 +2539,7 @@ def run_sample_completeness_check(
             sleep_seconds=sleep_seconds,
             jitter_seconds=jitter_seconds,
             write_mode=write_mode,
+            repair_grouping=repair_grouping,
         )
         return dict(getattr(result, "metadata", {}) or {})
     finally:
@@ -2414,6 +2557,7 @@ def run_full_completeness_check(
     jitter_seconds: float = 1.0,
     dry_run: bool = False,
     write_mode: str = WRITE_MODE_TICKER,
+    repair_grouping: str = REPAIR_GROUPING_EXACT,
     acquire_lock: bool = True,
     db_manager: Any | None = None,
     provider: Any | None = None,
@@ -2463,6 +2607,7 @@ def run_full_completeness_check(
             jitter_seconds=jitter_seconds,
             dry_run=dry_run,
             write_mode=write_mode,
+            repair_grouping=repair_grouping,
         )
     finally:
         if lock is not None:
@@ -2478,6 +2623,7 @@ def run_repair_plan(
     max_retries: int = 3,
     retry_base_sleep: float = 10.0,
     write_mode: str = WRITE_MODE_TICKER,
+    repair_grouping: str = REPAIR_GROUPING_EXACT,
     acquire_lock: bool = True,
     db_manager: Any | None = None,
     provider: Any | None = None,
@@ -2522,6 +2668,7 @@ def run_repair_plan(
             max_retries=max_retries,
             retry_base_sleep=retry_base_sleep,
             write_mode=write_mode,
+            repair_grouping=repair_grouping,
             run_id=str(uuid.uuid4()),
             log=_logging.getLogger("tools.backfill_prod_history"),
             benchmark_symbols=set(_const.REQUIRED_BENCHMARK_SYMBOLS),
@@ -2652,6 +2799,17 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
             "ticker (default): write one ticker at a time with gc.collect() "
             "between writes — prevents Windows DuckDB mmap write-lock hangs. "
             "batch: original behaviour, writes full batch in one ingest() call."
+        ),
+    )
+    parser.add_argument(
+        "--repair-grouping", dest="repair_grouping",
+        choices=[REPAIR_GROUPING_EXACT, REPAIR_GROUPING_NONE],
+        default=REPAIR_GROUPING_EXACT,
+        help=(
+            "exact-range (default): group partial-repair stock tickers by exact "
+            "(start, end) date range and fetch/write them together in batches — "
+            "much faster when many tickers share the same missing date range. "
+            "none: original per-ticker-per-range behaviour."
         ),
     )
     parser.add_argument(
@@ -2808,6 +2966,7 @@ def main(argv: list[str] | None = None) -> int:
                 retry_base_sleep=args.retry_base_sleep,
                 sample_tickers=sample_tickers,
                 write_mode=args.write_mode,
+                repair_grouping=args.repair_grouping,
             )
             # Print machine-readable JSON summary for dashboard consumption.
             meta = getattr(result, "metadata", {}) or {}
@@ -2825,6 +2984,7 @@ def main(argv: list[str] | None = None) -> int:
                 tickers_file=tickers_file,
                 dry_run=args.dry_run,
                 write_mode=args.write_mode,
+                repair_grouping=args.repair_grouping,
                 run_validation=args.run_validation,
                 run_mutation=args.run_mutation,
                 run_features=args.run_features,
@@ -2849,6 +3009,7 @@ def main(argv: list[str] | None = None) -> int:
                 run_regime=args.run_regime,
                 run_daily_pipeline_after=args.run_daily_pipeline_after,
                 write_mode=args.write_mode,
+                repair_grouping=args.repair_grouping,
             )
 
         status = getattr(result, "status", STATUS_FAILED)

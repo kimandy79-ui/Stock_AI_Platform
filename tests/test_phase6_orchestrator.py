@@ -731,13 +731,25 @@ def test_sql_constants_no_ddl_or_attach():
 
 
 def test_sql_write_targets_only_pipeline_tables():
-    """INSERT / UPDATE / DELETE SQL must only target pipeline_runs, pipeline_locks,
-    and pipeline_run_diagnostics (diagnostics are inserted by the diag service, not the
-    orchestrator itself, but verify orchestrator SQL constants)."""
+    """INSERT / UPDATE / DELETE SQL must only target approved tables.
+
+    Primary targets: pipeline_runs, pipeline_locks, pipeline_run_diagnostics.
+    Approved exceptions (documented in module docstring):
+      - cleanup_calculated_outputs_for_date deletes from daily_features,
+        step3_candidates, step4_analysis, step5_proposals.
+      - _step_earnings upserts into earnings_calendar.
+    """
     allowed = {
         "PIPELINE_RUNS",
         "PIPELINE_LOCKS",
         "PIPELINE_RUN_DIAGNOSTICS",
+        # cleanup_calculated_outputs_for_date exceptions
+        "DAILY_FEATURES",
+        "STEP3_CANDIDATES",
+        "STEP4_ANALYSIS",
+        "STEP5_PROPOSALS",
+        # _step_earnings exception
+        "EARNINGS_CALENDAR",
     }
     source = ORCH_PATH.read_text(encoding="utf-8")
     # Find string literals that look like INSERT/UPDATE/DELETE SQL

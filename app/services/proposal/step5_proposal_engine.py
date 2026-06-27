@@ -233,7 +233,7 @@ def _parse_risk_label_config(cfg: dict) -> dict[str, Any]:
 
     div = cfg.get("diversification", {})
     hard_cap_enabled = bool(div.get("hard_cap_enabled", True))
-    max_sector = int(div.get("max_sector_count", div.get("sector_max_positions", 3)))
+    max_sector = int(div.get("max_sector_count", div.get("sector_max_positions", 4)))
     max_industry = int(div.get("max_industry_count", div.get("industry_max_positions", 2)))
     sector_penalty = _f(div.get("sector_penalty", div.get("sector_penalty_factor", 0.9))) or 0.9
     industry_penalty = _f(div.get("industry_penalty", div.get("industry_penalty_factor", 0.85))) or 0.85
@@ -1255,10 +1255,10 @@ class Step5ProposalEngine:
             ps = sc.get(s, 0)
             pi = ic.get(i, 0)
             item["proposal_score_final"] = item["proposal_score_raw"]
-            if ps >= max_s or pi >= max_i:
+            if pi >= max_i or ps >= max_s:
                 item["diversified_rank"] = None
                 item["rejection_reason"] = (
-                    REJECT_SECTOR_CAP if ps >= max_s else REJECT_INDUSTRY_CAP
+                    REJECT_INDUSTRY_CAP if pi >= max_i else REJECT_SECTOR_CAP
                 )
                 item["sector_count_at_selection"] = ps
                 item["industry_count_at_selection"] = pi

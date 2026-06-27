@@ -570,19 +570,19 @@ def _render_daily_proposals() -> None:  # noqa: C901
         )  # type: ignore[assignment]
     with lv_col:
         st.markdown('<span class="da-label">List View</span>', unsafe_allow_html=True)
+        _lv_options = ["Diversified", "Raw"]
+        _lv_stored = st.session_state.get("dp_listview", "Diversified")
         list_view: str = st.selectbox(
             "list_view_sel",
-            options=["Raw + Diversified", "Diversified only", "Raw only"],
-            index=["Raw + Diversified", "Diversified only", "Raw only"].index(
-                st.session_state.get("dp_listview", "Raw + Diversified")
-            ),
+            options=_lv_options,
+            index=_lv_options.index(_lv_stored) if _lv_stored in _lv_options else 0,
             label_visibility="collapsed",
             key="dp_listview",
         )  # type: ignore[assignment]
 
-    # show_diversified=True  → filter on in_diversified_top_n (Diversified + Raw+Div)
-    # show_diversified=False → filter on in_raw_top_n (Raw only)
-    show_div: bool = (list_view != "Raw only")
+    # show_diversified=True  → filter on in_diversified_top_n
+    # show_diversified=False → filter on in_raw_top_n
+    show_div: bool = (list_view == "Diversified")
 
     setup_config_id = None if cfg_choice == "(all)" else cfg_choice
 

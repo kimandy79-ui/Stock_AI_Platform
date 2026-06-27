@@ -53,9 +53,9 @@ SECTOR_ETFS: Final[tuple[str, ...]] = (
     # Basic Materials
     "COPX", "GDX", "MOO", "PICK", "SIL", "SLX", "WOOD",
     # Communication Services
-    "ESPO", "FDN", "IYZ", "PBS", "PEJ",
-    # Consumer Cyclical
-    "BJK", "CARZ", "EATZ", "IBUY", "ITB", "XRT",
+    "ESPO", "FDN", "IYZ", "PEJ",
+    # Consumer Discretionary
+    "CARZ", "IBUY", "ITB", "XRT",
     # Consumer Defensive
     "PBJ",
     # Energy
@@ -67,7 +67,7 @@ SECTOR_ETFS: Final[tuple[str, ...]] = (
     # Industrials
     "BOAT", "IFRA", "ITA", "IYT", "JETS", "PAVE", "XHB", "XME",
     # Real Estate
-    "DESK", "INDS", "REZ", "RXRE", "SRVR", "VNQ",
+    "DESK", "INDS", "REZ", "SRVR", "VNQ",
     # Technology
     "IGV", "SOXX", "TAN",
     # Utilities
@@ -131,13 +131,13 @@ SECTOR_ALIAS_MAP: Final[dict[str, str]] = {
     "Real Estate": "Real Estate",
 }
 
-# Industry-level ETF map: yfinance sector name → {industry → ETF ticker}.
-# Keys use raw yfinance values (matching ticker_master.sector / .industry after
-# the metadata backfill). Use SECTOR_ALIAS_MAP to convert to canonical sector
-# names; use this map to look up the best ETF for a specific industry.
+# Industry-level ETF map: canonical sector name → {industry → ETF ticker}.
+# Outer keys match ticker_master.sector (canonical names after normalize_sector).
+# Use this map to look up the best ETF for a specific industry; fall back to
+# SECTOR_ETF_MAP when no industry-specific ETF is mapped.
 # All ETFs referenced here are members of SECTOR_ETFS (loaded as daily prices).
 INDUSTRY_ETF_MAP: Final[dict[str, dict[str, str]]] = {
-    "Basic Materials": {
+    "Materials": {
         "Agricultural Inputs": "MOO",
         "Aluminum": "PICK",
         "Building Materials": "XLB",
@@ -155,14 +155,14 @@ INDUSTRY_ETF_MAP: Final[dict[str, dict[str, str]]] = {
     },
     "Communication Services": {
         "Advertising Agencies": "XLC",
-        "Broadcasting": "PBS",
+        "Broadcasting": "XLC",
         "Electronic Gaming & Multimedia": "ESPO",
         "Entertainment": "PEJ",
         "Internet Content & Information": "FDN",
         "Publishing": "XLC",
         "Telecom Services": "IYZ",
     },
-    "Consumer Cyclical": {
+    "Consumer Discretionary": {
         "Apparel Manufacturing": "XLY",
         "Apparel Retail": "XRT",
         "Auto & Truck Dealerships": "CARZ",
@@ -171,7 +171,7 @@ INDUSTRY_ETF_MAP: Final[dict[str, dict[str, str]]] = {
         "Department Stores": "XRT",
         "Footwear & Accessories": "XLY",
         "Furnishings, Fixtures & Appliances": "XLY",
-        "Gambling": "BJK",
+        "Gambling": "XLY",
         "Home Improvement Retail": "XRT",
         "Internet Retail": "IBUY",
         "Leisure": "PEJ",
@@ -181,13 +181,13 @@ INDUSTRY_ETF_MAP: Final[dict[str, dict[str, str]]] = {
         "Personal Services": "XLY",
         "Recreational Vehicles": "XLY",
         "Residential Construction": "ITB",
-        "Resorts & Casinos": "BJK",
-        "Restaurants": "EATZ",
+        "Resorts & Casinos": "XLY",
+        "Restaurants": "PEJ",
         "Specialty Retail": "XRT",
         "Textile Manufacturing": "XLY",
         "Travel Services": "PEJ",
     },
-    "Consumer Defensive": {
+    "Consumer Staples": {
         "Beverages - Brewers": "XLP",
         "Beverages - Non-Alcoholic": "XLP",
         "Beverages - Wineries & Distilleries": "XLP",
@@ -212,7 +212,7 @@ INDUSTRY_ETF_MAP: Final[dict[str, dict[str, str]]] = {
         "Thermal Coal": "XLE",
         "Uranium": "URA",
     },
-    "Financial Services": {
+    "Financials": {
         "Asset Management": "IAI",
         "Banks - Diversified": "KBE",
         "Banks - Regional": "KRE",
@@ -273,7 +273,7 @@ INDUSTRY_ETF_MAP: Final[dict[str, dict[str, str]]] = {
         "Real Estate - Diversified": "XLRE",
         "Real Estate Services": "XLRE",
         "REIT - Diversified": "VNQ",
-        "REIT - Healthcare Facilities": "RXRE",
+        "REIT - Healthcare Facilities": "VNQ",
         "REIT - Hotel & Motel": "VNQ",
         "REIT - Industrial": "INDS",
         "REIT - Mortgage": "REM",

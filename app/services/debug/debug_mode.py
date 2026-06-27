@@ -70,17 +70,18 @@ CANONICAL_SETUP_TYPES: Final[tuple[str, ...]] = (
 STEP_NAMES: Final[tuple[str, ...]] = (
     "benchmark_etf_ingestion",       # 0
     "universe_ingestion",            # 1
-    "price_ingestion",               # 2
-    "validation",                    # 3
-    "mutation_detection",            # 4
-    "feature_calculation",           # 5
-    "step3_universal_eligibility",   # 6  — M13 setup-mode
-    "step4_setup_validation",        # 7  — M14 setup-mode
-    "step5_proposals",               # 8  — M15 setup-mode
-    "outcome_queue_creation",        # 9
-    "outcome_processing",            # 10
-    "dashboard_materialization",     # 11  internal, not injectable
-    "backup",                        # 12  internal, not injectable
+    "earnings_calendar_refresh",     # 2  — recoverable; no dedicated engine kwarg
+    "price_ingestion",               # 3
+    "validation",                    # 4
+    "mutation_detection",            # 5
+    "feature_calculation",           # 6
+    "step3_universal_eligibility",   # 7  — M13 setup-mode
+    "step4_setup_validation",        # 8  — M14 setup-mode
+    "step5_proposals",               # 9  — M15 setup-mode
+    "outcome_queue_creation",        # 10
+    "outcome_processing",            # 11
+    "dashboard_materialization",     # 12  internal, not injectable
+    "backup",                        # 13  internal, not injectable
 )
 
 _UNIVERSE_STEP_IDX: Final[int] = STEP_NAMES.index("universe_ingestion")

@@ -320,7 +320,7 @@ def _minimal_risk_config(
     block_regimes: list[str] | None = None,
     block_null: bool = True,
     hard_cap: bool = True,
-    max_sector: int = 3,
+    max_sector: int = 4,
     max_industry: int = 2,
     low_max: float = 33.0,
     med_max: float = 66.0,
@@ -1117,6 +1117,153 @@ class TestSoftPenaltyDiversification:
         rankable = [p for p in props if p["raw_rank"] is not None]
         for p in rankable:
             assert p["diversified_rank"] is not None
+
+
+class TestProductionDiversificationLimits:
+    """Verify production caps: max_sector=4, max_industry=2.
+
+    Raw View must remain unaffected (raw_rank and in_raw_top_n unchanged).
+    Diversified View must exclude overflow tickers from selected_flag.
+    sector_count_at_selection and industry_count_at_selection must be written.
+    """
+
+    def _seed_n_tickers(
+        self,
+        db: str,
+        tickers: list[str],
+        sector: str,
+        industry: str,
+        score_base: float = 80.0,
+    ) -> None:
+        for i, t in enumerate(tickers):
+            _seed_ticker(db, t, sector=sector, industry=industry)
+            _seed_price(db, t, SIGNAL_DATE, 100.0, 100.0)
+            _seed_features(db, t, SIGNAL_DATE, close_adj=100.0, atr14=2.0,
+                           next_resistance_level=115.0)
+            # Descending scores so order is deterministic
+            _seed_step4(db, t, SIGNAL_DATE, setup_type="breakout",
+                        setup_passed=True, setup_score=score_base - i,
+                        entry_price_raw=100.0, market_regime="bull", earnings_days=30)
+
+    def test_fifth_sector_ticker_excluded_from_diversified(self, tmp_db_paths):
+        """5 tickers same sector (cap=4) → 5th excluded from diversified; all 5 in raw."""
+        db = dbm.DB_ROLE_PROD
+        tickers = ["S1", "S2", "S3", "S4", "S5"]
+        self._seed_n_tickers(db, tickers, sector="Technology", industry="SaaS")
+        # Use sector cap=4, industry cap=10 so only sector cap triggers
+        cfg = _minimal_risk_config(top_n=10, max_sector=4, max_industry=10, min_rr=1.0)
+        Step5ProposalEngine().propose(
+            SIGNAL_DATE, risk_label_config=cfg,
+            setup_configs=DEFAULT_SETUP_CONFIGS, db_role=db,
+        )
+        props = _read_proposals(db, SIGNAL_DATE)
+
+        # All 5 appear in raw view
+        raw_ranked = [p for p in props if p["raw_rank"] is not None]
+        assert len(raw_ranked) == 5
+        assert all(p["in_raw_top_n"] for p in raw_ranked)
+
+        # Exactly 4 admitted to diversified, 1 sector-cap rejected
+        sector_rejected = [p for p in props if p["rejection_reason"] == REJECT_SECTOR_CAP]
+        assert len(sector_rejected) == 1
+        diversified_selected = [p for p in props if p["selected_flag"]]
+        assert len(diversified_selected) == 4
+
+    def test_third_industry_ticker_excluded_from_diversified(self, tmp_db_paths):
+        """3 tickers same industry (cap=2) → 3rd excluded from diversified; all 3 in raw."""
+        db = dbm.DB_ROLE_PROD
+        tickers = ["I1", "I2", "I3"]
+        self._seed_n_tickers(db, tickers, sector="Financials", industry="Banking")
+        cfg = _minimal_risk_config(top_n=10, max_sector=10, max_industry=2, min_rr=1.0)
+        Step5ProposalEngine().propose(
+            SIGNAL_DATE, risk_label_config=cfg,
+            setup_configs=DEFAULT_SETUP_CONFIGS, db_role=db,
+        )
+        props = _read_proposals(db, SIGNAL_DATE)
+
+        raw_ranked = [p for p in props if p["raw_rank"] is not None]
+        assert len(raw_ranked) == 3
+        assert all(p["in_raw_top_n"] for p in raw_ranked)
+
+        industry_rejected = [p for p in props if p["rejection_reason"] == REJECT_INDUSTRY_CAP]
+        assert len(industry_rejected) == 1
+        diversified_selected = [p for p in props if p["selected_flag"]]
+        assert len(diversified_selected) == 2
+
+    def test_raw_ranking_unaffected_by_caps(self, tmp_db_paths):
+        """raw_rank and in_raw_top_n are set before diversification and must not change."""
+        db = dbm.DB_ROLE_PROD
+        # 5 tickers same sector — sector cap=4 will exclude the last one from diversified
+        tickers = ["R1", "R2", "R3", "R4", "R5"]
+        self._seed_n_tickers(db, tickers, sector="Energy", industry="E&P")
+        cfg = _minimal_risk_config(top_n=10, max_sector=4, max_industry=10, min_rr=1.0)
+        Step5ProposalEngine().propose(
+            SIGNAL_DATE, risk_label_config=cfg,
+            setup_configs=DEFAULT_SETUP_CONFIGS, db_role=db,
+        )
+        props = _read_proposals(db, SIGNAL_DATE)
+
+        # Every rankable ticker has a raw_rank regardless of diversification outcome
+        for p in props:
+            if p["raw_rank"] is not None:
+                assert p["in_raw_top_n"] is True
+        # The sector-cap-rejected ticker still has a raw_rank
+        sector_rejected = [p for p in props if p["rejection_reason"] == REJECT_SECTOR_CAP]
+        assert len(sector_rejected) == 1
+        assert sector_rejected[0]["raw_rank"] is not None
+        assert sector_rejected[0]["in_raw_top_n"] is True
+        # But it is not in the diversified selection
+        assert not sector_rejected[0]["selected_flag"]
+        assert sector_rejected[0]["diversified_rank"] is None
+
+    def test_industry_cap_priority_over_sector_cap(self, tmp_db_paths):
+        """When a ticker hits both industry and sector caps, rejection_reason must be
+        industry_cap (industry has priority over sector)."""
+        db = dbm.DB_ROLE_PROD
+        # 3 tickers: same sector (cap=2) and same industry (cap=2).
+        # T1 and T2 are admitted → both caps consumed.
+        # T3 hits both caps; must be labeled industry_cap, not sector_cap.
+        tickers = ["P1", "P2", "P3"]
+        self._seed_n_tickers(db, tickers, sector="Technology", industry="Semiconductors")
+        cfg = _minimal_risk_config(top_n=10, max_sector=2, max_industry=2, min_rr=1.0)
+        Step5ProposalEngine().propose(
+            SIGNAL_DATE, risk_label_config=cfg,
+            setup_configs=DEFAULT_SETUP_CONFIGS, db_role=db,
+        )
+        props = _read_proposals(db, SIGNAL_DATE)
+        rejected = [p for p in props if p["rejection_reason"] in (REJECT_SECTOR_CAP, REJECT_INDUSTRY_CAP)]
+        assert len(rejected) == 1
+        assert rejected[0]["rejection_reason"] == REJECT_INDUSTRY_CAP
+
+    def test_sector_industry_counts_written(self, tmp_db_paths):
+        """sector_count_at_selection and industry_count_at_selection must reflect
+        cumulative counts at the point each ticker was admitted to the diversified set."""
+        db = dbm.DB_ROLE_PROD
+        # 3 tickers: same sector, two different industries
+        _seed_ticker(db, "C1", sector="Healthcare", industry="Biotech")
+        _seed_ticker(db, "C2", sector="Healthcare", industry="Biotech")
+        _seed_ticker(db, "C3", sector="Healthcare", industry="Devices")
+        for t, score in [("C1", 82.0), ("C2", 80.0), ("C3", 78.0)]:
+            _seed_price(db, t, SIGNAL_DATE, 100.0, 100.0)
+            _seed_features(db, t, SIGNAL_DATE, close_adj=100.0, atr14=2.0,
+                           next_resistance_level=115.0)
+            _seed_step4(db, t, SIGNAL_DATE, setup_type="breakout",
+                        setup_passed=True, setup_score=score,
+                        entry_price_raw=100.0, market_regime="bull", earnings_days=30)
+        cfg = _minimal_risk_config(top_n=10, max_sector=4, max_industry=2, min_rr=1.0)
+        Step5ProposalEngine().propose(
+            SIGNAL_DATE, risk_label_config=cfg,
+            setup_configs=DEFAULT_SETUP_CONFIGS, db_role=db,
+        )
+        props = {p["ticker"]: p for p in _read_proposals(db, SIGNAL_DATE)}
+
+        # All 3 admitted (sector cap=4, industry cap=2 — Biotech gets 2, Devices gets 1)
+        assert props["C1"]["sector_count_at_selection"] == 1
+        assert props["C1"]["industry_count_at_selection"] == 1
+        assert props["C2"]["sector_count_at_selection"] == 2
+        assert props["C2"]["industry_count_at_selection"] == 2
+        assert props["C3"]["sector_count_at_selection"] == 3
+        assert props["C3"]["industry_count_at_selection"] == 1  # new industry
 
 
 class TestMultiRouteDedupe:

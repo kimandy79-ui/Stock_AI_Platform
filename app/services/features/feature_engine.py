@@ -246,7 +246,7 @@ _SELECT_PRICE_COLUMNS: Final[str] = (
 )
 
 _SELECT_SECTORS: Final[str] = (
-    "SELECT ticker, sector FROM ticker_master WHERE ticker IN ({placeholders})"
+    "SELECT ticker, sector, industry FROM ticker_master WHERE ticker IN ({placeholders})"
 )
 
 # Earnings: fetch all future/recent entries for the batch; filter per-ticker after load.
@@ -643,6 +643,7 @@ class FeatureEngine:
             read["prices"],
             process_tickers,
             read["sector_by_ticker"],
+            read.get("industry_by_ticker", {}),
             read.get("earnings_by_ticker", {}),
             start_date,
             end_date,
@@ -752,19 +753,28 @@ class FeatureEngine:
                     "process_tickers": [],
                     "tickers_skipped_no_data": tickers_skipped,
                     "sector_by_ticker": {},
+                    "industry_by_ticker": {},
                     "prices": empty,
                     "rows_read": 0,
                 }
 
-            sector_by_ticker = self._read_sectors(connection, process_tickers)
-            sector_etfs = {
-                constants.SECTOR_ETF_MAP[sector]
-                for sector in sector_by_ticker.values()
-                if sector in constants.SECTOR_ETF_MAP
-            }
+            sector_by_ticker, industry_by_ticker = self._read_sectors(connection, process_tickers)
+            benchmark_etfs: set[str] = set()
+            for _t in process_tickers:
+                _sector = sector_by_ticker.get(_t)
+                _industry = industry_by_ticker.get(_t)
+                _etf = (
+                    constants.INDUSTRY_ETF_MAP.get(_sector or "", {}).get(_industry or "")
+                    if _sector and _industry
+                    else None
+                )
+                if _etf is None and _sector:
+                    _etf = constants.SECTOR_ETF_MAP.get(_sector)
+                if _etf:
+                    benchmark_etfs.add(_etf)
 
             # Always include SPY for relative_strength_vs_spy (v02).
-            load_set = sorted(set(process_tickers) | sector_etfs | {constants.BENCHMARK_SPY})
+            load_set = sorted(set(process_tickers) | benchmark_etfs | {constants.BENCHMARK_SPY})
             placeholders = ", ".join("?" for _ in load_set)
             sql = _SELECT_PRICE_COLUMNS.format(placeholders=placeholders)
             params = [STATUS_OK, warmup_start, end_date, *load_set]
@@ -795,16 +805,21 @@ class FeatureEngine:
             "process_tickers": process_tickers,
             "tickers_skipped_no_data": tickers_skipped,
             "sector_by_ticker": sector_by_ticker,
+            "industry_by_ticker": industry_by_ticker,
             "prices": prices,
             "rows_read": prices.height,
             "earnings_by_ticker": earnings_by_ticker,
         }
 
-    def _read_sectors(self, connection: Any, process_tickers: list[str]) -> dict[str, str | None]:
+    def _read_sectors(
+        self, connection: Any, process_tickers: list[str]
+    ) -> tuple[dict[str, str | None], dict[str, str | None]]:
         placeholders = ", ".join("?" for _ in process_tickers)
         sql = _SELECT_SECTORS.format(placeholders=placeholders)
         rows = connection.execute(sql, list(process_tickers)).fetchall()
-        return {row[0]: row[1] for row in rows}
+        sector_by_ticker = {row[0]: row[1] for row in rows}
+        industry_by_ticker = {row[0]: row[2] for row in rows}
+        return sector_by_ticker, industry_by_ticker
 
     def _read_earnings(
         self, connection: Any, process_tickers: list[str]
@@ -831,6 +846,7 @@ class FeatureEngine:
         prices: pl.DataFrame,
         process_tickers: list[str],
         sector_by_ticker: dict[str, str | None],
+        industry_by_ticker: dict[str, str | None],
         earnings_by_ticker: dict[str, list[tuple[date, str]]],
         start_date: date,
         end_date: date,
@@ -892,13 +908,31 @@ class FeatureEngine:
             cutoff = rec["date"]
 
             try:
-                # Sector RS (v01 pattern)
+                # Industry RS: industry ETF first, sector ETF fallback (v01 pattern)
                 sector = sector_by_ticker.get(ticker)
-                etf = constants.SECTOR_ETF_MAP.get(sector) if sector is not None else None
+                industry = industry_by_ticker.get(ticker)
+                industry_etf: str | None = None
+                if sector and industry:
+                    industry_etf = constants.INDUSTRY_ETF_MAP.get(sector, {}).get(industry)
+                sector_etf: str | None = constants.SECTOR_ETF_MAP.get(sector) if sector else None
+                etf = industry_etf or sector_etf
                 sector_rs: float | None = None
                 ticker_roc = _sanitize(rec["roc20"])
                 if etf is not None and ticker_roc is not None:
                     etf_roc = roc_lookup.get((etf, cutoff))
+                    if (
+                        etf_roc is None
+                        and industry_etf is not None
+                        and sector_etf is not None
+                        and industry_etf != sector_etf
+                    ):
+                        import logging as _log_mod
+                        _log_mod.getLogger(__name__).warning(
+                            "benchmark fallback_used ticker=%s industry_etf=%s "
+                            "sector_etf=%s reason=no_price_rows",
+                            ticker, industry_etf, sector_etf,
+                        )
+                        etf_roc = roc_lookup.get((sector_etf, cutoff))
                     if etf_roc is not None:
                         sector_rs = ticker_roc - etf_roc
 
