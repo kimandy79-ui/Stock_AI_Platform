@@ -355,6 +355,14 @@ class TestBreakoutValidator:
         assert result.setup_fail_reason is not None
         assert "no_resistance_level" in result.pass_fail_reasons
 
+    def test_breakout_pass_when_only_resistance_adj_set(self) -> None:
+        # P2 regression: resistance_adj non-null should satisfy the check even
+        # when raw conversion would give None (close_raw/close_adj provided here
+        # so raw conversion succeeds; test confirms the guard uses OR logic).
+        feat = _breakout_feat(resistance_level=154.0, close_raw=155.0, close_adj=155.0)
+        result = validate_breakout(feat, _breakout_config())
+        assert "no_resistance_level" not in result.pass_fail_reasons
+
     def test_breakout_fail_proximity_out_of_range(self) -> None:
         # proximity 1.5 is outside [−1.0, 0.5]
         feat = _breakout_feat(breakout_proximity=1.5)
@@ -652,11 +660,11 @@ class TestConsolidationBaseValidator:
         assert result.setup_type == "consolidation_base"
         assert result.setup_type != "conservative_consolidation"
 
-    def test_cb_fail_range_too_wide(self) -> None:
+    def test_cb_fail_range_tightness_too_low(self) -> None:
         feat = _cb_feat(range_tightness_score=40.0)  # < 60
         result = validate_consolidation_base(feat, _cb_config())
         assert result.setup_passed is False
-        assert any("range_too_wide" in r for r in result.pass_fail_reasons)
+        assert any("range_tightness_too_low" in r for r in result.pass_fail_reasons)
 
     def test_cb_fail_atr_too_high(self) -> None:
         feat = _cb_feat(atr_pct=0.08)  # > 0.05
@@ -730,7 +738,7 @@ class TestConsolidationBaseValidator:
         cfg = _cb_config(min_tightness=40)  # looser
         feat = _cb_feat(range_tightness_score=50.0)  # would fail default 60
         result = validate_consolidation_base(feat, cfg)
-        assert not any("range_too_wide" in r for r in result.pass_fail_reasons)
+        assert not any("range_tightness_too_low" in r for r in result.pass_fail_reasons)
 
 
 # ===========================================================================

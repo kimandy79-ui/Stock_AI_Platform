@@ -920,6 +920,28 @@ def build_ticker_report(
     s5_disp      = step5_row.get("disposition", "—") if step5_row else "—"
     s5_sel_flag  = step5_row.get("selected_flag")    if step5_row else None
 
+    # Parse final_trade_decision from mechanical_explanation (P0 — stored in JSON, no schema change)
+    _mech_str = step5_row.get("mechanical_explanation") if step5_row else None
+    _mech_dict: dict = {}
+    if _mech_str:
+        try:
+            _mech_dict = _json.loads(_mech_str) if isinstance(_mech_str, str) else _mech_str
+        except Exception:
+            pass
+    final_trade_decision: str = _mech_dict.get("final_trade_decision") or (
+        "REJECTED" if s5_disp == "REJECTED"
+        else "WATCHLIST_ONLY" if s5_disp == "WATCHLIST_ONLY"
+        else "—"
+    )
+    ftd_reason_codes: list[str] = _mech_dict.get("ftd_reason_codes") or []
+    # P0: action-readiness fields; WAIT_* FTDs map to WATCHLIST_ONLY
+    effective_disposition: str = _mech_dict.get("effective_disposition") or (
+        "REJECTED" if s5_disp == "REJECTED"
+        else "WATCHLIST_ONLY" if s5_disp == "WATCHLIST_ONLY"
+        else "—"
+    )
+    effective_risk_label: str = _mech_dict.get("effective_risk_label") or "—"
+
     # Filename
     setup_short = (selected_setup or setup_config_id or "unknown").replace("_v1", "")
     date_short  = signal_date.strftime("%y%m%d")
@@ -1717,11 +1739,19 @@ def build_ticker_report(
     if _earn_days_effective is None:
         earnings_penalty_status = "UNKNOWN_NOT_SAFE"
     elif earn_days is None and _earn_days_effective is not None:
-        # Calendar says we know, but pipeline didn't apply penalty
-        earnings_penalty_status = "NOT_APPLIED_PIPELINE_GAP"
+        # Feature snapshot missed earnings; calendar resolved it.
+        # If earnings are within the avoidance window the penalty was missed (genuine gap).
+        # If safe distance confirmed by calendar, the outcome is correct regardless.
+        earnings_penalty_status = (
+            "NOT_APPLIED_PIPELINE_GAP" if _earn_too_close else "NOT_APPLIED_CONFIRMED_SAFE"
+        )
     else:
         try:
-            earnings_penalty_status = "APPLIED" if (_ep_val is not None and float(_ep_val) != 0.0) else "NOT_APPLIED"
+            earnings_penalty_status = (
+                "APPLIED"
+                if (_ep_val is not None and float(_ep_val) != 0.0)
+                else "NOT_APPLIED_CONFIRMED_SAFE"
+            )
         except (TypeError, ValueError):
             earnings_penalty_status = "UNKNOWN_NOT_SAFE"
 
@@ -1773,14 +1803,28 @@ def build_ticker_report(
     kv("  earnings_status",                  earnings_status,
        "KNOWN=calendar confirmed; UNKNOWN=no calendar entry; NOT_APPLICABLE=not relevant")
     kv("  earnings_penalty_status",          earnings_penalty_status,
-       "APPLIED=non-zero penalty; NOT_APPLIED=0 penalty confirmed; UNKNOWN_NOT_SAFE=unverifiable")
+       "APPLIED=penalty applied; NOT_APPLIED_CONFIRMED_SAFE=safe distance confirmed; "
+       "NOT_APPLIED_PIPELINE_GAP=earnings close but penalty missed; UNKNOWN_NOT_SAFE=unverifiable")
     kv("  ai_technical_review_readiness",    ai_tech_ready,
        "READY = step3+step4 evidence complete enough for technical review")
     kv("  ai_final_buy_readiness",           ai_buy_ready,
        "READY = step5 BUY + trade plan + known regime + known earnings")
-    kv("  live_action",                      live_action,
-       "BUY=all gates clear; HOLD_REVIEW_REQUIRED=manual review needed; REJECT=mechanical reject")
+    kv("  final_trade_decision",             final_trade_decision,
+       "BUY=entry confirmed; WAIT_FOR_BREAKOUT=price not yet above resistance; "
+       "WAIT_FOR_PULLBACK_CONFIRMATION=rebound not confirmed; "
+       "WAIT_FOR_RISK_PLAN_FIX=stop too tight vs ATR; "
+       "WATCHLIST_ONLY=blocked; REJECTED=failed; —=no step5 data")
+    kv("  effective_disposition",            effective_disposition,
+       "P0 authoritative action status: WAIT_* FTDs map to WATCHLIST_ONLY")
+    kv("  effective_risk_label",             effective_risk_label,
+       "high when FTD≠BUY; reflects entry-readiness not just setup quality")
     blank()
+
+    if ftd_reason_codes:
+        line("  ftd_reason_codes (from final_trade_decision gate):")
+        for _code in ftd_reason_codes:
+            line(f"    - {_code}")
+        blank()
 
     if final_buy_not_ready_reason_codes:
         line("  final_buy_not_ready_reasons (machine-readable):")
@@ -1821,8 +1865,13 @@ def build_ticker_report(
         line(f"  mechanical_disposition={mechanical_disposition}"
              f"  earnings_status={earnings_status}"
              f"  ai_final_buy_readiness={ai_buy_ready}")
-        line(f"  live_action={live_action}")
-        if live_action == "HOLD_REVIEW_REQUIRED":
+        line(f"  final_trade_decision={final_trade_decision}"
+             f"  effective_disposition={effective_disposition}")
+        if final_trade_decision.startswith("WAIT_"):
+            line(f"  [WAIT — entry condition not yet met; monitor until triggered]")
+            if ftd_reason_codes:
+                line(f"  Gate reasons: {', '.join(ftd_reason_codes)}")
+        elif final_trade_decision not in ("BUY", "REJECTED", "WATCHLIST_ONLY", "—"):
             line(f"  [HOLD_REVIEW_REQUIRED — do not enter until manual review clears all flags]")
             if final_buy_not_ready_reason_codes:
                 line(f"  Blocking reasons: {', '.join(final_buy_not_ready_reason_codes)}")

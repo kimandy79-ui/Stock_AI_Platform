@@ -1,0 +1,21 @@
+- start dashboard
+python -m streamlit run app\dashboard\streamlit_app.py
+
+- download and write to DB ticker by ticker
+
+- daily
+python tools\run_prod_pipeline.py `
+  --date 2026-06-26 `
+  --run-type manual `
+  --force-rerun
+
+- if several days missed. download and write in DB in batches
+python tools/backfill_prod_history.py --start-date 2026-06-01 --end-date 2026-06-27 --write-mode batch --repair-grouping exact-range   
+
+- first time (3 years)
+python tools\backfill_prod_history.py `
+  --start-date 2023-06-27 `
+  --end-date 2026-06-26 `
+  --batch-size 50 `
+  --sleep-seconds 3 `
+  --jitter-seconds 2

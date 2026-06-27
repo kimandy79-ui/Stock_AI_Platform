@@ -307,8 +307,8 @@ def validate_breakout(
     # --- Hard checks ---
     hard_fails: list[str] = []
 
-    # 1. resistance_level must exist
-    if resistance_adj is None:
+    # 1. resistance_level must exist in at least one price form (P2: adj OR raw)
+    if resistance_adj is None and resistance_raw is None:
         hard_fails.append("no_resistance_level")
 
     # 2. breakout_proximity in range
@@ -992,6 +992,8 @@ def validate_consolidation_base(
     min_dry_up: float = float(val.get("min_dry_up", 40))
     min_earnings_days: int = int(val.get("min_earnings_days", 5))
     min_setup_score: float = float(val.get("min_setup_score", 55))
+    # Allow close to be slightly above base_high before rejecting (borderline breakout candidates)
+    above_base_tolerance: float = float(val.get("price_above_base_tolerance", 0.01))
     # rvol_required=False always for consolidation_base (AD-22.23)
 
     # Feature extraction
@@ -1040,7 +1042,7 @@ def validate_consolidation_base(
         hard_fails.append("missing_range_tightness_score")
     elif range_tightness_score < min_tightness:
         hard_fails.append(
-            f"range_too_wide({range_tightness_score:.1f}<{min_tightness})"
+            f"range_tightness_too_low({range_tightness_score:.1f}<{min_tightness})"
         )
 
     # 2. ATR % (volatility controlled)
@@ -1049,9 +1051,9 @@ def validate_consolidation_base(
     elif atr_pct > max_atr_pct:
         hard_fails.append(f"atr_too_high({atr_pct:.4f}>{max_atr_pct})")
 
-    # 3. Price inside base
+    # 3. Price inside base (tolerance allows minor overshoots at top of range)
     if base_high_raw is not None and base_low_raw is not None and close_raw is not None:
-        if close_raw > base_high_raw:
+        if close_raw > base_high_raw * (1.0 + above_base_tolerance):
             hard_fails.append(
                 f"price_above_base_high(close={close_raw:.2f}>base_high={base_high_raw:.2f})"
             )

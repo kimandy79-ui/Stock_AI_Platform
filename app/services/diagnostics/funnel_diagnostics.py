@@ -156,6 +156,34 @@ LIMIT 1
 """
 
 # ---------------------------------------------------------------------------
+# Read-report SQL (used by build_report — read-only, no persist)
+# ---------------------------------------------------------------------------
+_SQL_RESOLVE_RUN_ID: Final[str] = (
+    "SELECT run_id FROM step3_candidates "
+    "WHERE signal_date = ? ORDER BY created_at DESC LIMIT 1"
+)
+
+_SQL_S3_REPORT: Final[str] = (
+    "SELECT ticker, routing_status, routed_setup_types, "
+    "passed_eligibility, eligibility_fail_reasons "
+    "FROM step3_candidates WHERE run_id = ? AND signal_date = ?"
+)
+
+_SQL_S4_REPORT: Final[str] = (
+    "SELECT ticker, setup_type, setup_score, setup_passed, setup_fail_reason, "
+    "rvol, atr_pct, distance_to_ema20_pct, distance_to_ema50_pct, "
+    "explanation_json "
+    "FROM step4_analysis WHERE run_id = ? AND signal_date = ?"
+)
+
+_SQL_S5_REPORT: Final[str] = (
+    "SELECT ticker, setup_type, setup_score, estimated_rr, "
+    "entry_price_raw, stop_price_raw, "
+    "disposition, selected_flag, rejection_reason, mechanical_explanation "
+    "FROM step5_proposals WHERE run_id = ? AND signal_date = ?"
+)
+
+# ---------------------------------------------------------------------------
 # Insert SQL
 # ---------------------------------------------------------------------------
 _SQL_INSERT_DIAG: Final[str] = (
@@ -619,6 +647,102 @@ class SetupModeFunnelDiagnosticsService:
         cols = ["step_name", "setup_type", "metric_name", "metric_value", "reason", "metadata_json"]
         return [dict(zip(cols, r)) for r in rows]
 
+    # ------------------------------------------------------------------
+    # Read-report (CLI / ad-hoc analysis; does not persist anything)
+    # ------------------------------------------------------------------
+    def build_report(
+        self,
+        signal_date: date,
+        db_role: str = "prod",
+        run_id: str | None = None,
+        top_n_borderline: int = 10,
+        setup_type_filter: str | None = None,
+    ) -> ServiceResult:
+        """Query pipeline tables and return a rich diagnostic report.
+
+        Does NOT write to ``pipeline_run_diagnostics``.  The report dict is
+        returned in ``result.metadata["report"]``.
+        """
+        if db_role not in _VALID_DB_ROLES:
+            return ServiceResult(
+                status=sr.STATUS_FAILED,
+                run_id=run_id or "",
+                errors=[f"invalid db_role {db_role!r}"],
+                metadata={"db_role": db_role, "signal_date": signal_date.isoformat()},
+            )
+
+        conn = self._db.connect(db_role, read_only=True)
+        try:
+            if run_id is None:
+                row = conn.execute(
+                    _SQL_RESOLVE_RUN_ID, [signal_date.isoformat()]
+                ).fetchone()
+                if not row:
+                    return ServiceResult(
+                        status=sr.STATUS_FAILED,
+                        run_id="",
+                        errors=[f"no pipeline data found for signal_date={signal_date}"],
+                        metadata={"db_role": db_role, "signal_date": signal_date.isoformat()},
+                    )
+                run_id = row[0]
+
+            params = [run_id, signal_date.isoformat()]
+            s3_raw = conn.execute(_SQL_S3_REPORT, params).fetchall()
+            s4_raw = conn.execute(_SQL_S4_REPORT, params).fetchall()
+            s5_raw = conn.execute(_SQL_S5_REPORT, params).fetchall()
+        finally:
+            conn.close()
+
+        _S3C = ("ticker", "routing_status", "routed_setup_types",
+                "passed_eligibility", "eligibility_fail_reasons")
+        _S4C = ("ticker", "setup_type", "setup_score", "setup_passed", "setup_fail_reason",
+                "rvol", "atr_pct", "distance_to_ema20_pct", "distance_to_ema50_pct",
+                "explanation_json")
+        _S5C = ("ticker", "setup_type", "setup_score", "estimated_rr",
+                "entry_price_raw", "stop_price_raw",
+                "disposition", "selected_flag", "rejection_reason", "mechanical_explanation")
+
+        s3 = [dict(zip(_S3C, r)) for r in s3_raw]
+        s4 = [dict(zip(_S4C, r)) for r in s4_raw]
+        s5 = [dict(zip(_S5C, r)) for r in s5_raw]
+
+        for r in s3:
+            r["routed_setup_types"]       = _parse_json_list(r["routed_setup_types"])
+            r["eligibility_fail_reasons"] = _parse_json_list(r["eligibility_fail_reasons"])
+        for r in s4:
+            r["explanation_json"] = _parse_json_dict(r["explanation_json"])
+        for r in s5:
+            r["mechanical_explanation"] = _parse_json_dict(r["mechanical_explanation"])
+            ep = _flt(r.get("entry_price_raw"))
+            sp = _flt(r.get("stop_price_raw"))
+            if r.get("stop_distance_pct") is None and ep and sp and ep > 0:
+                r["stop_distance_pct"] = (ep - sp) / ep
+
+        report: dict[str, Any] = {
+            "signal_date": signal_date.isoformat(),
+            "db_role": db_role,
+            "run_id": run_id,
+            "total_s3": len(s3),
+            "total_s4": len(s4),
+            "total_s5": len(s5),
+        }
+        report["routing_summary"]        = _rpt_routing(s3)
+        report["setup_funnel"]           = _rpt_setup_funnel(s3, s4, s5, setup_type_filter)
+        report["failure_reasons"]        = _rpt_failure_reasons(s4, setup_type_filter)
+        report["s5_rejection_reasons"]   = _rpt_s5_rejection_reasons(s5)
+        report["evidence_summaries"]     = _rpt_evidence(s4, s5, setup_type_filter)
+        report["borderline_failures"]    = _rpt_borderline(s4, top_n_borderline, setup_type_filter)
+        report["failure_layers"]         = _rpt_layers(s3, s4, s5)
+        report["final_trade_decisions"]  = _rpt_ftd(s5)
+        report["diagnostic_warnings"]   = _rpt_warnings(s3, s4, s5, setup_type_filter)
+
+        return ServiceResult(
+            status=sr.STATUS_SUCCESS,
+            run_id=run_id,
+            rows_processed=len(s3) + len(s4) + len(s5),
+            metadata={"report": report},
+        )
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -656,6 +780,465 @@ def _classify_risk_reason(raw: str) -> str:
     return f"risk.failure_reason.{label}"
 
 
+
+
+def _parse_json_list(v: Any) -> list:
+    if isinstance(v, list):
+        return v
+    if v is None:
+        return []
+    try:
+        r = json.loads(v)
+        return r if isinstance(r, list) else []
+    except Exception:  # noqa: BLE001
+        return []
+
+
+def _parse_json_dict(v: Any) -> dict:
+    if isinstance(v, dict):
+        return v
+    if v is None:
+        return {}
+    try:
+        r = json.loads(v)
+        return r if isinstance(r, dict) else {}
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+def _flt(v: Any) -> float | None:
+    if v is None:
+        return None
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def _stats_of(values: list[Any]) -> dict[str, Any]:
+    vals = [v for v in (_flt(x) for x in values) if v is not None]
+    if not vals:
+        return {"n": 0, "min": None, "mean": None, "max": None,
+                "p25": None, "p50": None, "p75": None}
+    n = len(vals)
+    s = sorted(vals)
+
+    def _q(frac: float) -> float:
+        return round(s[max(0, min(n - 1, int(n * frac)))], 4)
+
+    return {
+        "n": n,
+        "min": round(s[0], 4),
+        "mean": round(sum(vals) / n, 4),
+        "max": round(s[-1], 4),
+        "p25": _q(0.25),
+        "p50": _q(0.50),
+        "p75": _q(0.75),
+    }
+
+
+def _pct_f(n: int, d: int) -> float:
+    return round(n / d, 4) if d > 0 else 0.0
+
+
+def _collect(d: dict[str, list], key: str, val: Any) -> None:
+    v = _flt(val)
+    if v is not None:
+        d.setdefault(key, []).append(v)
+
+
+def _extract_numeric(s: str) -> str:
+    """From 'close=12.43' return '12.43'; from '57.0' return '57.0'."""
+    s = s.strip()
+    return s.split("=", 1)[1].strip() if "=" in s else s
+
+
+def _parse_example(example: str | None) -> tuple[str | None, str | None, str | None]:
+    """Split 'actual<threshold' → ('actual', 'threshold', '<').
+
+    Handles plain numerics ('0.91<1.5') and labelled pairs
+    ('close=12.43>base_high=12.42'). Ignores '=' as a separator so that
+    labelled-pair format is not mis-split.
+
+    Returns (actual_value, threshold_value, direction) where direction is
+    '<' or '>' (None when unparseable).
+    """
+    if not example:
+        return None, None, None
+    for sep in ("<", ">"):
+        if sep in example:
+            left, right = example.split(sep, 1)
+            return _extract_numeric(left), _extract_numeric(right), sep
+    return example.strip(), None, None
+
+
+def _rpt_routing(s3: list[dict]) -> dict:
+    total = len(s3)
+    passed = sum(1 for r in s3 if r.get("passed_eligibility"))
+    routed = sum(1 for r in s3 if r["routing_status"] == "routed")
+    not_routed = sum(
+        1 for r in s3
+        if r["routing_status"] == "no_route" and r.get("passed_eligibility")
+    )
+    ineligible = total - passed
+    multi = sum(1 for r in s3 if len(r["routed_setup_types"]) > 1)
+    by_setup: dict[str, int] = {st: 0 for st in ACTIVE_SETUP_TYPES}
+    for r in s3:
+        for st in r["routed_setup_types"]:
+            if st in by_setup:
+                by_setup[st] += 1
+    return {
+        "total_universe": total,
+        "passed_eligibility": passed,
+        "failed_eligibility": ineligible,
+        "routed": routed,
+        "not_routed": not_routed,
+        "ineligible_no_route": ineligible,
+        "multi_routed": multi,
+        "by_setup": by_setup,
+    }
+
+
+def _rpt_setup_funnel(
+    s3: list[dict],
+    s4: list[dict],
+    s5: list[dict],
+    setup_type_filter: str | None,
+) -> list[dict]:
+    routed: dict[str, int] = {st: 0 for st in ACTIVE_SETUP_TYPES}
+    for r in s3:
+        for st in r["routed_setup_types"]:
+            if st in routed:
+                routed[st] += 1
+
+    s4_pass: dict[str, int] = {st: 0 for st in ACTIVE_SETUP_TYPES}
+    s4_fail: dict[str, int] = {st: 0 for st in ACTIVE_SETUP_TYPES}
+    for r in s4:
+        st = r.get("setup_type") or ""
+        if st in s4_pass:
+            if r["setup_passed"]:
+                s4_pass[st] += 1
+            else:
+                s4_fail[st] += 1
+
+    s5_cnt: dict[str, int] = {st: 0 for st in ACTIVE_SETUP_TYPES}
+    s5_sel: dict[str, int] = {st: 0 for st in ACTIVE_SETUP_TYPES}
+    for r in s5:
+        st = r.get("setup_type") or ""
+        if st in s5_cnt:
+            s5_cnt[st] += 1
+            if r["selected_flag"]:
+                s5_sel[st] += 1
+
+    result = []
+    for st in ACTIVE_SETUP_TYPES:
+        if setup_type_filter and st != setup_type_filter:
+            continue
+        pass_c = s4_pass[st]
+        fail_c = s4_fail[st]
+        total_v = pass_c + fail_c
+        result.append({
+            "setup_type": st,
+            "routed_count": routed[st],
+            "validator_pass_count": pass_c,
+            "validator_fail_count": fail_c,
+            "pass_rate": _pct_f(pass_c, total_v),
+            "step4_count": total_v,
+            "step5_count": s5_cnt[st],
+            "selected_count": s5_sel[st],
+        })
+    return result
+
+
+def _rpt_failure_reasons(s4: list[dict], setup_type_filter: str | None) -> list[dict]:
+    fail_total: dict[str, int] = {st: 0 for st in ACTIVE_SETUP_TYPES}
+    counts: dict[tuple[str, str], int] = {}
+    examples: dict[tuple[str, str], list[tuple[str | None, str | None, str]]] = {}
+    for r in s4:
+        st = r.get("setup_type") or ""
+        if st not in ACTIVE_SETUP_TYPES:
+            continue
+        if setup_type_filter and st != setup_type_filter:
+            continue
+        if not r["setup_passed"]:
+            fail_total[st] += 1
+            key, example = _normalize_validation_reason(r.get("setup_fail_reason"))
+            k = (st, key)
+            counts[k] = counts.get(k, 0) + 1
+            ex_list = examples.setdefault(k, [])
+            if len(ex_list) < 3:
+                actual, threshold, direction = _parse_example(example)
+                ex_list.append((actual, threshold, direction, r.get("ticker") or "?"))
+
+    result = []
+    for (st, reason), cnt in sorted(counts.items(), key=lambda x: (x[0][0], -x[1])):
+        ex = examples.get((st, reason), [])
+        result.append({
+            "setup_type": st,
+            "failure_reason": reason,
+            "count": cnt,
+            "pct_of_setup_failures": _pct_f(cnt, fail_total[st]),
+            "actual_value": ex[0][0] if ex else None,
+            "threshold": ex[0][1] if ex else None,
+            "direction": ex[0][2] if ex else None,
+            "sample_tickers": [e[3] for e in ex],
+        })
+    return result
+
+
+def _rpt_evidence(
+    s4: list[dict],
+    s5: list[dict],
+    setup_type_filter: str | None,
+) -> dict[str, dict]:
+    data: dict[str, dict[str, list]] = {st: {} for st in ACTIVE_SETUP_TYPES}
+
+    for r in s4:
+        st = r.get("setup_type") or ""
+        if st not in data or (setup_type_filter and st != setup_type_filter):
+            continue
+        d = data[st]
+        _collect(d, "setup_score", r.get("setup_score"))
+        if r["setup_passed"]:
+            _collect(d, "rvol", r.get("rvol"))
+            _collect(d, "atr_pct", r.get("atr_pct"))
+            _collect(d, "ema20_distance_pct", r.get("distance_to_ema20_pct"))
+            _collect(d, "ema50_distance_pct", r.get("distance_to_ema50_pct"))
+            _collect(d, "estimated_rr", r.get("estimated_rr"))
+            _collect(d, "stop_distance_pct", r.get("stop_distance_pct"))
+            expl = r.get("explanation_json") or {}
+            for field in ("range_width_pct", "price_position_in_range"):
+                _collect(d, field, expl.get(field))
+            _collect(d, "days_in_range",
+                     expl.get("days_in_range") or expl.get("range_duration"))
+            if st == "consolidation_base":
+                _collect(d, "support_found", 1 if expl.get("support_raw") is not None else 0)
+                _collect(d, "resistance_found", 1 if expl.get("resistance_raw") is not None else 0)
+
+    for r in s5:
+        st = r.get("setup_type") or ""
+        if st not in data or (setup_type_filter and st != setup_type_filter):
+            continue
+        d = data[st]
+        _collect(d, "estimated_rr_s5", r.get("estimated_rr"))
+        _collect(d, "stop_distance_pct_s5", r.get("stop_distance_pct"))
+
+    return {
+        st: {k: _stats_of(v) for k, v in d.items()}
+        for st, d in data.items()
+        if not setup_type_filter or st == setup_type_filter
+    }
+
+
+def _rpt_borderline(
+    s4: list[dict],
+    top_n: int,
+    setup_type_filter: str | None,
+) -> dict[str, list[dict]]:
+    by_setup: dict[str, list] = {}
+    for r in s4:
+        st = r.get("setup_type") or ""
+        if st not in ACTIVE_SETUP_TYPES:
+            continue
+        if setup_type_filter and st != setup_type_filter:
+            continue
+        if not r["setup_passed"]:
+            by_setup.setdefault(st, []).append(r)
+
+    result: dict[str, list[dict]] = {}
+    for st, rows in by_setup.items():
+        rows.sort(key=lambda x: -(float(x.get("setup_score") or 0)))
+        top = []
+        for r in rows[:top_n]:
+            key, example = _normalize_validation_reason(r.get("setup_fail_reason"))
+            actual, threshold, direction = _parse_example(example)
+            top.append({
+                "ticker": r["ticker"],
+                "setup_score": round(float(r.get("setup_score") or 0), 4),
+                "failed_rule": key,
+                "actual_value": actual,
+                "threshold": threshold,
+                "direction": direction,
+            })
+        result[st] = top
+    return result
+
+
+def _rpt_layers(
+    s3: list[dict],
+    s4: list[dict],
+    s5: list[dict],
+) -> dict[str, int]:
+    ineligible = sum(1 for r in s3 if not r.get("passed_eligibility"))
+    not_routed = sum(
+        1 for r in s3
+        if r["routing_status"] == "no_route" and r.get("passed_eligibility")
+    )
+    routed_tickers = {r["ticker"] for r in s3 if r["routing_status"] == "routed"}
+    s4_any_pass    = {r["ticker"] for r in s4 if r["setup_passed"]}
+    s4_all_fail    = routed_tickers - s4_any_pass
+    s5_tickers     = {r["ticker"] for r in s5}
+    s5_selected    = {r["ticker"] for r in s5 if r["selected_flag"]}
+    s5_watchlist   = {r["ticker"] for r in s5 if r["disposition"] == "WATCHLIST_ONLY"}
+    s5_rejected_n  = sum(1 for r in s5 if r["disposition"] == "REJECTED")
+    div_rejected   = {
+        r["ticker"] for r in s5
+        if r.get("rejection_reason") in ("sector_cap", "industry_cap")
+    }
+    buy_not_sel = {
+        r["ticker"] for r in s5
+        if r["disposition"] == "BUY" and not r["selected_flag"]
+    }
+    validator_pass_no_s5 = s4_any_pass - s5_tickers
+
+    return {
+        "ineligible": ineligible,
+        "not_routed": not_routed,
+        "routed_all_validators_failed": len(s4_all_fail),
+        "validator_passed_no_step5": len(validator_pass_no_s5),
+        "step5_rejected": s5_rejected_n,
+        "step5_watchlist_not_selected": len(s5_watchlist - s5_selected),
+        "step5_buy_diversity_rejected": len(buy_not_sel & div_rejected),
+        "selected": len(s5_selected),
+    }
+
+
+def _rpt_ftd(s5: list[dict]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for r in s5:
+        mech = r.get("mechanical_explanation") or {}
+        ftd = mech.get("final_trade_decision") if isinstance(mech, dict) else None
+        if not ftd:
+            # Rows written before P0 deployment lack the key — infer from disposition
+            disp = r.get("disposition") or ""
+            ftd = ("REJECTED" if disp == "REJECTED"
+                   else "WATCHLIST_ONLY" if disp == "WATCHLIST_ONLY"
+                   else "unknown")
+        counts[str(ftd)] = counts.get(str(ftd), 0) + 1
+    return counts
+
+
+_DOMINANCE_THRESHOLD: Final[float] = 0.60   # share of selected = dominance warning
+_CB_PASS_RATE_WARN: Final[float] = 0.05     # consolidation_base pass rate below this = warning
+
+
+def _rpt_s5_rejection_reasons(s5: list[dict]) -> list[dict]:
+    """Aggregate step5 rejection_reason by normalised key across all dispositions."""
+    total_with_reason = 0
+    counts: dict[str, int] = {}
+    examples: dict[str, list[tuple[str | None, str | None, str | None, str]]] = {}
+
+    for r in s5:
+        raw = r.get("rejection_reason")
+        if not raw:
+            continue
+        total_with_reason += 1
+        key, example = _normalize_validation_reason(raw)
+        counts[key] = counts.get(key, 0) + 1
+        ex_list = examples.setdefault(key, [])
+        if len(ex_list) < 3:
+            actual, threshold, direction = _parse_example(example)
+            ex_list.append((actual, threshold, direction, r.get("ticker") or "?"))
+
+    result = []
+    for key, cnt in sorted(counts.items(), key=lambda x: -x[1]):
+        ex = examples.get(key, [])
+        result.append({
+            "reason": key,
+            "count": cnt,
+            "pct_of_total": _pct_f(cnt, total_with_reason),
+            "actual_value": ex[0][0] if ex else None,
+            "threshold": ex[0][1] if ex else None,
+            "direction": ex[0][2] if ex else None,
+            "sample_tickers": [e[3] for e in ex],
+        })
+    return result
+
+
+def _rpt_warnings(
+    s3: list[dict],
+    s4: list[dict],
+    s5: list[dict],
+    setup_type_filter: str | None,  # noqa: ARG001 — reserved for future use
+) -> list[dict]:
+    """Produce structured diagnostic warnings from pipeline data."""
+    warnings: list[dict] = []
+
+    # 1. Setup dominance in final selection
+    total_sel = sum(1 for r in s5 if r.get("selected_flag"))
+    sel_by_setup: dict[str, int] = {}
+    for r in s5:
+        if r.get("selected_flag"):
+            st = r.get("setup_type") or "unknown"
+            sel_by_setup[st] = sel_by_setup.get(st, 0) + 1
+    if total_sel > 0:
+        for st, cnt in sorted(sel_by_setup.items(), key=lambda x: -x[1]):
+            share = cnt / total_sel
+            if share >= _DOMINANCE_THRESHOLD:
+                warnings.append({
+                    "code": f"setup_dominance.{st}_selected_share_high",
+                    "severity": "warn",
+                    "message": (
+                        f"{st} selected {cnt}/{total_sel} = "
+                        f"{share * 100:.0f}% of final list"
+                    ),
+                    "detail": {
+                        "setup_type": st,
+                        "selected_count": cnt,
+                        "total_selected": total_sel,
+                        "share": round(share, 4),
+                    },
+                })
+
+    # 2. Consolidation health: pass rate < 5%
+    cb_routed = sum(
+        1 for r in s3
+        if "consolidation_base" in (r.get("routed_setup_types") or [])
+    )
+    cb_s4 = [r for r in s4 if r.get("setup_type") == "consolidation_base"]
+    cb_pass = sum(1 for r in cb_s4 if r.get("setup_passed"))
+    cb_total = len(cb_s4)
+    if cb_routed > 0 and cb_total > 0:
+        cb_rate = cb_pass / cb_total
+        if cb_rate < _CB_PASS_RATE_WARN:
+            warnings.append({
+                "code": "consolidation_validator_too_strict_or_misconfigured",
+                "severity": "warn",
+                "message": (
+                    f"consolidation_base: routed={cb_routed}, "
+                    f"passed={cb_pass}/{cb_total}, "
+                    f"pass_rate={cb_rate * 100:.1f}%"
+                ),
+                "detail": {
+                    "routed": cb_routed,
+                    "passed": cb_pass,
+                    "total_validated": cb_total,
+                    "pass_rate": round(cb_rate, 4),
+                },
+            })
+
+    # 3. Consolidation evidence integrity: passed but no support_raw or resistance_raw
+    cb_passed_rows = [r for r in cb_s4 if r.get("setup_passed")]
+    no_sr_count = 0
+    for r in cb_passed_rows:
+        expl = r.get("explanation_json") or {}
+        if expl.get("support_raw") is None and expl.get("resistance_raw") is None:
+            no_sr_count += 1
+    if no_sr_count > 0:
+        warnings.append({
+            "code": "consolidation_passed_without_support_resistance_evidence",
+            "severity": "warn",
+            "message": (
+                f"{no_sr_count}/{len(cb_passed_rows)} passed consolidation_base "
+                "candidates have no support_raw or resistance_raw in evidence"
+            ),
+            "detail": {
+                "affected_count": no_sr_count,
+                "total_passed": len(cb_passed_rows),
+            },
+        })
+
+    return warnings
 
 
 def _normalize_validation_reason(raw: str | None) -> tuple[str, str | None]:

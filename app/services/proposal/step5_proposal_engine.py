@@ -23,6 +23,10 @@ Phase 5 accepted contracts:
                → fixed-R fallback is acceptable; target_is_structural=False.
   Fix 4 — Invalidation level: invalidation_level_raw = stop_price_raw, documented
            in mechanical_explanation alongside invalidation_reason (stop basis label).
+  P0    — final_trade_decision: separates candidate quality (setup_score / disposition)
+           from action readiness. BUY disposition may be demoted to WAIT_FOR_BREAKOUT,
+           WAIT_FOR_PULLBACK_CONFIRMATION, or WAIT_FOR_RISK_PLAN_FIX before writing to
+           mechanical_explanation. No schema change — stored in mechanical_explanation JSON.
 
 Pipeline position (01d_MODULES_AND_PIPELINE.md):
     Step 4 (per setup_config_id) → Step 5 (once per signal_date) → Outcome Queue
@@ -90,6 +94,32 @@ WATCHLIST_STOP_TOO_WIDE: Final[str] = "stop_distance_exceeds_max"
 WATCHLIST_TARGET_ROOM_INSUFFICIENT: Final[str] = "target_room_insufficient"
 
 # ---------------------------------------------------------------------------
+# Final trade decision constants (P0 trade readiness, stored in mechanical_explanation)
+# ---------------------------------------------------------------------------
+FTD_BUY: Final[str] = "BUY"
+FTD_WAIT_FOR_BREAKOUT: Final[str] = "WAIT_FOR_BREAKOUT"
+FTD_WAIT_FOR_PULLBACK_CONFIRMATION: Final[str] = "WAIT_FOR_PULLBACK_CONFIRMATION"
+FTD_WAIT_FOR_RISK_PLAN_FIX: Final[str] = "WAIT_FOR_RISK_PLAN_FIX"
+FTD_WATCHLIST_ONLY: Final[str] = "WATCHLIST_ONLY"
+FTD_REJECTED: Final[str] = "REJECTED"
+
+# Maps final_trade_decision → effective_disposition (P0: action-readiness layer).
+# Any WAIT_* → WATCHLIST_ONLY so the dashboard never shows a clean BUY when entry
+# conditions are not yet met.
+_FTD_TO_EFFECTIVE_DISP: Final[dict[str, str]] = {
+    FTD_BUY: DISPOSITION_BUY,
+    FTD_WAIT_FOR_BREAKOUT: DISPOSITION_WATCHLIST,
+    FTD_WAIT_FOR_PULLBACK_CONFIRMATION: DISPOSITION_WATCHLIST,
+    FTD_WAIT_FOR_RISK_PLAN_FIX: DISPOSITION_WATCHLIST,
+    FTD_WATCHLIST_ONLY: DISPOSITION_WATCHLIST,
+    FTD_REJECTED: DISPOSITION_REJECTED,
+}
+
+# Minimum stop distance in ATR units to qualify as a tradeable risk plan.
+# Config-overridable via buy_rules.min_stop_distance_atr (P4).
+_STOP_DISTANCE_ATR_MIN: Final[float] = 0.50
+
+# ---------------------------------------------------------------------------
 # Market regime → market_score mapping (01c §63)
 # ---------------------------------------------------------------------------
 _MARKET_SCORE: Final[dict[str, float]] = {
@@ -102,11 +132,16 @@ _MARKET_SCORE: Final[dict[str, float]] = {
 
 # ---------------------------------------------------------------------------
 # Proposal score weights (01c §63)
+# _W_STOP_DIST: stop tightness quality; reduces confirmation weight to balance RVOL
 # ---------------------------------------------------------------------------
-_W_SETUP: Final[float] = 0.45
+_W_SETUP: Final[float] = 0.40
 _W_RR: Final[float] = 0.25
-_W_CONFIRMATION: Final[float] = 0.20
+_W_CONFIRMATION: Final[float] = 0.15
 _W_MARKET: Final[float] = 0.10
+_W_STOP_DIST: Final[float] = 0.10
+
+# Normalised stop distance at which stop_quality score reaches 0 (10% = max acceptable)
+_STOP_QUALITY_ZERO_PCT: Final[float] = 0.10
 
 # ---------------------------------------------------------------------------
 # Metadata keys contract
@@ -226,6 +261,12 @@ def _parse_risk_label_config(cfg: dict) -> dict[str, Any]:
         or _DEFAULT_MIN_TARGET_ROOM_PCT
     )
 
+    # P4: config-driven minimum stop distance in ATR units (FTD gate)
+    min_stop_distance_atr = (
+        _f(buy_rules.get("min_stop_distance_atr", _STOP_DISTANCE_ATR_MIN))
+        or _STOP_DISTANCE_ATR_MIN
+    )
+
     ranking = cfg.get("ranking", {})
     top_n = int(ranking.get("top_n", 20))
     if top_n <= 0:
@@ -248,6 +289,7 @@ def _parse_risk_label_config(cfg: dict) -> dict[str, Any]:
         "block_if_regime_null": block_if_regime_null,
         "max_stop_distance_pct": max_stop_distance_pct,
         "min_target_room_pct": min_target_room_pct,
+        "min_stop_distance_atr": min_stop_distance_atr,
         "top_n": top_n,
         "hard_cap_enabled": hard_cap_enabled,
         "max_sector_count": max_sector,
@@ -684,6 +726,61 @@ def _assign_disposition(
 
 
 # ---------------------------------------------------------------------------
+# Final trade decision (P0 — candidate quality vs. action readiness)
+# ---------------------------------------------------------------------------
+
+def _compute_final_trade_decision(
+    setup_type: str,
+    disposition: str,
+    close_raw: float,
+    resistance_raw: float | None,
+    stop_distance_atr: float | None,
+    dist_ema20: float | None,
+    rvol_val: float | None,
+    roc20_val: float | None = None,
+    ema20_slope_val: float | None = None,
+    min_stop_distance_atr: float = _STOP_DISTANCE_ATR_MIN,
+) -> tuple[str, list[str]]:
+    """Return (final_trade_decision, reason_codes).
+
+    Disposition BUY passes through unless a readiness gate fires:
+      breakout — price must have cleared resistance.
+      all      — stop must be ≥ min_stop_distance_atr ATR from entry (P4: config-driven).
+      pullback — three independent confirmation gates (P1):
+                   roc20 < 0            → momentum deteriorating
+                   ema20_slope < 0      → EMA20 declining
+                   close below EMA20 without volume surge (rvol < 1.2) → no bounce
+    WATCHLIST_ONLY / REJECTED pass through unchanged.
+    """
+    if disposition == DISPOSITION_REJECTED:
+        return FTD_REJECTED, []
+    if disposition == DISPOSITION_WATCHLIST:
+        return FTD_WATCHLIST_ONLY, []
+
+    if setup_type == "breakout":
+        if resistance_raw is not None and close_raw > 0 and close_raw < resistance_raw:
+            return FTD_WAIT_FOR_BREAKOUT, ["price_below_resistance"]
+
+    if stop_distance_atr is not None and stop_distance_atr < min_stop_distance_atr:
+        return FTD_WAIT_FOR_RISK_PLAN_FIX, ["stop_too_tight_vs_atr"]
+
+    if setup_type == "pullback":
+        wait_reasons: list[str] = []
+        if roc20_val is not None and roc20_val < 0:
+            wait_reasons.append("pullback_negative_momentum")
+        if ema20_slope_val is not None and ema20_slope_val < 0:
+            wait_reasons.append("ema20_slope_negative")
+        below_ema20 = dist_ema20 is not None and dist_ema20 < 0
+        vol_confirmed = rvol_val is not None and rvol_val >= 1.2
+        if below_ema20 and not vol_confirmed:
+            wait_reasons.append("rebound_not_confirmed")
+        if wait_reasons:
+            return FTD_WAIT_FOR_PULLBACK_CONFIRMATION, wait_reasons
+
+    return FTD_BUY, []
+
+
+# ---------------------------------------------------------------------------
 # Proposal score (01c §63)
 # ---------------------------------------------------------------------------
 
@@ -692,14 +789,21 @@ def _proposal_score_raw(
     estimated_rr: float | None,
     confirmation_score: float,
     market_regime: str | None,
+    stop_distance_pct: float | None = None,
 ) -> float:
     rrsc = _rr_score(estimated_rr)
     msc = _MARKET_SCORE.get(market_regime or "", 0.0) if market_regime else 0.0
+    # Tight stop = higher stop quality. Unknown stop treated as neutral (50).
+    if stop_distance_pct is not None and stop_distance_pct >= 0:
+        stop_quality = _clamp(100.0 * max(0.0, 1.0 - stop_distance_pct / _STOP_QUALITY_ZERO_PCT))
+    else:
+        stop_quality = 50.0
     return _clamp(
         _W_SETUP * setup_score
         + _W_RR * rrsc
         + _W_CONFIRMATION * confirmation_score
         + _W_MARKET * msc
+        + _W_STOP_DIST * stop_quality
     )
 
 
@@ -769,6 +873,8 @@ SELECT
     f.avg_dollar_volume_20d,
     f.distance_to_ema20_pct,
     f.distance_to_ema50_pct,
+    f.roc20,
+    f.ema20_slope,
     p.close_raw,
     p.close_adj
 FROM daily_features_current f
@@ -781,6 +887,7 @@ _FEATURE_COLS: Final[tuple[str, ...]] = (
     "swing_high", "swing_low", "support_level", "resistance_level",
     "next_resistance_level", "base_high", "base_low",
     "avg_dollar_volume_20d", "distance_to_ema20_pct", "distance_to_ema50_pct",
+    "roc20", "ema20_slope",
     "close_raw", "close_adj",
 )
 
@@ -995,6 +1102,7 @@ class Step5ProposalEngine:
             entry = _f(a.get("entry_price_raw")) or _f(feat.get("close_raw"))
             close_raw = _f(feat.get("close_raw")) or entry or 0.0
             close_adj = _f(feat.get("close_adj")) or close_raw or 0.0
+            resistance_raw_feat = _raw_conv(_f(feat.get("resistance_level")), close_raw, close_adj)
 
             if not setup_passed:
                 enriched.append(self._rejected_item(a, ticker, setup_type, setup_score,
@@ -1019,12 +1127,22 @@ class Step5ProposalEngine:
             rvol_val = _f(a.get("rvol")) or _f(feat.get("rvol20"))
             confirmation_score = _clamp((rvol_val or 0.0) * 50.0)
 
+            # P1: pullback confirmation inputs from features
+            roc20_val = _f(feat.get("roc20"))
+            ema20_slope_val = _f(feat.get("ema20_slope"))
+
             risk_feat: dict[str, Any] = {
                 **feat,
                 "atr_pct": _f(a.get("atr_pct")) or _f(feat.get("atr_pct")),
                 "distance_to_ema20_pct": _f(a.get("distance_to_ema20_pct")),
                 "distance_to_ema50_pct": _f(a.get("distance_to_ema50_pct")),
             }
+
+            atr_pct_val = _f(risk_feat.get("atr_pct"))
+            stop_distance_atr: float | None = None
+            if stop_distance_pct is not None and atr_pct_val is not None and atr_pct_val > 0:
+                stop_distance_atr = stop_distance_pct / atr_pct_val
+            dist_ema20 = _f(a.get("distance_to_ema20_pct"))
 
             risk_score, risk_label, risk_reasons = _compute_risk_score(
                 feat=risk_feat, entry=eff_entry, stop=stop,
@@ -1047,8 +1165,31 @@ class Step5ProposalEngine:
                 disposition = DISPOSITION_WATCHLIST
                 watchlist_reason = WATCHLIST_TARGET_ROOM_INSUFFICIENT
 
+            min_stop_atr = float(cfg.get("min_stop_distance_atr", _STOP_DISTANCE_ATR_MIN))
+            final_trade_decision, ftd_reason_codes = _compute_final_trade_decision(
+                setup_type=setup_type,
+                disposition=disposition,
+                close_raw=close_raw,
+                resistance_raw=resistance_raw_feat,
+                stop_distance_atr=stop_distance_atr,
+                dist_ema20=dist_ema20,
+                rvol_val=rvol_val,
+                roc20_val=roc20_val,
+                ema20_slope_val=ema20_slope_val,
+                min_stop_distance_atr=min_stop_atr,
+            )
+            # P0: effective_disposition = authoritative action-readiness output
+            effective_disposition = _FTD_TO_EFFECTIVE_DISP.get(
+                final_trade_decision, DISPOSITION_WATCHLIST
+            )
+            effective_risk_label = (
+                risk_label if final_trade_decision == FTD_BUY
+                else constants.RISK_LABEL_HIGH
+            )
+
             psc_raw = _proposal_score_raw(
-                setup_score, estimated_rr, confirmation_score, market_regime
+                setup_score, estimated_rr, confirmation_score, market_regime,
+                stop_distance_pct=stop_distance_pct,
             )
 
             # Fix 4: invalidation level = stop_price_raw; documented explicitly
@@ -1093,6 +1234,11 @@ class Step5ProposalEngine:
                 "stop_basis": stop_basis,
                 "target_basis": target_basis,
                 "resistance_blocks": resistance_blocks,
+                # P0 trade readiness
+                "final_trade_decision": final_trade_decision,
+                "ftd_reason_codes": ftd_reason_codes,
+                "effective_disposition": effective_disposition,
+                "effective_risk_label": effective_risk_label,
             })
 
         # Dedupe multi-route
@@ -1150,6 +1296,12 @@ class Step5ProposalEngine:
                 "invalidation_level_raw": item.get("invalidation_level_raw"),
                 "invalidation_reason": item.get("invalidation_reason"),
                 "resistance_blocks": item.get("resistance_blocks", False),
+                # P0: final trade decision (separate from setup quality)
+                "final_trade_decision": item.get("final_trade_decision", FTD_REJECTED),
+                "ftd_reason_codes": item.get("ftd_reason_codes", []),
+                # P0: authoritative action-readiness fields (WAIT_* → WATCHLIST_ONLY)
+                "effective_disposition": item.get("effective_disposition", DISPOSITION_WATCHLIST),
+                "effective_risk_label": item.get("effective_risk_label", constants.RISK_LABEL_HIGH),
             }
 
             rows.append({
@@ -1240,6 +1392,10 @@ class Step5ProposalEngine:
             "stop_basis": None,
             "target_basis": None,
             "resistance_blocks": False,
+            "final_trade_decision": FTD_REJECTED,
+            "ftd_reason_codes": [],
+            "effective_disposition": DISPOSITION_REJECTED,
+            "effective_risk_label": constants.RISK_LABEL_HIGH,
         }
 
     @staticmethod
