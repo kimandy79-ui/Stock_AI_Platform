@@ -857,18 +857,20 @@ def _do_run_pipeline(role: str, run_date: date | None = None) -> None:
     effective_date = run_date or date.today()
 
     _STEP_LABELS: dict[str, str] = {
-        "benchmark_etf_ingestion":  "📥 Ingesting benchmark / ETF prices",
-        "universe_ingestion":       "🌐 Building universe snapshot",
-        "price_ingestion":          "📥 Ingesting stock prices",
-        "validation":               "✅ Validating price data",
-        "mutation_detection":       "🔍 Detecting price mutations",
-        "feature_calculation":      "⚙ Calculating technical features",
-        "step3_screening":          "🔎 Universal eligibility + routing (Step 3)",
-        "step4_analysis":           "📊 Analysing setups (Step 4)",
-        "step5_proposals":          "💡 Generating proposals (Step 5)",
-        "outcome_queue_creation":   "📋 Creating outcome queue",
-        "outcome_processing":       "📈 Processing outcomes",
-        "dashboard_materialization":"🖥 Materialising dashboard",
+        "benchmark_etf_ingestion":       "📥 Ingesting benchmark / ETF prices",
+        "universe_ingestion":            "🌐 Building universe snapshot",
+        "earnings_calendar_refresh":     "📅 Refreshing earnings calendar",
+        "price_ingestion":               "📥 Ingesting stock prices",
+        "validation":                    "✅ Validating price data",
+        "mutation_detection":            "🔍 Detecting price mutations",
+        "feature_calculation":           "⚙ Calculating technical features",
+        "market_regime_classification":  "📡 Classifying market regime",
+        "step3_universal_eligibility":   "🔎 Universal eligibility + routing (Step 3)",
+        "step4_setup_validation":        "📊 Validating setups (Step 4)",
+        "step5_proposals":               "💡 Generating proposals (Step 5)",
+        "outcome_queue_creation":        "📋 Creating outcome queue",
+        "outcome_processing":            "📈 Processing outcomes",
+        "dashboard_materialization":     "🖥 Materialising dashboard",
     }
 
     result_holder: dict = {}
@@ -908,10 +910,11 @@ def _do_run_pipeline(role: str, run_date: date | None = None) -> None:
 
     while thread.is_alive():
         elapsed = int(_time.time() - start_ts)
-        # Advance estimated step every ~20s as a visual progress indicator.
-        estimated_idx = min(int(elapsed / 20), len(step_keys) - 1)
+        # Advance estimated step every ~20s. Clamped to second-to-last so the
+        # bar never claims the final step is done while still running.
+        estimated_idx = min(int(elapsed / 20), len(step_keys) - 2)
         current_label = _STEP_LABELS.get(step_keys[estimated_idx], "Running…")
-        # Display as 1-based: step 1 of 12 is already running at t=0.
+        # Display as 1-based.
         completed_count = estimated_idx + 1
         total_steps = len(_STEP_LABELS)
         bar_filled = "█" * completed_count

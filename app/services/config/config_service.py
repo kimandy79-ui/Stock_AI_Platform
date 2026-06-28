@@ -121,7 +121,7 @@ class ConfigService:
         self._db = db_manager
 
     def _query(self, db_role: str, sql: str, params: list[Any]) -> list[tuple]:
-        connection = self._db.connect(db_role, read_only=True)
+        connection = self._db.connect(db_role)
         try:
             return connection.execute(sql, params).fetchall()
         finally:

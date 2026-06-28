@@ -832,7 +832,7 @@ class Step4AnalysisEngine:
         map and a ticker -> ``trend_resume`` history-ok flag map. The read
         connection is closed before any computation.
         """
-        connection = self._db.connect(db_role, read_only=True)
+        connection = self._db.connect(db_role)
         try:
             candidate_rows = connection.execute(
                 _SELECT_CANDIDATES, [signal_date, strategy_config_id]

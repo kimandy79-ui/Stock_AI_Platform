@@ -220,7 +220,7 @@ def _parse_universe_config(ub: dict[str, Any]) -> tuple[float, float, list[str]]
 
 
 def _load_active_setup_configs(db_mgr: _DbManagerLike, db_role: str) -> list[dict[str, Any]]:
-    conn = db_mgr.connect(db_role, read_only=True)
+    conn = db_mgr.connect(db_role)
     try:
         rows = conn.execute(
             "SELECT config_id, setup_type, config_json "
@@ -648,7 +648,7 @@ class Step3UniversalEligibilityEngine:
     # -----------------------------------------------------------------------
     def _read(self, db_role: str, signal_date: date) -> list[dict[str, Any]]:
         sig_iso = signal_date.isoformat()
-        conn = self._db.connect(db_role, read_only=True)
+        conn = self._db.connect(db_role)
         try:
             rows = conn.execute(_SQL_READ_UNIVERSE, [sig_iso, sig_iso]).fetchall()
         finally:

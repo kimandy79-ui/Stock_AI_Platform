@@ -1020,7 +1020,7 @@ class Step5ProposalEngine:
     # ------------------------------------------------------------------ #
 
     def _load_risk_label_config(self, db_role: str) -> dict:
-        conn = self._db.connect(db_role, read_only=True)
+        conn = self._db.connect(db_role)
         try:
             rows = conn.execute(_SQL_READ_RISK_CONFIG).fetchall()
         finally:
@@ -1031,7 +1031,7 @@ class Step5ProposalEngine:
         return json.loads(cfg_json) if isinstance(cfg_json, str) else cfg_json
 
     def _load_setup_configs(self, db_role: str) -> dict[str, dict]:
-        conn = self._db.connect(db_role, read_only=True)
+        conn = self._db.connect(db_role)
         try:
             rows = conn.execute(_SQL_READ_SETUP_CONFIGS).fetchall()
         finally:
@@ -1045,7 +1045,7 @@ class Step5ProposalEngine:
         return result
 
     def _read_analyses(self, db_role: str, signal_date: date) -> list[dict[str, Any]]:
-        conn = self._db.connect(db_role, read_only=True)
+        conn = self._db.connect(db_role)
         try:
             rows = conn.execute(_SQL_READ_ANALYSES, [signal_date.isoformat()]).fetchall()
         finally:
@@ -1053,7 +1053,7 @@ class Step5ProposalEngine:
         return [dict(zip(_ANALYSIS_COLS, r)) for r in rows]
 
     def _read_features(self, db_role: str, signal_date: date) -> dict[str, dict[str, Any]]:
-        conn = self._db.connect(db_role, read_only=True)
+        conn = self._db.connect(db_role)
         try:
             rows = conn.execute(_SQL_READ_FEATURES, [signal_date.isoformat()]).fetchall()
         finally:

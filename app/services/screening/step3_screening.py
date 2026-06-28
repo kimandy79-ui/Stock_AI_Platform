@@ -680,7 +680,7 @@ class Step3ScreeningEngine:
         Only the columns needed for filtering / scoring / the snapshot are
         selected. The read connection is closed before any computation.
         """
-        connection = self._db.connect(db_role, read_only=True)
+        connection = self._db.connect(db_role)
         try:
             input_rows = connection.execute(
                 _SELECT_SCREENING_INPUT, [signal_date]

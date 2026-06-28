@@ -454,7 +454,7 @@ class ExportPackageEngine:
         proposal_ids: list[str],
     ) -> list[dict[str, Any]]:
         """Read step5 rows with all 3 exact filters; closed read-only connection."""
-        connection = self._db.connect(db_role, read_only=True)
+        connection = self._db.connect(db_role)
         try:
             return self._fetch_dicts(
                 connection,
@@ -486,7 +486,7 @@ class ExportPackageEngine:
         ``tickers`` is guaranteed non-empty by the time this is called; the
         ticker-IN filter is always emitted, preventing leakage to unrelated rows.
         """
-        connection = self._db.connect(db_role, read_only=True)
+        connection = self._db.connect(db_role)
         try:
             step3 = self._fetch_dicts(
                 connection,
@@ -772,7 +772,7 @@ class ExportPackageEngine:
     # Simulation read phase.
     # ------------------------------------------------------------------ #
     def _read_sim_data(self, db_role: str, sim_run_id: str) -> dict[str, Any]:
-        connection = self._db.connect(db_role, read_only=True)
+        connection = self._db.connect(db_role)
         try:
             sim_run = self._fetch_dicts(
                 connection,

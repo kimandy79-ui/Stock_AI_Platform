@@ -505,6 +505,11 @@ class PipelineOrchestrator:
                     warnings.extend(outcome.warnings)
                     if not outcome.ok or outcome.warnings:
                         status = service_result.STATUS_SUCCESS_WITH_WARNINGS
+                    # Release Windows mmap regions after the benchmark write so
+                    # frozen M08/M09 (read_only=True) can open without conflict.
+                    if name == "benchmark_etf_ingestion":
+                        import gc as _gc
+                        _gc.collect()
                     db_err = self._record_step(name, steps_completed, db_role, run_id, log)
                     if db_err:
                         error = db_err
@@ -625,15 +630,17 @@ class PipelineOrchestrator:
     def _is_trading_day(day: "date") -> bool:
         """Return True if *day* is a NYSE trading day.
 
-        Delegates to :func:`app.utils.trading_calendar.is_trading_day` when
-        available; falls back to weekday-only check (no holiday exclusion) so
-        the guard never hard-crashes on a missing calendar dependency.
+        Hard-gates via :func:`app.utils.trading_calendar.is_trading_day`.
+        Raises RuntimeError if the calendar is unavailable — no weekday fallback
+        (AD-22.19: trading calendar must hard-gate, never degrade silently).
         """
         try:
             from app.utils.trading_calendar import is_trading_day
             return is_trading_day(day)
-        except Exception:  # noqa: BLE001
-            return day.weekday() < 5  # Mon–Fri weekday fallback
+        except Exception as exc:
+            raise RuntimeError(
+                f"trading calendar unavailable; cannot validate run_date={day}: {exc}"
+            ) from exc
 
     # ------------------------------------------------------------------ #
     # Lock protocol.
@@ -676,7 +683,7 @@ class PipelineOrchestrator:
         return (datetime.now() - heartbeat_at) > timedelta(seconds=LOCK_STALE_SECONDS)
 
     def _read_lock(self, db_role: str) -> tuple[Any, Any, Any] | None:
-        connection = self._db.connect(db_role, read_only=True)
+        connection = self._db.connect(db_role)
         try:
             cursor = connection.execute(_SELECT_LOCK, [PIPELINE_LOCK_NAME])
             row = cursor.fetchone()
@@ -696,7 +703,7 @@ class PipelineOrchestrator:
     # Already-run guard.
     # ------------------------------------------------------------------ #
     def _already_run(self, run_date: date, db_role: str) -> tuple[Any, Any] | None:
-        connection = self._db.connect(db_role, read_only=True)
+        connection = self._db.connect(db_role)
         try:
             cursor = connection.execute(_SELECT_ALREADY_RUN, [run_date])
             row = cursor.fetchone()
@@ -865,7 +872,7 @@ class PipelineOrchestrator:
         import gc
 
         # Check whether the calendar was already refreshed today.
-        conn = self._db.connect(db_role, read_only=True)
+        conn = self._db.connect(db_role)
         try:
             cursor = conn.execute(_SQL_EARNINGS_CHECK, [run_date])
             row = cursor.fetchone()
@@ -885,7 +892,7 @@ class PipelineOrchestrator:
             )
 
         # Load active stock tickers.
-        conn = self._db.connect(db_role, read_only=True)
+        conn = self._db.connect(db_role)
         try:
             cursor = conn.execute(_SQL_EARNINGS_TICKERS)
             tickers: list[str] = [r[0] for r in cursor.fetchall()]

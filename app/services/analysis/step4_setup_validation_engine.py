@@ -235,7 +235,7 @@ def _load_active_setup_configs(
     db_mgr: _DbManagerLike, db_role: str
 ) -> dict[str, dict[str, Any]]:
     """Return dict keyed by setup_type → parsed config dict."""
-    conn = db_mgr.connect(db_role, read_only=True)
+    conn = db_mgr.connect(db_role)
     try:
         rows = conn.execute(_SQL_READ_SETUP_CONFIGS).fetchall()
     finally:
@@ -257,7 +257,7 @@ def _read_routed_candidates(
     db_mgr: _DbManagerLike, db_role: str, signal_date: date
 ) -> list[dict[str, Any]]:
     sig_iso = signal_date.isoformat()
-    conn = db_mgr.connect(db_role, read_only=True)
+    conn = db_mgr.connect(db_role)
     try:
         rows = conn.execute(_SQL_READ_ROUTED, [sig_iso]).fetchall()
     finally:
@@ -285,7 +285,7 @@ def _read_features_prices(
 ) -> dict[str, dict[str, Any]]:
     """Return dict keyed by ticker → feature+price row."""
     sig_iso = signal_date.isoformat()
-    conn = db_mgr.connect(db_role, read_only=True)
+    conn = db_mgr.connect(db_role)
     try:
         rows = conn.execute(_SQL_READ_FEATURES_PRICES, [sig_iso]).fetchall()
     finally:

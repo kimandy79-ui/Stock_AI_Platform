@@ -354,7 +354,7 @@ class SetupModeFunnelDiagnosticsService:
         sd_iso = signal_date.isoformat()
         params = [run_id, sd_iso]
 
-        conn = self._db.connect(db_role, read_only=True)
+        conn = self._db.connect(db_role)
         try:
             total = 0
 
@@ -633,7 +633,7 @@ class SetupModeFunnelDiagnosticsService:
         db_role: str = "prod",
     ) -> list[dict[str, Any]]:
         """Return all diagnostic rows for a given run_id / signal_date."""
-        conn = self._db.connect(db_role, read_only=True)
+        conn = self._db.connect(db_role)
         try:
             rows = conn.execute(
                 "SELECT step_name, setup_type, metric_name, metric_value, reason, metadata_json "
@@ -671,7 +671,7 @@ class SetupModeFunnelDiagnosticsService:
                 metadata={"db_role": db_role, "signal_date": signal_date.isoformat()},
             )
 
-        conn = self._db.connect(db_role, read_only=True)
+        conn = self._db.connect(db_role)
         try:
             if run_id is None:
                 row = conn.execute(

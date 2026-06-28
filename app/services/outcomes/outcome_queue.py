@@ -417,7 +417,7 @@ class OutcomeQueueCreator:
     def _read_eligible(
         self, db_role: str, signal_date: date, setup_config_id: str
     ) -> list[dict[str, Any]]:
-        connection = self._db.connect(db_role, read_only=True)
+        connection = self._db.connect(db_role)
         try:
             raw = connection.execute(
                 _SELECT_ELIGIBLE_PROPOSALS, [signal_date, setup_config_id]
@@ -599,7 +599,7 @@ class OutcomeQueueProcessor:
     ) -> dict[str, Any]:
         """Read all due queue rows, compute outcomes / repair decisions."""
         cal = _default_calendar()
-        connection = self._db.connect(db_role, read_only=True)
+        connection = self._db.connect(db_role)
         try:
             queue_rows = [
                 {

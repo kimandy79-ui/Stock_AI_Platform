@@ -148,13 +148,15 @@ class FailingWriteDbManager(FakeDbManager):
 
 
 class FailingReadDbManager:
-    """Every read-only connection raises on execute (simulated read failure)."""
+    """First connection raises on execute (simulated read failure before write)."""
 
     def __init__(self, store: Store) -> None:
         self._store = store
+        self._call_count = 0
 
     def connect(self, db_role: str, read_only: bool = False):
-        if read_only:
+        self._call_count += 1
+        if self._call_count == 1:
             class _Boom:
                 def execute(self, *a, **k):
                     raise RuntimeError("simulated read failure")

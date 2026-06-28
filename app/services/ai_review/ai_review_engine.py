@@ -515,7 +515,7 @@ class AiReviewEngine:
         ``table`` is a fixed internal constant; the SQL is fully literal per
         table (no interpolation) so the table name is visible to static scans.
         """
-        connection = self._db.connect(db_role, read_only=True)
+        connection = self._db.connect(db_role)
         try:
             if table == REVIEW_TABLE_SIM:
                 cursor = connection.execute(

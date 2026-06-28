@@ -514,6 +514,39 @@ def test_sector_relative_strength_null_when_unmapped(tmp_db_paths: dict[str, Pat
     assert row["sector_relative_strength"] is None
 
 
+def test_sector_relative_strength_uses_prior_date_when_signal_date_degraded(
+    tmp_db_paths: dict[str, Path],
+) -> None:
+    """ETF signal_date row degraded by validator → prior-date roc20 used as fallback."""
+    prod = tmp_db_paths[dbm.DB_ROLE_PROD]
+    days = _trading_days(date(2022, 6, 1), 300)
+    etf = constants.SECTOR_ETF_MAP["Technology"]  # XLK
+    stock_closes = [100.0 + i * 0.20 for i in range(len(days))]
+    etf_closes = [80.0 + i * 0.10 for i in range(len(days))]
+
+    # Seed full ETF history with 'ok', then override the final day's status.
+    _seed_series(prod, "AAA", days, stock_closes)
+    _seed_series(prod, etf, days, etf_closes)
+    _seed_ticker_master(prod, "AAA", "Technology")
+    _seed_ticker_master(prod, etf, None, symbol_type="etf")
+
+    import duckdb as _ddb
+    _conn = _ddb.connect(str(prod))
+    try:
+        _conn.execute(
+            "UPDATE daily_prices SET data_quality_status = 'warning' "
+            "WHERE ticker = ? AND date = ?",
+            [etf, days[-1]],
+        )
+    finally:
+        _conn.close()
+
+    FeatureEngine().calculate(days[-1], days[-1], tickers=["AAA"])
+    row = _fetch_feature(prod, "AAA")
+    # With signal_date degraded, engine uses prior-day ETF roc20 → RS is non-null.
+    assert row["sector_relative_strength"] is not None
+
+
 # --------------------------------------------------------------------------- #
 # 8. Open gaps: market regime + earnings/macro fallback
 # --------------------------------------------------------------------------- #

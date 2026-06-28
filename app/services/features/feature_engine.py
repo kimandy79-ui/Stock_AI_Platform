@@ -55,6 +55,7 @@ from app.utils import service_result
 from app.utils.service_result import ServiceResult
 from app.utils.trading_calendar import trading_days_between
 
+_LOG = logging_config.get_logger(__name__)
 
 # --------------------------------------------------------------------------- #
 # Allowed DB roles
@@ -719,7 +720,7 @@ class FeatureEngine:
         tickers: list[str] | None,
     ) -> dict[str, Any]:
         """Resolve selection, sectors, and price rows in one read-only pass."""
-        connection = self._db.connect(db_role, read_only=True)
+        connection = self._db.connect(db_role)
         try:
             eligible_rows = connection.execute(
                 _SELECT_DISTINCT_ELIGIBLE_TICKERS,
@@ -775,10 +776,34 @@ class FeatureEngine:
 
             # Always include SPY for relative_strength_vs_spy (v02).
             load_set = sorted(set(process_tickers) | benchmark_etfs | {constants.BENCHMARK_SPY})
+            etf_load_set = (benchmark_etfs | {constants.BENCHMARK_SPY}) - set(process_tickers)
+            _LOG.debug(
+                "etf_lookup db_role=%s end_date=%s etfs_in_load_set=%d etfs=%s",
+                db_role, end_date, len(etf_load_set), sorted(etf_load_set),
+            )
             placeholders = ", ".join("?" for _ in load_set)
             sql = _SELECT_PRICE_COLUMNS.format(placeholders=placeholders)
             params = [STATUS_OK, warmup_start, end_date, *load_set]
             price_rows = connection.execute(sql, params).fetchall()
+
+            # Verify each ETF has a signal-date row (status='ok'); log any gaps.
+            etf_signal_date_found: set[str] = set()
+            for row in price_rows:
+                if row[0] in etf_load_set and row[1] == end_date:
+                    etf_signal_date_found.add(row[0])
+            missing_signal = etf_load_set - etf_signal_date_found
+            if missing_signal:
+                _LOG.debug(
+                    "etf_lookup signal_date_missing db_role=%s end_date=%s "
+                    "missing_etfs=%s — validator may have degraded their status",
+                    db_role, end_date, sorted(missing_signal),
+                )
+            else:
+                _LOG.debug(
+                    "etf_lookup signal_date_ok db_role=%s end_date=%s "
+                    "all_%d_etfs_have_ok_row",
+                    db_role, end_date, len(etf_load_set),
+                )
 
             # G-EARN gap closure: load earnings_calendar for all process_tickers.
             earnings_by_ticker = self._read_earnings(connection, process_tickers)
@@ -872,6 +897,33 @@ class FeatureEngine:
         for rec in features.select(["ticker", "date", "roc20"]).iter_rows(named=True):
             roc_lookup[(rec["ticker"], rec["date"])] = _sanitize(rec["roc20"])
 
+        # Per-ETF latest-available-date index.  The data validator can degrade
+        # an ETF's signal_date row; the exact-date lookup would then return None
+        # even though warmup-history entries exist for that ETF.
+        _benchmark_etfs: frozenset[str] = frozenset(constants.REQUIRED_BENCHMARK_SYMBOLS) | frozenset(
+            etf
+            for sector_map in constants.INDUSTRY_ETF_MAP.values()
+            for etf in sector_map.values()
+        )
+        _etf_latest_date: dict[str, date] = {}
+        for (tkr, d) in roc_lookup:
+            if tkr in _benchmark_etfs:
+                prev = _etf_latest_date.get(tkr)
+                if prev is None or d > prev:
+                    _etf_latest_date[tkr] = d
+
+        def _etf_roc(sym: str, cutoff: date) -> float | None:
+            v = roc_lookup.get((sym, cutoff))
+            if v is None:
+                best = _etf_latest_date.get(sym)
+                if best is not None and best <= cutoff:
+                    _LOG.debug(
+                        "etf_roc_date_fallback sym=%s cutoff=%s fallback_date=%s",
+                        sym, cutoff, best,
+                    )
+                    v = roc_lookup.get((sym, best))
+            return v
+
         process_set = set(process_tickers)
         cutoff_frame = features.filter(
             pl.col("ticker").is_in(list(process_set))
@@ -919,7 +971,7 @@ class FeatureEngine:
                 sector_rs: float | None = None
                 ticker_roc = _sanitize(rec["roc20"])
                 if etf is not None and ticker_roc is not None:
-                    etf_roc = roc_lookup.get((etf, cutoff))
+                    etf_roc = _etf_roc(etf, cutoff)
                     if (
                         etf_roc is None
                         and industry_etf is not None
@@ -932,14 +984,14 @@ class FeatureEngine:
                             "sector_etf=%s reason=no_price_rows",
                             ticker, industry_etf, sector_etf,
                         )
-                        etf_roc = roc_lookup.get((sector_etf, cutoff))
+                        etf_roc = _etf_roc(sector_etf, cutoff)
                     if etf_roc is not None:
                         sector_rs = ticker_roc - etf_roc
 
                 # relative_strength_vs_spy (v02)
                 rs_vs_spy: float | None = None
                 if ticker_roc is not None:
-                    spy_roc = roc_lookup.get((constants.BENCHMARK_SPY, cutoff))
+                    spy_roc = _etf_roc(constants.BENCHMARK_SPY, cutoff)
                     if spy_roc is not None:
                         rs_vs_spy = ticker_roc - spy_roc
 
