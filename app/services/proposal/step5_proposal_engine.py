@@ -1103,6 +1103,16 @@ class Step5ProposalEngine:
                 )
             estimated_rr = _compute_estimated_rr(eff_entry, stop, target)
 
+            # Fix 3: for pullback and TC, cap estimated_rr at resistance when it sits
+            # between entry and target (realistic RR). Breakout excluded: confirmed
+            # breakouts have resistance below entry (no cap needed), and pre-breakout
+            # cases are already demoted to WAIT_FOR_BREAKOUT by FTD.
+            if (setup_type in (constants.SETUP_PULLBACK, constants.SETUP_TREND_CONTINUATION)
+                    and resistance_raw_feat is not None and resistance_raw_feat > eff_entry
+                    and target is not None and resistance_raw_feat < target):
+                estimated_rr = _compute_estimated_rr(eff_entry, stop, resistance_raw_feat)
+                resistance_blocks = True
+
             stop_distance_pct: float | None = None
             if eff_entry and stop is not None and eff_entry > 0:
                 stop_distance_pct = (eff_entry - stop) / eff_entry

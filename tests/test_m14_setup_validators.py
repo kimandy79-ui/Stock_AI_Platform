@@ -1670,6 +1670,41 @@ class TestResistanceBlocks:
         ev = result.evidence_json
         assert "resistance_blocks" in ev
 
+    def test_pullback_resistance_blocks_true_when_blocking_swing_high(self) -> None:
+        # resistance=310 sits between entry=300 and swing_high=340 → blocks upside
+        feat = _pullback_feat(
+            close_raw=300.0, close_adj=300.0,
+            resistance_level=310.0, next_resistance_level=None,
+            swing_high=340.0,
+        )
+        result = validate_pullback(feat, _pullback_config())
+        ev = result.evidence_json
+        assert "resistance_blocks" in ev
+        assert ev["resistance_blocks"] is True
+
+    def test_pullback_resistance_blocks_true_when_blocking_next_resistance(self) -> None:
+        # resistance=310 between entry=300 and next_resistance=340
+        feat = _pullback_feat(
+            close_raw=300.0, close_adj=300.0,
+            resistance_level=310.0, next_resistance_level=340.0,
+            swing_high=None,
+        )
+        result = validate_pullback(feat, _pullback_config())
+        ev = result.evidence_json
+        assert "resistance_blocks" in ev
+        assert ev["resistance_blocks"] is True
+
+    def test_pullback_resistance_blocks_false_when_no_resistance_above_entry(self) -> None:
+        # resistance=290 < entry=300 → no blocking
+        feat = _pullback_feat(
+            close_raw=300.0, close_adj=300.0,
+            resistance_level=290.0, next_resistance_level=None,
+        )
+        result = validate_pullback(feat, _pullback_config())
+        ev = result.evidence_json
+        assert "resistance_blocks" in ev
+        assert ev["resistance_blocks"] is False
+
 
 class TestSetupIndependence:
     """Verify setup-specific gate failures do NOT cascade to other setups."""

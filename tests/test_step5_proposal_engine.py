@@ -1674,6 +1674,97 @@ class TestFix3TargetRoom:
         assert _check_target_room(100.0, 104.0, 0.05) is False  # 4% room insufficient
         assert _check_target_room(100.0, 101.0, 0.05) is False  # 1% room insufficient
 
+    def test_pullback_rr_capped_at_resistance_when_blocking(self, tmp_db_paths):
+        """Fix 3 (session 3): pullback estimated_rr uses resistance as effective target
+        when resistance sits between entry and swing_high target.
+        EMR pattern: entry=100, resistance=110, swing_high=130 → realistic RR uses 110.
+        """
+        db = dbm.DB_ROLE_PROD
+        _seed_ticker(db, "PRBLK")
+        _seed_price(db, "PRBLK", SIGNAL_DATE, 100.0, 100.0)
+        _seed_features(db, "PRBLK", SIGNAL_DATE, close_adj=100.0, atr14=2.0,
+                       support_level=94.0, swing_low=92.0,
+                       resistance_level=110.0, next_resistance_level=None,
+                       swing_high=130.0, base_high=None, base_low=None,
+                       market_regime="bull")
+        _seed_step4(db, "PRBLK", SIGNAL_DATE, setup_type="pullback",
+                    setup_config_id="setup_pullback_v1",
+                    setup_passed=True, setup_score=75.0, entry_price_raw=100.0,
+                    market_regime="bull", earnings_days=30)
+        cfg = _minimal_risk_config(min_rr=0.5, low_max=90.0, top_n=5)
+        eng = _make_engine()
+        eng.propose(SIGNAL_DATE, risk_label_config=cfg,
+                    setup_configs=DEFAULT_SETUP_CONFIGS, db_role=db)
+        props = _read_proposals(db, SIGNAL_DATE)
+        p = props[0]
+        # Uncapped RR would be (130-100)/stop_dist ≈ high; capped at (110-100)/stop_dist
+        assert p["estimated_rr"] is not None
+        assert p["estimated_rr"] < 5.0  # must not use swing_high=130 uncapped
+        # Resistance blocks → WATCHLIST_ONLY
+        assert p["disposition"] == DISPOSITION_WATCHLIST
+        expl = json.loads(p["mechanical_explanation"])
+        assert expl.get("resistance_blocks") is True
+
+    def test_tc_rr_capped_at_resistance_when_blocking(self, tmp_db_paths):
+        """Fix 3 (session 3): TC estimated_rr capped at resistance between entry and next_resistance.
+        HOG pattern: entry=100, resistance=110, next_resistance=130.
+        """
+        db = dbm.DB_ROLE_DEBUG
+        _seed_ticker(db, "TCRBLK")
+        _seed_price(db, "TCRBLK", SIGNAL_DATE, 100.0, 100.0)
+        _seed_features(db, "TCRBLK", SIGNAL_DATE, close_adj=100.0, atr14=2.0,
+                       swing_low=92.0, support_level=94.0,
+                       resistance_level=110.0, next_resistance_level=130.0,
+                       swing_high=None, base_high=None, base_low=None,
+                       market_regime="bull", roc20=0.12,
+                       distance_to_ema50_pct=0.06)
+        _seed_step4(db, "TCRBLK", SIGNAL_DATE, setup_type="trend_continuation",
+                    setup_config_id="setup_trend_continuation_v1",
+                    setup_passed=True, setup_score=80.0, entry_price_raw=100.0,
+                    market_regime="bull", earnings_days=30)
+        cfg = _minimal_risk_config(min_rr=0.5, low_max=90.0, top_n=5)
+        eng = _make_engine()
+        eng.propose(SIGNAL_DATE, risk_label_config=cfg,
+                    setup_configs=DEFAULT_SETUP_CONFIGS, db_role=db)
+        props = _read_proposals(db, SIGNAL_DATE)
+        p = props[0]
+        assert p["estimated_rr"] is not None
+        assert p["estimated_rr"] < 5.0  # capped at resistance=110, not next_resistance=130
+        assert p["disposition"] == DISPOSITION_WATCHLIST
+        expl = json.loads(p["mechanical_explanation"])
+        assert expl.get("resistance_blocks") is True
+
+    def test_breakout_rr_not_capped_at_resistance(self, tmp_db_paths):
+        """Fix 3 (session 3): breakout RR is NOT capped at resistance.
+        Confirmed breakouts have resistance < entry (cap check fails naturally).
+        Pre-breakout breakouts are demoted by FTD WAIT_FOR_BREAKOUT instead.
+        """
+        db = dbm.DB_ROLE_PROD
+        _seed_ticker(db, "BNOCLIP")
+        _seed_price(db, "BNOCLIP", SIGNAL_DATE, 100.0, 100.0)
+        _seed_features(db, "BNOCLIP", SIGNAL_DATE, close_adj=100.0, atr14=2.0,
+                       resistance_level=105.0, next_resistance_level=130.0,
+                       base_low=96.0, swing_high=None, base_high=None)
+        _seed_step4(db, "BNOCLIP", SIGNAL_DATE, setup_type="breakout",
+                    setup_config_id="setup_breakout_v1",
+                    setup_passed=True, setup_score=75.0, entry_price_raw=100.0,
+                    market_regime="bull", earnings_days=30, rvol=2.0)
+        cfg = _minimal_risk_config(min_rr=0.5, low_max=90.0, top_n=5)
+        eng = _make_engine()
+        eng.propose(SIGNAL_DATE, risk_label_config=cfg,
+                    setup_configs=DEFAULT_SETUP_CONFIGS, db_role=db)
+        props = _read_proposals(db, SIGNAL_DATE)
+        p = props[0]
+        # target_price_raw should be next_resistance=130, not capped at resistance=105
+        if p["target_price_raw"] is not None:
+            assert p["target_price_raw"] > 110.0  # clearly above resistance=105
+        # estimated_rr uses the full next_resistance target (no cap)
+        if p["estimated_rr"] is not None and p["stop_price_raw"] is not None:
+            assert p["estimated_rr"] == pytest.approx(
+                (p["target_price_raw"] - p["entry_price_raw"]) /
+                (p["entry_price_raw"] - p["stop_price_raw"]), rel=0.01
+            )
+
 
 class TestFix4InvalidationLevel:
     """Fix 4: invalidation_level_raw = stop_price_raw, in mechanical_explanation."""

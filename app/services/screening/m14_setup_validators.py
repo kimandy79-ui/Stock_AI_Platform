@@ -673,16 +673,23 @@ def validate_pullback(
     components["trend_structure"] = trend_struct_score
 
     # rr: target room (structural = resistance or next_resistance above entry)
+    # resistance_blocks=True when a resistance level above entry obstructs the path to target
     target_is_structural: bool | None = None
+    resistance_blocks: bool = False
     if next_resistance_raw is not None and entry_raw and next_resistance_raw > entry_raw:
         components["rr"] = 80.0
         target_is_structural = True
+        if resistance_raw is not None and resistance_raw > entry_raw and resistance_raw < next_resistance_raw:
+            resistance_blocks = True
     elif resistance_raw is not None and entry_raw and resistance_raw > entry_raw:
         components["rr"] = 60.0
         target_is_structural = True
+        resistance_blocks = True  # resistance IS the ceiling
     elif swing_high_raw is not None and entry_raw and swing_high_raw > entry_raw:
         components["rr"] = 50.0
         target_is_structural = True
+        if resistance_raw is not None and resistance_raw > entry_raw and resistance_raw < swing_high_raw:
+            resistance_blocks = True
     else:
         components["rr"] = 0.0
         target_is_structural = False
@@ -741,6 +748,7 @@ def validate_pullback(
         "macro_penalty": macro_pen,
         "penalized_score": penalized_score,
         "target_is_structural": target_is_structural,
+        "resistance_blocks": resistance_blocks,
         "confidence": _derive_confidence(penalized_score),
     }
 
