@@ -36,6 +36,7 @@ from app.database import schema_manager as sm
 from app.services.screening.step3_universal_eligibility import (
     ALLOWED_DB_ROLES,
     METADATA_KEYS,
+    REASON_MERGER_PENDING,
     ROUTING_INELIGIBLE,
     ROUTING_NO_ROUTE,
     ROUTING_ROUTED,
@@ -363,6 +364,101 @@ class TestEligibilityUnit:
     def test_no_atr_pct_gate(self):
         reasons = _check_eligibility(_row(), _MIN_PRICE, _MIN_ADV, _ALLOWED_TYPES)
         assert reasons == []
+
+    # P0-2: Merger filter
+    def test_merger_pending_blocks_ticker(self):
+        """Ticker in merger_watch_list returns ONLY merger_pending — all other checks skipped."""
+        row = _row(ticker="TWO")
+        reasons = _check_eligibility(row, _MIN_PRICE, _MIN_ADV, _ALLOWED_TYPES,
+                                     merger_watch_list=frozenset(["TWO"]))
+        assert reasons == [REASON_MERGER_PENDING]
+
+    def test_merger_pending_is_first_and_only_reason(self):
+        """Even an otherwise-ineligible ticker (bad price) reports only merger_pending."""
+        row = _row(ticker="ACQ", close_raw=1.0, avg_dollar_volume_20d=100.0,
+                   feature_ready=False)
+        reasons = _check_eligibility(row, _MIN_PRICE, _MIN_ADV, _ALLOWED_TYPES,
+                                     merger_watch_list=frozenset(["ACQ"]))
+        assert reasons == [REASON_MERGER_PENDING]
+
+    def test_non_merger_ticker_not_blocked(self):
+        """Ticker NOT in merger_watch_list evaluates normally."""
+        row = _row(ticker="SAFE")
+        reasons = _check_eligibility(row, _MIN_PRICE, _MIN_ADV, _ALLOWED_TYPES,
+                                     merger_watch_list=frozenset(["TWO", "ACQ"]))
+        assert REASON_MERGER_PENDING not in reasons
+        assert reasons == []  # fully eligible
+
+    def test_empty_merger_watch_list_no_effect(self):
+        """Empty merger_watch_list has no effect on eligibility."""
+        row = _row(ticker="AAPL")
+        reasons = _check_eligibility(row, _MIN_PRICE, _MIN_ADV, _ALLOWED_TYPES,
+                                     merger_watch_list=frozenset())
+        assert REASON_MERGER_PENDING not in reasons
+
+    def test_merger_watch_list_default_empty(self):
+        """Default merger_watch_list=frozenset() means no merger filtering."""
+        row = _row(ticker="AAPL")
+        # Call with 4 args (old signature) — should not fail and not filter
+        reasons = _check_eligibility(row, _MIN_PRICE, _MIN_ADV, _ALLOWED_TYPES)
+        assert REASON_MERGER_PENDING not in reasons
+
+
+class TestMergerFilterIntegration:
+    """Integration: merger_watch_list in universe config blocks ticker at engine level."""
+
+    def _configs_with_merger_list(self, tickers: list[str]) -> list[dict]:
+        """Build ALL_SETUP_CONFIGS with merger_watch_list in universe block."""
+        import copy
+        configs = []
+        for cfg in ALL_SETUP_CONFIGS:
+            c = copy.deepcopy(cfg)
+            c["universe"]["merger_watch_list"] = tickers
+            configs.append(c)
+        return configs
+
+    def _run_with_configs(
+        self, rows: list[dict], configs: list[dict]
+    ) -> tuple["ServiceResult", "_FakeDB"]:
+        eng, fake = _engine(rows)
+        result = eng.run(
+            signal_date=SIGNAL_DATE,
+            db_role="debug",
+            run_id=RUN_ID,
+            setup_configs=configs,
+        )
+        return result, fake
+
+    def test_merger_ticker_ineligible_in_engine_run(self):
+        merger_configs = self._configs_with_merger_list(["TWO"])
+        result, fake = self._run_with_configs([_row(ticker="TWO")], merger_configs)
+        assert result.is_ok()
+        assert len(fake.inserted) == 1
+        # routing_status (index 6) should be 'ineligible'
+        routing_status = fake.inserted[0][6]
+        assert routing_status == "ineligible"
+
+    def test_merger_ticker_fail_reason_recorded(self):
+        import json as _json
+        merger_configs = self._configs_with_merger_list(["TWO"])
+        result, fake = self._run_with_configs([_row(ticker="TWO")], merger_configs)
+        fail_reasons_raw = fake.inserted[0][8]
+        fail_reasons = _json.loads(fail_reasons_raw) if isinstance(fail_reasons_raw, str) else fail_reasons_raw
+        assert REASON_MERGER_PENDING in fail_reasons
+
+    def test_non_merger_ticker_not_blocked_in_engine(self):
+        merger_configs = self._configs_with_merger_list(["TWO"])
+        result, fake = self._run_with_configs([_row(ticker="SAFE")], merger_configs)
+        assert result.is_ok()
+        routing_status = fake.inserted[0][6]
+        assert routing_status != "ineligible"
+
+    def test_merger_watch_list_from_universe_config(self):
+        """Universe config without merger_watch_list defaults to no filtering."""
+        result, fake = self._run_with_configs([_row(ticker="AAPL")], ALL_SETUP_CONFIGS)
+        assert result.is_ok()
+        routing_status = fake.inserted[0][6]
+        assert routing_status != "ineligible"
 
 
 # ===========================================================================

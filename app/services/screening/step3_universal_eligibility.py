@@ -57,6 +57,7 @@ ROUTING_FAIL_NO_ROUTE: Final[str] = "no_route"
 # ---------------------------------------------------------------------------
 # Eligibility rejection reason labels
 # ---------------------------------------------------------------------------
+REASON_MERGER_PENDING: Final[str] = "merger_pending"
 REASON_FEATURE_NOT_READY: Final[str] = "feature_not_ready"
 REASON_NOT_STOCK: Final[str] = "not_stock"
 REASON_PRICE_BELOW_MIN: Final[str] = "price_below_min"
@@ -67,6 +68,7 @@ REASON_NO_PRICE_ROW: Final[str] = "no_price_row"
 
 # Ordered check labels (order controls fail_reasons list order)
 _ELIGIBILITY_ORDER: Final[tuple[str, ...]] = (
+    REASON_MERGER_PENDING,
     REASON_NO_PRICE_ROW,
     REASON_FEATURE_NOT_READY,
     REASON_NOT_STOCK,
@@ -209,14 +211,15 @@ def _assert_universe_parity(setup_configs: list[dict[str, Any]]) -> dict[str, An
     return ref
 
 
-def _parse_universe_config(ub: dict[str, Any]) -> tuple[float, float, list[str]]:
+def _parse_universe_config(ub: dict[str, Any]) -> tuple[float, float, list[str], frozenset[str]]:
     try:
         min_price = float(ub["min_price"])
         min_adv = float(ub["min_avg_dollar_volume_20d"])
         allowed_types: list[str] = list(ub.get("allowed_symbol_types", ["stock"]))
+        merger_watch_list: frozenset[str] = frozenset(ub.get("merger_watch_list", []))
     except (KeyError, TypeError, ValueError) as exc:
         raise MissingConfigError(f"Invalid universe config block: {exc}") from exc
-    return min_price, min_adv, allowed_types
+    return min_price, min_adv, allowed_types, merger_watch_list
 
 
 def _load_active_setup_configs(db_mgr: _DbManagerLike, db_role: str) -> list[dict[str, Any]]:
@@ -245,6 +248,7 @@ def _check_eligibility(
     min_price: float,
     min_adv: float,
     allowed_symbol_types: list[str],
+    merger_watch_list: frozenset[str] = frozenset(),
 ) -> list[str]:
     """
     Return ordered list of failing eligibility reason labels.
@@ -252,8 +256,14 @@ def _check_eligibility(
 
     Universal filters only (AD-22.23). RVOL, setup score, momentum,
     ATR%, EMA extension, consolidation quality are NOT checked here.
+    Merger pending is checked first — blocks all setups universally.
     """
     reasons: list[str] = []
+
+    # Merger pending — universal block before any other check
+    if merger_watch_list and row["ticker"] in merger_watch_list:
+        reasons.append(REASON_MERGER_PENDING)
+        return reasons
 
     # Missing price row — cannot evaluate anything
     if row["close_raw"] is None and row["data_quality_status"] is None:
@@ -539,7 +549,7 @@ class Step3UniversalEligibilityEngine:
             if setup_configs is None:
                 setup_configs = _load_active_setup_configs(self._db, db_role)
             universe_block = _assert_universe_parity(setup_configs)
-            min_price, min_adv, allowed_symbol_types = _parse_universe_config(universe_block)
+            min_price, min_adv, allowed_symbol_types, merger_watch_list = _parse_universe_config(universe_block)
         except (ConfigParityError, MissingConfigError) as exc:
             log.error("Step3 config error: %s", exc)
             return ServiceResult(
@@ -587,7 +597,7 @@ class Step3UniversalEligibilityEngine:
 
         candidates: list[dict[str, Any]] = []
         for row in raw_rows:
-            rejection_reasons = _check_eligibility(row, min_price, min_adv, allowed_symbol_types)
+            rejection_reasons = _check_eligibility(row, min_price, min_adv, allowed_symbol_types, merger_watch_list)
             passed = len(rejection_reasons) == 0
 
             if passed:
@@ -726,4 +736,5 @@ __all__ = [
     "ROUTING_ROUTED",
     "ROUTING_NO_ROUTE",
     "ROUTING_INELIGIBLE",
+    "REASON_MERGER_PENDING",
 ]

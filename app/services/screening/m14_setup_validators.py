@@ -268,6 +268,7 @@ def validate_breakout(
     rvol_is_hard: bool = bool(val.get("rvol_is_hard", True))
     min_setup_score: float = float(val.get("min_setup_score", 55))
     min_close_strength: float = float(val.get("min_close_strength", 0.5))
+    min_atr_stop_floor: float = float(val.get("min_atr_stop_floor_multiple", 0.5))
 
     # Feature extraction
     close_raw = _f(feat.get("close_raw"))
@@ -307,8 +308,8 @@ def validate_breakout(
     # --- Hard checks ---
     hard_fails: list[str] = []
 
-    # 1. resistance_level must exist in at least one price form (P2: adj OR raw)
-    if resistance_adj is None and resistance_raw is None:
+    # 1. resistance_level must be a positive value (catches None and DB-stored 0.0)
+    if resistance_adj is None or resistance_adj <= 0:
         hard_fails.append("no_resistance_level")
 
     # 2. breakout_proximity in range
@@ -332,6 +333,20 @@ def validate_breakout(
             hard_fails.append("missing_rvol")
         elif rvol20 < min_rvol:
             hard_fails.append(f"rvol_below_hard_threshold({rvol20:.2f}<{min_rvol})")
+
+    # 5. Stop ≥ 0.5 ATR below entry (P1-1)
+    # Stop estimated as entry minus support (below-base stop placement)
+    if (
+        atr_pct is not None and atr_pct > 0
+        and support_raw is not None
+        and entry_raw is not None and entry_raw > 0
+    ):
+        stop_distance_pct = (entry_raw - support_raw) / entry_raw
+        stop_distance_atr = stop_distance_pct / atr_pct
+        if stop_distance_atr < min_atr_stop_floor:
+            hard_fails.append(
+                f"stop_below_atr_floor(stop_atr={stop_distance_atr:.2f}<{min_atr_stop_floor})"
+            )
 
     setup_passed_hard = len(hard_fails) == 0
 
@@ -375,14 +390,20 @@ def validate_breakout(
     components["base_quality"] = 0.5 * dur_score + 0.5 * tight_score
 
     # target_room: structural target (next_resistance) exists
+    # resistance_blocks=True when resistance sits between entry and any uncapped target (P2-1)
     target_is_structural: bool | None = None
+    resistance_blocks: bool = False
     if next_resistance_raw is not None and entry_raw is not None and next_resistance_raw > entry_raw:
         components["target_room"] = 80.0
         target_is_structural = True
+        # Resistance blocks if it sits below the next structural level
+        if resistance_raw is not None and resistance_raw > entry_raw and resistance_raw < next_resistance_raw:
+            resistance_blocks = True
     elif resistance_raw is not None and entry_raw is not None and resistance_raw > entry_raw:
-        # Use resistance as approximate structural target proxy for scoring
+        # Resistance IS the ceiling — structural target but resistance blocks further upside
         components["target_room"] = 40.0
         target_is_structural = True
+        resistance_blocks = True
     else:
         components["target_room"] = 0.0
         target_is_structural = False  # would need fixed-R fallback
@@ -424,6 +445,7 @@ def validate_breakout(
         "macro_penalty": macro_pen,
         "penalized_score": penalized_score,
         "target_is_structural": target_is_structural,
+        "resistance_blocks": resistance_blocks,
         "confidence": _derive_confidence(penalized_score),
     }
 
@@ -490,6 +512,9 @@ def validate_pullback(
     support_break_tol: float = float(val.get("support_break_tol", 0.02))
     rvol_bonus_threshold: float = float(val.get("rvol_bonus_threshold", 1.3))
     min_setup_score: float = float(val.get("min_setup_score", 55))
+    rebound_required: bool = bool(val.get("rebound_required", True))
+    min_rebound_slope: float = float(val.get("min_rebound_slope", 0.002))
+    min_atr_stop_floor: float = float(val.get("min_atr_stop_floor_multiple", 0.5))
     # rvol_is_hard MUST be False for pullback (AD-22.23)
     rvol_is_hard: bool = bool(val.get("rvol_is_hard", False))
     if rvol_is_hard:
@@ -499,9 +524,12 @@ def validate_pullback(
     # Feature extraction
     close_raw = _f(feat.get("close_raw"))
     close_adj = _f(feat.get("close_adj"))
+    open_raw = _f(feat.get("open_raw"))
     ema20 = _f(feat.get("ema20"))
     ema50 = _f(feat.get("ema50"))
     ema200 = _f(feat.get("ema200"))
+    ema20_slope = _f(feat.get("ema20_slope"))
+    roc20 = _f(feat.get("roc20"))
     pullback_depth_pct = _f(feat.get("pullback_depth_pct"))
     pullback_from_high = _f(feat.get("pullback_from_recent_high_pct"))
     support_adj = _f(feat.get("support_level"))
@@ -523,6 +551,11 @@ def validate_pullback(
     next_resistance_raw = _raw_conv(next_resistance_adj, close_raw, close_adj) if close_raw and close_adj else None
     swing_low_raw = _raw_conv(swing_low_adj, close_raw, close_adj) if close_raw and close_adj else None
     swing_high_raw = _raw_conv(swing_high_adj, close_raw, close_adj) if close_raw and close_adj else None
+
+    # Guard: swing_low above current price cannot serve as a valid stop anchor
+    if swing_low_adj is not None and close_adj is not None and swing_low_adj >= close_adj:
+        swing_low_adj = None
+        swing_low_raw = None
 
     entry_raw = close_raw
 
@@ -563,6 +596,31 @@ def validate_pullback(
                 f"support_broken(close={close_raw:.2f}<support_tol={lower_bound:.2f})"
             )
     # (If support_raw is None, skip — penalty via soft score only)
+
+    # 5. Rebound confirmation required (P1-2)
+    # At least one of: EMA20 sloping up, ROC20 positive, or bullish day candle
+    if rebound_required:
+        rebound_signal = (
+            (ema20_slope is not None and ema20_slope >= min_rebound_slope)
+            or (roc20 is not None and roc20 > 0)
+            or (close_raw is not None and open_raw is not None and close_raw > open_raw)
+        )
+        if not rebound_signal:
+            hard_fails.append("pullback_no_rebound_confirmation")
+
+    # 6. Stop ≥ 0.5 ATR below entry (P1-1)
+    # Stop estimated as entry minus support (standard pullback stop placement)
+    if (
+        atr_pct is not None and atr_pct > 0
+        and support_raw is not None
+        and entry_raw is not None and entry_raw > 0
+    ):
+        stop_distance_pct = (entry_raw - support_raw) / entry_raw
+        stop_distance_atr = stop_distance_pct / atr_pct
+        if stop_distance_atr < min_atr_stop_floor:
+            hard_fails.append(
+                f"stop_below_atr_floor(stop_atr={stop_distance_atr:.2f}<{min_atr_stop_floor})"
+            )
 
     # Note: RVOL is NOT a hard check for pullback (AD-22.23)
 
@@ -654,9 +712,12 @@ def validate_pullback(
 
     evidence: dict[str, Any] = {
         "close_adj": close_adj,
+        "open_raw": open_raw,
         "ema200": ema200,
         "ema20": ema20,
         "ema50": ema50,
+        "ema20_slope": ema20_slope,
+        "roc20": roc20,
         "ema_alignment_score": ema_alignment_score,
         "pullback_depth_pct": pullback_depth_pct,
         "pullback_from_recent_high_pct": pullback_from_high,
@@ -672,6 +733,7 @@ def validate_pullback(
         "rvol20": rvol20,
         "rvol_is_hard": False,  # always False for pullback (AD-22.23)
         "rvol_bonus": rvol_bonus,
+        "rebound_required": rebound_required,
         "hard_fails": hard_fails,
         "component_scores": components,
         "raw_score": raw_score,
@@ -750,6 +812,7 @@ def validate_trend_continuation(
     max_ext: float = float(val.get("max_ext", 0.15))
     rvol_moderate_threshold: float = float(val.get("rvol_moderate_threshold", 1.2))
     min_setup_score: float = float(val.get("min_setup_score", 55))
+    min_atr_stop_floor: float = float(val.get("min_atr_stop_floor_multiple", 0.5))
 
     # Feature extraction
     close_raw = _f(feat.get("close_raw"))
@@ -779,6 +842,11 @@ def validate_trend_continuation(
     resistance_raw = _raw_conv(resistance_adj, close_raw, close_adj) if close_raw and close_adj else None
     next_resistance_raw = _raw_conv(next_resistance_adj, close_raw, close_adj) if close_raw and close_adj else None
     swing_low_raw = _raw_conv(swing_low_adj, close_raw, close_adj) if close_raw and close_adj else None
+
+    # Guard: swing_low above current price cannot serve as a valid stop anchor
+    if swing_low_adj is not None and close_adj is not None and swing_low_adj >= close_adj:
+        swing_low_adj = None
+        swing_low_raw = None
 
     entry_raw = close_raw
 
@@ -828,6 +896,20 @@ def validate_trend_continuation(
     elif abs(dist_ema50) > max_ext:
         hard_fails.append(f"too_extended_from_ema50({abs(dist_ema50):.3f}>{max_ext})")
 
+    # 7. Stop ≥ 0.5 ATR below entry (P1-1)
+    # Stop estimated as entry minus swing_low (standard trend continuation stop)
+    if (
+        atr_pct is not None and atr_pct > 0
+        and swing_low_raw is not None
+        and entry_raw is not None and entry_raw > 0
+    ):
+        stop_distance_pct = (entry_raw - swing_low_raw) / entry_raw
+        stop_distance_atr = stop_distance_pct / atr_pct
+        if stop_distance_atr < min_atr_stop_floor:
+            hard_fails.append(
+                f"stop_below_atr_floor(stop_atr={stop_distance_atr:.2f}<{min_atr_stop_floor})"
+            )
+
     setup_passed_hard = len(hard_fails) == 0
 
     # --- Soft scoring ---
@@ -873,14 +955,18 @@ def validate_trend_continuation(
         vol_score = 30.0  # not required; moderate default
     components["volume_health"] = vol_score
 
-    # target_room: structural next resistance
+    # target_room: structural next resistance (P2-1: track resistance_blocks)
     target_is_structural: bool | None = None
+    resistance_blocks: bool = False
     if next_resistance_raw is not None and entry_raw and next_resistance_raw > entry_raw:
         components["target_room"] = 80.0
         target_is_structural = True
+        if resistance_raw is not None and resistance_raw > entry_raw and resistance_raw < next_resistance_raw:
+            resistance_blocks = True
     elif resistance_raw is not None and entry_raw and resistance_raw > entry_raw:
         components["target_room"] = 50.0
         target_is_structural = True
+        resistance_blocks = True
     else:
         components["target_room"] = 0.0
         target_is_structural = False
@@ -922,6 +1008,7 @@ def validate_trend_continuation(
         "macro_penalty": macro_pen,
         "penalized_score": penalized_score,
         "target_is_structural": target_is_structural,
+        "resistance_blocks": resistance_blocks,
         "confidence": _derive_confidence(penalized_score),
     }
 
@@ -992,6 +1079,8 @@ def validate_consolidation_base(
     min_dry_up: float = float(val.get("min_dry_up", 40))
     min_earnings_days: int = int(val.get("min_earnings_days", 5))
     min_setup_score: float = float(val.get("min_setup_score", 55))
+    # Consolidation uses a tighter ATR floor because base stops are naturally compressed
+    min_atr_stop_floor: float = float(val.get("min_atr_stop_floor_multiple", 0.3))
     # Allow close to be slightly above base_high before rejecting (borderline breakout candidates)
     above_base_tolerance: float = float(val.get("price_above_base_tolerance", 0.01))
     # rvol_required=False always for consolidation_base (AD-22.23)
@@ -1051,8 +1140,11 @@ def validate_consolidation_base(
     elif atr_pct > max_atr_pct:
         hard_fails.append(f"atr_too_high({atr_pct:.4f}>{max_atr_pct})")
 
-    # 3. Price inside base (tolerance allows minor overshoots at top of range)
-    if base_high_raw is not None and base_low_raw is not None and close_raw is not None:
+    # 3. Base levels must be identified (P1-3)
+    if base_high_adj is None or base_low_adj is None:
+        hard_fails.append("consolidation_base_not_identified")
+    elif base_high_raw is not None and base_low_raw is not None and close_raw is not None:
+        # 3b. Price inside base (tolerance allows minor overshoots at top of range)
         if close_raw > base_high_raw * (1.0 + above_base_tolerance):
             hard_fails.append(
                 f"price_above_base_high(close={close_raw:.2f}>base_high={base_high_raw:.2f})"
@@ -1061,8 +1153,6 @@ def validate_consolidation_base(
             hard_fails.append(
                 f"price_below_base_low(close={close_raw:.2f}<base_low={base_low_raw:.2f})"
             )
-    elif base_high_adj is None or base_low_adj is None:
-        hard_fails.append("missing_base_levels")
 
     # 4. Range duration
     if range_duration_val is None:
@@ -1078,6 +1168,20 @@ def validate_consolidation_base(
         hard_fails.append(
             f"earnings_too_close({earnings_days}bd<={min_earnings_days}bd)"
         )
+
+    # 6. Stop ≥ 0.3 ATR below entry (P1-1; tighter floor for base setups)
+    # Stop estimated as entry minus base_low (base stop placement)
+    if (
+        atr_pct is not None and atr_pct > 0
+        and base_low_raw is not None
+        and entry_raw is not None and entry_raw > 0
+    ):
+        stop_distance_pct = (entry_raw - base_low_raw) / entry_raw
+        stop_distance_atr = stop_distance_pct / atr_pct
+        if stop_distance_atr < min_atr_stop_floor:
+            hard_fails.append(
+                f"stop_below_atr_floor(stop_atr={stop_distance_atr:.2f}<{min_atr_stop_floor})"
+            )
 
     # Note: RVOL not required for consolidation_base (AD-22.23)
 

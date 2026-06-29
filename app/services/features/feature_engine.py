@@ -1022,6 +1022,9 @@ class FeatureEngine:
                 # Most-recent single swing pivot values for storage
                 swing_high_val = swing_highs[0] if swing_highs else None
                 swing_low_val = swing_lows[0] if swing_lows else None
+                # Swing low at or above current price is not a valid stop anchor
+                if swing_low_val is not None and close_adj_val is not None and swing_low_val >= close_adj_val:
+                    swing_low_val = None
 
                 # G-EARN gap closure: compute days_to_earnings_bd from earnings_calendar.
                 ticker_earnings = earnings_by_ticker.get(ticker, [])

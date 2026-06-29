@@ -1408,3 +1408,410 @@ class TestStep4SetupValidationEngineIntegration:
             conn2.close()
 
         assert types_written == set(constants.ALLOWED_SETUP_TYPES)
+
+
+# ===========================================================================
+# New gate tests: ATR stop floor (P1-1), pullback rebound (P1-2),
+# consolidation base identified (P1-3), resistance_blocks (P2-1),
+# setup independence
+# ===========================================================================
+
+class TestAtrStopFloorGate:
+    """P1-1: Stop ≥ 0.5 ATR below entry gate — all four setup validators."""
+
+    def test_breakout_stop_below_atr_floor_fails(self) -> None:
+        # support very close to close → tiny stop distance → fails ATR floor
+        # stop_distance_pct = (155 - 154) / 155 = 0.00645; atr_pct=0.03
+        # stop_distance_atr = 0.00645 / 0.03 = 0.215 < 0.5
+        feat = _breakout_feat(
+            close_raw=155.0, close_adj=155.0,
+            support_level=154.0,   # adj; raw ≈ 154 (adj==raw factor here)
+            atr_pct=0.03,
+        )
+        result = validate_breakout(feat, _breakout_config())
+        assert result.setup_passed is False
+        assert any("stop_below_atr_floor" in r for r in result.pass_fail_reasons)
+
+    def test_breakout_stop_sufficient_passes_atr_floor(self) -> None:
+        # stop_distance_pct = (155 - 145) / 155 = 0.0645; atr_pct=0.03 → atr_ratio=2.15 > 0.5
+        feat = _breakout_feat(
+            close_raw=155.0, close_adj=155.0,
+            support_level=145.0, atr_pct=0.03,
+        )
+        result = validate_breakout(feat, _breakout_config())
+        assert not any("stop_below_atr_floor" in r for r in result.pass_fail_reasons)
+
+    def test_breakout_atr_floor_skipped_when_support_none(self) -> None:
+        feat = _breakout_feat(support_level=None, atr_pct=0.03)
+        result = validate_breakout(feat, _breakout_config())
+        assert not any("stop_below_atr_floor" in r for r in result.pass_fail_reasons)
+
+    def test_breakout_atr_floor_configurable(self) -> None:
+        # Loosen to 0.1 → same tiny stop now passes
+        cfg = _breakout_config(min_atr_stop_floor_multiple=0.1)
+        feat = _breakout_feat(
+            close_raw=155.0, close_adj=155.0,
+            support_level=154.0, atr_pct=0.03,
+        )
+        result = validate_breakout(feat, cfg)
+        assert not any("stop_below_atr_floor" in r for r in result.pass_fail_reasons)
+
+    def test_pullback_stop_below_atr_floor_fails(self) -> None:
+        # support very close to close → stop_distance_atr << 0.5
+        # stop_distance_pct = (300 - 299) / 300 = 0.00333; atr_pct=0.025 → 0.133 < 0.5
+        feat = _pullback_feat(
+            close_raw=300.0, close_adj=300.0,
+            support_level=299.0, atr_pct=0.025,
+        )
+        result = validate_pullback(feat, _pullback_config())
+        assert result.setup_passed is False
+        assert any("stop_below_atr_floor" in r for r in result.pass_fail_reasons)
+
+    def test_pullback_stop_sufficient_passes_atr_floor(self) -> None:
+        # stop_distance_pct = (300 - 292) / 300 = 0.0267; atr_pct=0.025 → 1.07 > 0.5
+        feat = _pullback_feat(
+            close_raw=300.0, close_adj=300.0,
+            support_level=292.0, atr_pct=0.025,
+        )
+        result = validate_pullback(feat, _pullback_config())
+        assert not any("stop_below_atr_floor" in r for r in result.pass_fail_reasons)
+
+    def test_trend_continuation_stop_below_atr_floor_fails(self) -> None:
+        # swing_low very close to close → stop_atr < 0.5
+        # stop_distance_pct = (500 - 498) / 500 = 0.004; atr_pct=0.025 → 0.16 < 0.5
+        feat = _tc_feat(
+            close_raw=500.0, close_adj=500.0,
+            swing_low=498.0, atr_pct=0.025,
+        )
+        result = validate_trend_continuation(feat, _tc_config())
+        assert result.setup_passed is False
+        assert any("stop_below_atr_floor" in r for r in result.pass_fail_reasons)
+
+    def test_trend_continuation_stop_sufficient_passes(self) -> None:
+        feat = _tc_feat(
+            close_raw=500.0, close_adj=500.0,
+            swing_low=460.0, atr_pct=0.025,   # atr_ratio=3.2 >> 0.5
+        )
+        result = validate_trend_continuation(feat, _tc_config())
+        assert not any("stop_below_atr_floor" in r for r in result.pass_fail_reasons)
+
+    def test_consolidation_base_stop_below_atr_floor_fails(self) -> None:
+        # base_low very close to close → stop_atr < 0.3 (CB floor)
+        # stop_distance_pct = (175 - 174.9) / 175 = 0.000571; atr_pct=0.02 → 0.029 < 0.3
+        feat = _cb_feat(
+            close_raw=175.0, close_adj=175.0,
+            base_low=174.9, atr_pct=0.02,
+        )
+        result = validate_consolidation_base(feat, _cb_config())
+        assert result.setup_passed is False
+        assert any("stop_below_atr_floor" in r for r in result.pass_fail_reasons)
+
+    def test_consolidation_base_stop_sufficient_passes(self) -> None:
+        feat = _cb_feat(
+            close_raw=175.0, close_adj=175.0,
+            base_low=170.0, atr_pct=0.02,   # atr_ratio = 1.43 > 0.3
+        )
+        result = validate_consolidation_base(feat, _cb_config())
+        assert not any("stop_below_atr_floor" in r for r in result.pass_fail_reasons)
+
+    def test_atr_floor_gate_doesnt_block_other_setups(self) -> None:
+        """ATR floor failure on pullback does NOT prevent TC from evaluating."""
+        # Pullback: tiny stop → fails ATR floor
+        pb_feat = _pullback_feat(
+            close_raw=300.0, close_adj=300.0,
+            support_level=299.5, atr_pct=0.025,
+        )
+        pb_result = validate_pullback(pb_feat, _pullback_config())
+        assert any("stop_below_atr_floor" in r for r in pb_result.pass_fail_reasons)
+
+        # TC: normal stop → should evaluate independently and not inherit the pullback failure
+        tc_feat = _tc_feat(swing_low=460.0, atr_pct=0.025)
+        tc_result = validate_trend_continuation(tc_feat, _tc_config())
+        assert not any("stop_below_atr_floor" in r for r in tc_result.pass_fail_reasons)
+
+
+class TestPullbackReboundGate:
+    """P1-2: Pullback rebound confirmation gate."""
+
+    def test_pullback_passes_when_close_above_open(self) -> None:
+        feat = _pullback_feat(close_raw=300.0, open_raw=298.0)
+        result = validate_pullback(feat, _pullback_config())
+        assert not any("pullback_no_rebound_confirmation" in r for r in result.pass_fail_reasons)
+
+    def test_pullback_passes_when_ema20_slope_positive(self) -> None:
+        feat = _pullback_feat(
+            close_raw=300.0, open_raw=302.0,  # bearish candle
+            ema20_slope=0.01,                  # but slope is positive
+        )
+        result = validate_pullback(feat, _pullback_config())
+        assert not any("pullback_no_rebound_confirmation" in r for r in result.pass_fail_reasons)
+
+    def test_pullback_passes_when_roc20_positive(self) -> None:
+        feat = _pullback_feat(
+            close_raw=300.0, open_raw=302.0,  # bearish candle
+            ema20_slope=-0.01,                 # slope negative
+            roc20=0.03,                        # but roc20 positive
+        )
+        result = validate_pullback(feat, _pullback_config())
+        assert not any("pullback_no_rebound_confirmation" in r for r in result.pass_fail_reasons)
+
+    def test_pullback_fails_when_all_rebound_signals_absent(self) -> None:
+        # bearish candle, negative slope, negative roc20 → no rebound signal
+        feat = _pullback_feat(
+            close_raw=298.0, open_raw=300.0,  # bearish candle
+            ema20_slope=-0.01,
+            roc20=-0.02,
+        )
+        result = validate_pullback(feat, _pullback_config())
+        assert result.setup_passed is False
+        assert any("pullback_no_rebound_confirmation" in r for r in result.pass_fail_reasons)
+
+    def test_pullback_rebound_required_false_skips_check(self) -> None:
+        # Config disables rebound check
+        cfg = _pullback_config(rebound_required=False)
+        feat = _pullback_feat(
+            close_raw=298.0, open_raw=300.0,
+            ema20_slope=-0.01, roc20=-0.02,
+        )
+        result = validate_pullback(feat, cfg)
+        assert not any("pullback_no_rebound_confirmation" in r for r in result.pass_fail_reasons)
+
+    def test_pullback_rebound_in_evidence(self) -> None:
+        feat = _pullback_feat()
+        result = validate_pullback(feat, _pullback_config())
+        ev = result.evidence_json
+        assert "rebound_required" in ev
+        assert "ema20_slope" in ev
+        assert "roc20" in ev
+        assert "open_raw" in ev
+
+    def test_pullback_no_rebound_does_not_block_breakout(self) -> None:
+        """Pullback rebound failure doesn't prevent breakout from evaluating independently."""
+        pb_feat = _pullback_feat(
+            close_raw=298.0, open_raw=300.0, ema20_slope=-0.01, roc20=-0.02,
+        )
+        pb_result = validate_pullback(pb_feat, _pullback_config())
+        assert any("pullback_no_rebound_confirmation" in r for r in pb_result.pass_fail_reasons)
+
+        bo_result = validate_breakout(_breakout_feat(), _breakout_config())
+        assert bo_result.setup_passed is True
+
+
+class TestConsolidationBaseIdentifiedGate:
+    """P1-3: Base levels must be explicitly identified."""
+
+    def test_cb_fails_when_base_high_none(self) -> None:
+        feat = _cb_feat(base_high=None)
+        result = validate_consolidation_base(feat, _cb_config())
+        assert result.setup_passed is False
+        assert any("consolidation_base_not_identified" in r for r in result.pass_fail_reasons)
+
+    def test_cb_fails_when_base_low_none(self) -> None:
+        feat = _cb_feat(base_low=None)
+        result = validate_consolidation_base(feat, _cb_config())
+        assert result.setup_passed is False
+        assert any("consolidation_base_not_identified" in r for r in result.pass_fail_reasons)
+
+    def test_cb_fails_when_both_base_levels_none(self) -> None:
+        feat = _cb_feat(base_high=None, base_low=None)
+        result = validate_consolidation_base(feat, _cb_config())
+        assert result.setup_passed is False
+        assert any("consolidation_base_not_identified" in r for r in result.pass_fail_reasons)
+
+    def test_cb_does_not_block_breakout_when_base_missing(self) -> None:
+        """Missing base levels block consolidation only — breakout evaluates independently."""
+        cb_result = validate_consolidation_base(
+            _cb_feat(base_high=None, base_low=None), _cb_config()
+        )
+        assert any("consolidation_base_not_identified" in r for r in cb_result.pass_fail_reasons)
+
+        bo_result = validate_breakout(_breakout_feat(), _breakout_config())
+        assert bo_result.setup_passed is True
+
+
+class TestResistanceBlocks:
+    """P2-1: resistance_blocks flag in evidence_json for breakout and trend_continuation."""
+
+    def test_breakout_resistance_blocks_true_when_below_next_resistance(self) -> None:
+        # resistance=160 sits between entry=155 and next_resistance=170 → blocks upside
+        feat = _breakout_feat(
+            close_raw=155.0, close_adj=155.0,
+            resistance_level=160.0, next_resistance_level=170.0,
+        )
+        result = validate_breakout(feat, _breakout_config())
+        ev = result.evidence_json
+        assert "resistance_blocks" in ev
+        assert ev["resistance_blocks"] is True
+
+    def test_breakout_resistance_blocks_true_when_resistance_is_the_cap(self) -> None:
+        # Only resistance above entry (no next_resistance) → resistance IS the ceiling
+        feat = _breakout_feat(
+            close_raw=155.0, close_adj=155.0,
+            resistance_level=160.0, next_resistance_level=None,
+        )
+        result = validate_breakout(feat, _breakout_config())
+        ev = result.evidence_json
+        assert "resistance_blocks" in ev
+        assert ev["resistance_blocks"] is True  # resistance IS the cap
+
+    def test_breakout_resistance_blocks_false_when_no_resistance(self) -> None:
+        feat = _breakout_feat(resistance_level=None, next_resistance_level=None)
+        result = validate_breakout(feat, _breakout_config())
+        ev = result.evidence_json
+        assert "resistance_blocks" in ev
+        assert ev["resistance_blocks"] is False
+
+    def test_tc_resistance_blocks_in_evidence(self) -> None:
+        feat = _tc_feat(
+            resistance_level=520.0, next_resistance_level=560.0,
+            close_raw=500.0, close_adj=500.0,
+        )
+        result = validate_trend_continuation(feat, _tc_config())
+        ev = result.evidence_json
+        assert "resistance_blocks" in ev
+
+
+class TestSetupIndependence:
+    """Verify setup-specific gate failures do NOT cascade to other setups."""
+
+    def test_breakout_fail_no_resistance_allows_pullback_pass(self) -> None:
+        """Resistance NULL fails breakout only; pullback evaluates independently and can pass."""
+        bo_feat = _breakout_feat(resistance_level=None)
+        bo_result = validate_breakout(bo_feat, _breakout_config())
+        assert bo_result.setup_passed is False
+        assert any("no_resistance_level" in r for r in bo_result.pass_fail_reasons)
+
+        pb_result = validate_pullback(_pullback_feat(), _pullback_config())
+        assert pb_result.setup_passed is True
+
+    def test_pullback_rebound_fail_allows_consolidation_pass(self) -> None:
+        """Rebound failure on pullback doesn't affect consolidation evaluation."""
+        pb_feat = _pullback_feat(
+            close_raw=298.0, open_raw=300.0, ema20_slope=-0.01, roc20=-0.02,
+        )
+        pb_result = validate_pullback(pb_feat, _pullback_config())
+        assert any("pullback_no_rebound_confirmation" in r for r in pb_result.pass_fail_reasons)
+
+        cb_result = validate_consolidation_base(_cb_feat(), _cb_config())
+        assert cb_result.setup_passed is True
+
+    def test_consolidation_no_base_allows_tc_pass(self) -> None:
+        """Missing base levels fail consolidation; TC evaluates independently."""
+        cb_result = validate_consolidation_base(
+            _cb_feat(base_high=None, base_low=None), _cb_config()
+        )
+        assert cb_result.setup_passed is False
+
+        tc_result = validate_trend_continuation(_tc_feat(), _tc_config())
+        assert tc_result.setup_passed is True
+
+    def test_all_setups_produce_independent_results(self) -> None:
+        """Each validator returns a result regardless of what other validators return."""
+        bo_feat = _breakout_feat(resistance_level=None)   # will fail breakout
+        pb_feat = _pullback_feat()                          # should pass
+        tc_feat = _tc_feat()                               # should pass
+        cb_feat = _cb_feat(base_high=None)                 # will fail consolidation
+
+        results = [
+            validate_breakout(bo_feat, _breakout_config()),
+            validate_pullback(pb_feat, _pullback_config()),
+            validate_trend_continuation(tc_feat, _tc_config()),
+            validate_consolidation_base(cb_feat, _cb_config()),
+        ]
+
+        # All validators return a result (no exception)
+        assert all(isinstance(r, SetupValidationResult) for r in results)
+        # Breakout and consolidation fail; pullback and TC pass
+        assert results[0].setup_passed is False   # breakout: no resistance
+        assert results[1].setup_passed is True    # pullback
+        assert results[2].setup_passed is True    # trend_continuation
+        assert results[3].setup_passed is False   # consolidation: no base
+
+
+# ---------------------------------------------------------------------------
+# Session-2 diagnostic fixes
+# ---------------------------------------------------------------------------
+
+class TestResistanceZeroHardFail:
+    """Fix #1: resistance stored as 0.0 in DB must also be caught as missing."""
+
+    def test_breakout_fails_when_resistance_is_zero(self) -> None:
+        feat = _breakout_feat(resistance_level=0.0)
+        result = validate_breakout(feat, _breakout_config())
+        assert result.setup_passed is False
+        assert any("no_resistance_level" in r for r in result.pass_fail_reasons)
+
+    def test_breakout_fails_when_resistance_is_none(self) -> None:
+        feat = _breakout_feat(resistance_level=None)
+        result = validate_breakout(feat, _breakout_config())
+        assert result.setup_passed is False
+        assert any("no_resistance_level" in r for r in result.pass_fail_reasons)
+
+    def test_breakout_passes_when_resistance_is_positive(self) -> None:
+        feat = _breakout_feat(resistance_level=160.0)
+        result = validate_breakout(feat, _breakout_config())
+        assert not any("no_resistance_level" in r for r in result.pass_fail_reasons)
+
+
+class TestReboundSlopeThreshold:
+    """Fix #2: ema20_slope noise floor — values below 0.002 must not satisfy the rebound gate."""
+
+    def test_pullback_fails_when_slope_is_noise(self) -> None:
+        # ema20_slope=0.001 is below min_rebound_slope=0.002 → slope signal fails
+        # bearish candle + negative roc20 → all three signals absent → hard fail
+        feat = _pullback_feat(
+            close_raw=298.0, open_raw=300.0,
+            ema20_slope=0.001,
+            roc20=-0.005,
+        )
+        result = validate_pullback(feat, _pullback_config())
+        assert result.setup_passed is False
+        assert any("pullback_no_rebound_confirmation" in r for r in result.pass_fail_reasons)
+
+    def test_pullback_passes_when_slope_clears_threshold(self) -> None:
+        # ema20_slope=0.003 >= 0.002 → rebound via slope despite bearish candle + neg roc
+        feat = _pullback_feat(
+            close_raw=298.0, open_raw=300.0,
+            ema20_slope=0.003,
+            roc20=-0.005,
+        )
+        result = validate_pullback(feat, _pullback_config())
+        assert not any("pullback_no_rebound_confirmation" in r for r in result.pass_fail_reasons)
+
+    def test_min_rebound_slope_configurable(self) -> None:
+        # With a custom high threshold of 0.01, slope=0.003 should fail
+        cfg = _pullback_config(min_rebound_slope=0.01)
+        feat = _pullback_feat(
+            close_raw=298.0, open_raw=300.0,
+            ema20_slope=0.003,
+            roc20=-0.005,
+        )
+        result = validate_pullback(feat, cfg)
+        assert result.setup_passed is False
+        assert any("pullback_no_rebound_confirmation" in r for r in result.pass_fail_reasons)
+
+
+class TestSwingLowGuard:
+    """Fix #5: swing_low at or above current price must be nulled (invalid stop anchor)."""
+
+    def test_pullback_nulls_swing_low_at_or_above_close(self) -> None:
+        # swing_low=305 >= close_adj=300 → nulled; ATR stop falls back to None → gate skipped
+        feat = _pullback_feat(close_raw=300.0, close_adj=300.0, swing_low=305.0)
+        result = validate_pullback(feat, _pullback_config())
+        # swing_low_adj nulled → should NOT appear as a valid value in evidence
+        ev = result.evidence_json
+        assert ev.get("swing_low_adj") is None
+
+    def test_pullback_keeps_valid_swing_low_below_close(self) -> None:
+        # swing_low=290 < close_adj=300 → valid, kept
+        feat = _pullback_feat(close_raw=300.0, close_adj=300.0, swing_low=290.0)
+        result = validate_pullback(feat, _pullback_config())
+        ev = result.evidence_json
+        assert ev.get("swing_low_adj") == 290.0
+
+    def test_tc_nulls_swing_low_at_or_above_close(self) -> None:
+        # swing_low=510 >= close_adj=500 → nulled; ATR stop gate skipped
+        feat = _tc_feat(close_raw=500.0, close_adj=500.0, swing_low=510.0)
+        result = validate_trend_continuation(feat, _tc_config())
+        ev = result.evidence_json
+        assert ev.get("swing_low_raw") is None

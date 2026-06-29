@@ -746,10 +746,7 @@ def _compute_final_trade_decision(
     Disposition BUY passes through unless a readiness gate fires:
       breakout — price must have cleared resistance.
       all      — stop must be ≥ min_stop_distance_atr ATR from entry (P4: config-driven).
-      pullback — three independent confirmation gates (P1):
-                   roc20 < 0            → momentum deteriorating
-                   ema20_slope < 0      → EMA20 declining
-                   close below EMA20 without volume surge (rvol < 1.2) → no bounce
+    Pullback rebound confirmation is a hard check in M14 (pre-score), not here.
     WATCHLIST_ONLY / REJECTED pass through unchanged.
     """
     if disposition == DISPOSITION_REJECTED:
@@ -763,19 +760,6 @@ def _compute_final_trade_decision(
 
     if stop_distance_atr is not None and stop_distance_atr < min_stop_distance_atr:
         return FTD_WAIT_FOR_RISK_PLAN_FIX, ["stop_too_tight_vs_atr"]
-
-    if setup_type == "pullback":
-        wait_reasons: list[str] = []
-        if roc20_val is not None and roc20_val < 0:
-            wait_reasons.append("pullback_negative_momentum")
-        if ema20_slope_val is not None and ema20_slope_val < 0:
-            wait_reasons.append("ema20_slope_negative")
-        below_ema20 = dist_ema20 is not None and dist_ema20 < 0
-        vol_confirmed = rvol_val is not None and rvol_val >= 1.2
-        if below_ema20 and not vol_confirmed:
-            wait_reasons.append("rebound_not_confirmed")
-        if wait_reasons:
-            return FTD_WAIT_FOR_PULLBACK_CONFIRMATION, wait_reasons
 
     return FTD_BUY, []
 
