@@ -390,6 +390,31 @@ def _fmt_price(val: Any) -> str:
         return str(val)
 
 
+def resolve_report_ticker(
+    manual_mode: bool,
+    manual_value: str,
+    dropdown_label: str,
+    option_map: dict[str, dict],
+) -> tuple[str | None, dict | None]:
+    """Return (effective_ticker, effective_row) for the report download button.
+
+    manual_mode=True  — normalize manual_value (strip whitespace + uppercase).
+                        Returns (None, None) when the field is blank so the
+                        caller can disable the download button.
+    manual_mode=False — resolve via dropdown_label through option_map exactly
+                        as the existing dropdown path does.
+    """
+    if manual_mode:
+        normalized = manual_value.strip().upper()
+        if not normalized:
+            return None, None
+        return normalized, {"ticker": normalized}
+    row = option_map.get(dropdown_label)
+    if row is None:
+        return None, None
+    return row.get("ticker", ""), row
+
+
 # ------------------------------------------------------------------ #
 # CSS injection.
 # ------------------------------------------------------------------ #
@@ -625,10 +650,22 @@ def _render_daily_proposals() -> None:  # noqa: C901
     # ---- Proposal table ----
     st.markdown('<div class="da-card">', unsafe_allow_html=True)
 
-    # Header row: title + selectbox + single download button
-    hdr_title, hdr_sel, hdr_btn, _ = st.columns([3, 2, 2, 1])
+    # Header row: title | manual-entry checkbox | manual text input | dropdown | download
+    st.session_state.setdefault("manual_ticker_mode", False)
+    st.session_state.setdefault("manual_ticker_input", "")
+    hdr_title, hdr_chk, hdr_manual, hdr_sel, hdr_btn = st.columns([2, 1, 2, 2, 2])
     with hdr_title:
         st.markdown('<h3 style="margin:0;line-height:38px;font-size:17px;font-weight:800">Proposed Stocks</h3>', unsafe_allow_html=True)
+    with hdr_chk:
+        manual_mode: bool = st.checkbox("Manual entry", key="manual_ticker_mode")
+    with hdr_manual:
+        manual_ticker_raw: str = st.text_input(
+            "Ticker",
+            placeholder="e.g. AAPL",
+            label_visibility="collapsed",
+            key="manual_ticker_input",
+            disabled=not manual_mode,
+        )  # type: ignore[assignment]
     with hdr_sel:
         doc_label: str = st.selectbox(
             "doc_sel",
@@ -636,13 +673,16 @@ def _render_daily_proposals() -> None:  # noqa: C901
             index=0,
             label_visibility="collapsed",
             key="doc_ticker_sel",
+            disabled=manual_mode,
         )  # type: ignore[assignment]
     with hdr_btn:
-        sel_row = doc_option_map.get(doc_label)
-        if sel_row:
-            _doc_strategy = sel_row.get("setup_config_id") or ""
+        _, eff_row = resolve_report_ticker(
+            manual_mode, manual_ticker_raw, doc_label, doc_option_map,
+        )
+        if eff_row:
+            _doc_strategy = eff_row.get("setup_config_id") or ""
             _doc_bytes, _doc_filename = _build_ticker_document(
-                row=sel_row,
+                row=eff_row,
                 signal_date=signal_date,
                 db_role=role,
                 setup_config_id=_doc_strategy,
@@ -657,6 +697,8 @@ def _render_daily_proposals() -> None:  # noqa: C901
                 use_container_width=True,
             )
         else:
+            if manual_mode and not manual_ticker_raw.strip():
+                st.caption("Enter a ticker above")
             st.button("⬇ Download Report", key="btn_gen_doc_disabled", disabled=True, use_container_width=True)
     export_clicked = False
 

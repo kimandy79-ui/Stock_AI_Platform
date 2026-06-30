@@ -298,6 +298,36 @@ def validate_breakout(
     # Entry proxy
     entry_raw = close_raw
 
+    # P0-1: Early return when resistance is absent — prevents phantom target/score
+    # from flowing through to evidence_json and step4_analysis output.
+    if resistance_adj is None or resistance_adj <= 0:
+        return SetupValidationResult(
+            ticker=ticker,
+            signal_date=signal_date,
+            setup_type=constants.SETUP_BREAKOUT,
+            setup_config_id=cfg_id,
+            setup_passed=False,
+            setup_score=0.0,
+            confidence=CONFIDENCE_LOW,
+            pass_fail_reasons=["no_resistance_level"],
+            setup_fail_reason="no_resistance_level",
+            evidence_json={
+                "hard_fails": ["no_resistance_level"],
+                "resistance_adj": resistance_adj,
+                "resistance_blocks": False,
+            },
+            feature_version=constants.FEATURE_SCHEMA_VERSION,
+            entry_price_raw=entry_raw,
+            support_level_raw=support_raw,
+            atr_pct=atr_pct,
+            distance_to_ema20_pct=dist_ema20,
+            distance_to_ema50_pct=dist_ema50,
+            rvol=rvol20,
+            earnings_days=int(earnings_days) if earnings_days is not None else None,
+            market_regime=market_regime,
+            target_is_structural=None,
+        )
+
     # Penalties
     earnings_pen, macro_pen = _compute_penalties(
         feat,
@@ -308,11 +338,7 @@ def validate_breakout(
     # --- Hard checks ---
     hard_fails: list[str] = []
 
-    # 1. resistance_level must be a positive value (catches None and DB-stored 0.0)
-    if resistance_adj is None or resistance_adj <= 0:
-        hard_fails.append("no_resistance_level")
-
-    # 2. breakout_proximity in range
+    # 1. breakout_proximity in range
     if breakout_proximity is None:
         hard_fails.append("missing_breakout_proximity")
     elif not (prox_min <= breakout_proximity <= prox_max):
@@ -321,20 +347,20 @@ def validate_breakout(
             f"[{prox_min},{prox_max}])"
         )
 
-    # 3. base duration
+    # 2. base duration
     if range_duration_val is None:
         hard_fails.append("missing_range_duration")
     elif range_duration_val < min_base_dur:
         hard_fails.append(f"range_duration_too_short({range_duration_val}<{min_base_dur})")
 
-    # 4. RVOL hard gate
+    # 3. RVOL hard gate
     if rvol_is_hard:
         if rvol20 is None:
             hard_fails.append("missing_rvol")
         elif rvol20 < min_rvol:
             hard_fails.append(f"rvol_below_hard_threshold({rvol20:.2f}<{min_rvol})")
 
-    # 5. Stop ≥ 0.5 ATR below entry (P1-1)
+    # 4. Stop ≥ 0.5 ATR below entry (P1-1)
     # Stop estimated as entry minus support (below-base stop placement)
     if (
         atr_pct is not None and atr_pct > 0

@@ -828,3 +828,92 @@ def test_load_daily_proposals_against_real_schema(
     # Raw (in_raw_top_n=FALSE) -> should return nothing.
     raw_view = loader.load_daily_proposals(signal_date=SIGNAL_DATE, show_diversified=False)
     assert raw_view.rows == []
+
+
+# --------------------------------------------------------------------------- #
+# resolve_report_ticker — pure function, no Streamlit server required
+# --------------------------------------------------------------------------- #
+
+from app.dashboard.streamlit_app import resolve_report_ticker  # noqa: E402
+
+_OPTION_MAP: dict[str, dict] = {
+    "AAPL (breakout)": {"ticker": "AAPL", "setup_config_id": "setup_breakout_v1"},
+    "MSFT (pullback)": {"ticker": "MSFT", "setup_config_id": "setup_pullback_v1"},
+}
+
+
+class TestResolveReportTicker:
+    def test_dropdown_mode_resolves_row(self) -> None:
+        ticker, row = resolve_report_ticker(
+            manual_mode=False,
+            manual_value="",
+            dropdown_label="AAPL (breakout)",
+            option_map=_OPTION_MAP,
+        )
+        assert ticker == "AAPL"
+        assert row is not None
+        assert row["setup_config_id"] == "setup_breakout_v1"
+
+    def test_dropdown_mode_missing_label_returns_none(self) -> None:
+        ticker, row = resolve_report_ticker(
+            manual_mode=False,
+            manual_value="",
+            dropdown_label="UNKNOWN (breakout)",
+            option_map=_OPTION_MAP,
+        )
+        assert ticker is None
+        assert row is None
+
+    def test_manual_mode_valid_input(self) -> None:
+        ticker, row = resolve_report_ticker(
+            manual_mode=True,
+            manual_value="nvda",
+            dropdown_label="AAPL (breakout)",
+            option_map=_OPTION_MAP,
+        )
+        assert ticker == "NVDA"
+        assert row is not None
+        assert row["ticker"] == "NVDA"
+
+    def test_manual_mode_strips_whitespace_and_uppercases(self) -> None:
+        ticker, row = resolve_report_ticker(
+            manual_mode=True,
+            manual_value="  tsla  ",
+            dropdown_label="AAPL (breakout)",
+            option_map=_OPTION_MAP,
+        )
+        assert ticker == "TSLA"
+        assert row is not None
+        assert row["ticker"] == "TSLA"
+
+    def test_manual_mode_empty_input_returns_none(self) -> None:
+        ticker, row = resolve_report_ticker(
+            manual_mode=True,
+            manual_value="",
+            dropdown_label="AAPL (breakout)",
+            option_map=_OPTION_MAP,
+        )
+        assert ticker is None
+        assert row is None
+
+    def test_manual_mode_whitespace_only_returns_none(self) -> None:
+        ticker, row = resolve_report_ticker(
+            manual_mode=True,
+            manual_value="   ",
+            dropdown_label="AAPL (breakout)",
+            option_map=_OPTION_MAP,
+        )
+        assert ticker is None
+        assert row is None
+
+    def test_manual_mode_ignores_dropdown_value(self) -> None:
+        """Dropdown label is irrelevant when manual_mode=True."""
+        ticker, row = resolve_report_ticker(
+            manual_mode=True,
+            manual_value="AMD",
+            dropdown_label="MSFT (pullback)",
+            option_map=_OPTION_MAP,
+        )
+        assert ticker == "AMD"
+        assert row is not None
+        assert row["ticker"] == "AMD"

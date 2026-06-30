@@ -430,10 +430,11 @@ class TestBreakoutValidator:
         result = validate_breakout(feat, _breakout_config())
         assert result.target_is_structural is True
 
-    def test_breakout_target_is_structural_false_when_no_next_resistance(self) -> None:
+    def test_breakout_target_is_structural_none_when_no_resistance(self) -> None:
+        # Early return when resistance_level is absent → target_is_structural is None (not evaluated)
         feat = _breakout_feat(next_resistance_level=None, resistance_level=None)
         result = validate_breakout(feat, _breakout_config())
-        assert result.target_is_structural is False
+        assert result.target_is_structural is None
 
     def test_breakout_raw_conversion_applied(self) -> None:
         # When close_raw != close_adj, resistance_level_raw should differ from resistance_level

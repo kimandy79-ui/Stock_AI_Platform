@@ -1103,12 +1103,11 @@ class Step5ProposalEngine:
                 )
             estimated_rr = _compute_estimated_rr(eff_entry, stop, target)
 
-            # Fix 3: for pullback and TC, cap estimated_rr at resistance when it sits
-            # between entry and target (realistic RR). Breakout excluded: confirmed
-            # breakouts have resistance below entry (no cap needed), and pre-breakout
-            # cases are already demoted to WAIT_FOR_BREAKOUT by FTD.
-            if (setup_type in (constants.SETUP_PULLBACK, constants.SETUP_TREND_CONTINUATION)
-                    and resistance_raw_feat is not None and resistance_raw_feat > eff_entry
+            # Fix 3 (P0-2 universal): cap estimated_rr at resistance for all setup
+            # types when resistance sits between entry and target. For confirmed
+            # breakouts (price > resistance) the condition resistance_raw_feat > eff_entry
+            # is False so no cap applies — the guard is geometry-based, not type-based.
+            if (resistance_raw_feat is not None and resistance_raw_feat > eff_entry
                     and target is not None and resistance_raw_feat < target):
                 estimated_rr = _compute_estimated_rr(eff_entry, stop, resistance_raw_feat)
                 resistance_blocks = True
@@ -1396,30 +1395,47 @@ class Step5ProposalEngine:
     def _apply_hard_cap(ranked: list[dict], cfg: dict) -> None:
         max_s = cfg["max_sector_count"]
         max_i = cfg["max_industry_count"]
-        sc: dict[str, int] = {}
-        ic: dict[str, int] = {}
-        nxt = 1
+
+        # Apply caps independently within each setup_type's candidate pool so that
+        # one setup_type cannot exhaust all sector/industry slots before candidates
+        # from other setup_types are evaluated. Survivors are then merged and
+        # re-ranked by proposal_score_raw for the shared top_n cutoff.
+        by_setup: dict[str, list[dict]] = {}
         for item in ranked:
-            s = item["sector"]
-            i = item["industry"]
-            ps = sc.get(s, 0)
-            pi = ic.get(i, 0)
-            item["proposal_score_final"] = item["proposal_score_raw"]
-            if pi >= max_i or ps >= max_s:
-                item["diversified_rank"] = None
-                item["rejection_reason"] = (
-                    REJECT_INDUSTRY_CAP if pi >= max_i else REJECT_SECTOR_CAP
-                )
-                item["sector_count_at_selection"] = ps
-                item["industry_count_at_selection"] = pi
-            else:
-                item["diversified_rank"] = nxt
-                nxt += 1
-                item["rejection_reason"] = item.get("rejection_reason")  # preserve watchlist reason
-                sc[s] = ps + 1
-                ic[i] = pi + 1
-                item["sector_count_at_selection"] = sc[s]
-                item["industry_count_at_selection"] = ic[i]
+            by_setup.setdefault(item["setup_type"], []).append(item)
+
+        survivors: list[dict] = []
+        for group in by_setup.values():
+            sc: dict[str, int] = {}
+            ic: dict[str, int] = {}
+            for item in group:
+                s = item["sector"]
+                i = item["industry"]
+                ps = sc.get(s, 0)
+                pi = ic.get(i, 0)
+                item["proposal_score_final"] = item["proposal_score_raw"]
+                if pi >= max_i or ps >= max_s:
+                    item["diversified_rank"] = None
+                    item["rejection_reason"] = (
+                        REJECT_INDUSTRY_CAP if pi >= max_i else REJECT_SECTOR_CAP
+                    )
+                    item["sector_count_at_selection"] = ps
+                    item["industry_count_at_selection"] = pi
+                else:
+                    sc[s] = ps + 1
+                    ic[i] = pi + 1
+                    item["sector_count_at_selection"] = sc[s]
+                    item["industry_count_at_selection"] = ic[i]
+                    survivors.append(item)
+
+        # Merge survivors across setup_types; re-rank by score for final top_n.
+        survivors.sort(key=lambda x: (
+            0 if x["disposition"] == DISPOSITION_BUY else 1,
+            -x["proposal_score_raw"],
+            x["ticker"],
+        ))
+        for nxt, item in enumerate(survivors, start=1):
+            item["diversified_rank"] = nxt
 
     @staticmethod
     def _apply_soft_penalty(ranked: list[dict], cfg: dict) -> None:

@@ -840,8 +840,9 @@ class TestSinglePassedCandidate:
         db = dbm.DB_ROLE_PROD
         _seed_ticker(db, "DDD")
         _seed_price(db, "DDD", SIGNAL_DATE, 100.0, 100.0)
+        # resistance_level=None so no resistance cap fires; test verifies formula only
         _seed_features(db, "DDD", SIGNAL_DATE, close_adj=100.0, atr14=2.0,
-                       base_low=95.0, next_resistance_level=115.0)
+                       base_low=95.0, next_resistance_level=115.0, resistance_level=None)
         _seed_step4(db, "DDD", SIGNAL_DATE, setup_type="breakout",
                     setup_passed=True, setup_score=70.0, entry_price_raw=100.0)
         eng = _make_engine()
@@ -1266,6 +1267,53 @@ class TestProductionDiversificationLimits:
         assert props["C3"]["industry_count_at_selection"] == 1  # new industry
 
 
+    def test_cross_setup_type_cap_isolation(self, tmp_db_paths):
+        """Sector/industry caps are applied per setup_type independently.
+
+        Breakout consumes its own sector cap; pullback candidates in the same
+        sector still pass through the pullback cap pass unaffected.
+        """
+        db = dbm.DB_ROLE_PROD
+        # Breakout: 3 tickers in Technology/SaaS — only 2 allowed (sector_max=2)
+        for t, score in [("B1", 85.0), ("B2", 83.0), ("B3", 81.0)]:
+            _seed_ticker(db, t, sector="Technology", industry="SaaS")
+            _seed_price(db, t, SIGNAL_DATE, 100.0, 100.0)
+            _seed_features(db, t, SIGNAL_DATE, close_adj=100.0, atr14=2.0,
+                           next_resistance_level=115.0)
+            _seed_step4(db, t, SIGNAL_DATE, setup_type="breakout",
+                        setup_config_id="setup_breakout_v1",
+                        setup_passed=True, setup_score=score,
+                        entry_price_raw=100.0, market_regime="bull", earnings_days=30)
+        # Pullback: 2 tickers also in Technology/SaaS — same sector, separate cap pass
+        for t, score in [("P1", 79.0), ("P2", 77.0)]:
+            _seed_ticker(db, t, sector="Technology", industry="SaaS")
+            _seed_price(db, t, SIGNAL_DATE, 100.0, 100.0)
+            _seed_features(db, t, SIGNAL_DATE, close_adj=100.0, atr14=2.0,
+                           next_resistance_level=115.0)
+            _seed_step4(db, t, SIGNAL_DATE, setup_type="pullback",
+                        setup_config_id="setup_pullback_v1",
+                        setup_passed=True, setup_score=score,
+                        entry_price_raw=100.0, market_regime="bull", earnings_days=30)
+
+        cfg = _minimal_risk_config(top_n=10, max_sector=2, max_industry=10, min_rr=1.0)
+        Step5ProposalEngine().propose(
+            SIGNAL_DATE, risk_label_config=cfg,
+            setup_configs=DEFAULT_SETUP_CONFIGS, db_role=db,
+        )
+        props = _read_proposals(db, SIGNAL_DATE)
+
+        # B3 is sector-cap-rejected within the breakout group
+        sector_rejected = [p for p in props if p["rejection_reason"] == REJECT_SECTOR_CAP]
+        assert len(sector_rejected) == 1
+        assert sector_rejected[0]["ticker"] == "B3"
+
+        # P1 and P2 pass (pullback group has its own fresh cap counters)
+        selected_tickers = {p["ticker"] for p in props if p["selected_flag"]}
+        assert "P1" in selected_tickers
+        assert "P2" in selected_tickers
+        assert "B3" not in selected_tickers
+
+
 class TestMultiRouteDedupe:
     def test_best_setup_type_selected_per_ticker(self, tmp_db_paths):
         """A ticker routed to both breakout and pullback → only 1 proposal row."""
@@ -1517,9 +1565,10 @@ class TestFix2MaxStopDistanceGate:
         db = dbm.DB_ROLE_PROD
         _seed_ticker(db, "WIDE")
         _seed_price(db, "WIDE", SIGNAL_DATE, 100.0, 100.0)
-        # base_low=60 forces a stop far below entry
+        # base_low=60 forces a stop far below entry; resistance below entry so no cap fires
         _seed_features(db, "WIDE", SIGNAL_DATE, close_adj=100.0, atr14=2.0,
-                       base_low=60.0, support_level=60.0, next_resistance_level=115.0)
+                       base_low=60.0, support_level=60.0, next_resistance_level=115.0,
+                       resistance_level=95.0)
         _seed_step4(db, "WIDE", SIGNAL_DATE, setup_type="breakout",
                     setup_passed=True, setup_score=80.0, entry_price_raw=100.0,
                     market_regime="bull", earnings_days=30, rvol=2.0)
@@ -1555,8 +1604,10 @@ class TestFix2MaxStopDistanceGate:
         db = dbm.DB_ROLE_PROD
         _seed_ticker(db, "WIDEHIGHRR")
         _seed_price(db, "WIDEHIGHRR", SIGNAL_DATE, 100.0, 100.0)
+        # resistance below entry so no resistance cap interferes with stop-gate test
         _seed_features(db, "WIDEHIGHRR", SIGNAL_DATE, close_adj=100.0, atr14=2.0,
-                       base_low=50.0, support_level=50.0, next_resistance_level=200.0)
+                       base_low=50.0, support_level=50.0, next_resistance_level=200.0,
+                       resistance_level=95.0)
         _seed_step4(db, "WIDEHIGHRR", SIGNAL_DATE, setup_type="breakout",
                     setup_passed=True, setup_score=95.0, entry_price_raw=100.0,
                     market_regime="bull", earnings_days=60, rvol=3.0)
@@ -1734,18 +1785,18 @@ class TestFix3TargetRoom:
         expl = json.loads(p["mechanical_explanation"])
         assert expl.get("resistance_blocks") is True
 
-    def test_breakout_rr_not_capped_at_resistance(self, tmp_db_paths):
-        """Fix 3 (session 3): breakout RR is NOT capped at resistance.
-        Confirmed breakouts have resistance < entry (cap check fails naturally).
-        Pre-breakout breakouts are demoted by FTD WAIT_FOR_BREAKOUT instead.
+    def test_breakout_rr_capped_at_resistance_when_blocking(self, tmp_db_paths):
+        """P0-2: breakout estimated_rr is capped at resistance when it sits between
+        entry and next_resistance target (universal cap, not pullback/TC only).
+        Pattern: entry=100, resistance=105, next_resistance=130 → cap at 105.
         """
         db = dbm.DB_ROLE_PROD
-        _seed_ticker(db, "BNOCLIP")
-        _seed_price(db, "BNOCLIP", SIGNAL_DATE, 100.0, 100.0)
-        _seed_features(db, "BNOCLIP", SIGNAL_DATE, close_adj=100.0, atr14=2.0,
+        _seed_ticker(db, "BOCLIP")
+        _seed_price(db, "BOCLIP", SIGNAL_DATE, 100.0, 100.0)
+        _seed_features(db, "BOCLIP", SIGNAL_DATE, close_adj=100.0, atr14=2.0,
                        resistance_level=105.0, next_resistance_level=130.0,
                        base_low=96.0, swing_high=None, base_high=None)
-        _seed_step4(db, "BNOCLIP", SIGNAL_DATE, setup_type="breakout",
+        _seed_step4(db, "BOCLIP", SIGNAL_DATE, setup_type="breakout",
                     setup_config_id="setup_breakout_v1",
                     setup_passed=True, setup_score=75.0, entry_price_raw=100.0,
                     market_regime="bull", earnings_days=30, rvol=2.0)
@@ -1755,15 +1806,42 @@ class TestFix3TargetRoom:
                     setup_configs=DEFAULT_SETUP_CONFIGS, db_role=db)
         props = _read_proposals(db, SIGNAL_DATE)
         p = props[0]
-        # target_price_raw should be next_resistance=130, not capped at resistance=105
-        if p["target_price_raw"] is not None:
-            assert p["target_price_raw"] > 110.0  # clearly above resistance=105
-        # estimated_rr uses the full next_resistance target (no cap)
-        if p["estimated_rr"] is not None and p["stop_price_raw"] is not None:
-            assert p["estimated_rr"] == pytest.approx(
-                (p["target_price_raw"] - p["entry_price_raw"]) /
-                (p["entry_price_raw"] - p["stop_price_raw"]), rel=0.01
-            )
+        # RR must be capped at resistance=105, not the uncapped next_resistance=130
+        assert p["estimated_rr"] is not None
+        if p["stop_price_raw"] is not None:
+            uncapped_rr = (130.0 - 100.0) / (100.0 - p["stop_price_raw"])
+            capped_rr = (105.0 - 100.0) / (100.0 - p["stop_price_raw"])
+            assert p["estimated_rr"] == pytest.approx(capped_rr, rel=0.01)
+            assert p["estimated_rr"] < uncapped_rr
+        # resistance_blocks forces WATCHLIST_ONLY
+        assert p["disposition"] == DISPOSITION_WATCHLIST
+        expl = json.loads(p["mechanical_explanation"])
+        assert expl.get("resistance_blocks") is True
+
+    def test_breakout_rr_not_capped_when_resistance_below_entry(self, tmp_db_paths):
+        """Confirmed breakout: resistance < entry → geometry check false, no cap applied."""
+        db = dbm.DB_ROLE_PROD
+        _seed_ticker(db, "BNOCP2")
+        _seed_price(db, "BNOCP2", SIGNAL_DATE, 100.0, 100.0)
+        # resistance=95 is below entry=100 (confirmed breakout through resistance)
+        _seed_features(db, "BNOCP2", SIGNAL_DATE, close_adj=100.0, atr14=2.0,
+                       resistance_level=95.0, next_resistance_level=130.0,
+                       base_low=92.0, swing_high=None, base_high=None)
+        _seed_step4(db, "BNOCP2", SIGNAL_DATE, setup_type="breakout",
+                    setup_config_id="setup_breakout_v1",
+                    setup_passed=True, setup_score=75.0, entry_price_raw=100.0,
+                    market_regime="bull", earnings_days=30, rvol=2.0)
+        cfg = _minimal_risk_config(min_rr=0.5, low_max=90.0, top_n=5)
+        eng = _make_engine()
+        eng.propose(SIGNAL_DATE, risk_label_config=cfg,
+                    setup_configs=DEFAULT_SETUP_CONFIGS, db_role=db)
+        props = _read_proposals(db, SIGNAL_DATE)
+        p = props[0]
+        # No cap: resistance < entry, condition resistance_raw_feat > eff_entry is False
+        assert p["estimated_rr"] is not None
+        if p["stop_price_raw"] is not None and p["target_price_raw"] is not None:
+            expected_rr = (p["target_price_raw"] - 100.0) / (100.0 - p["stop_price_raw"])
+            assert p["estimated_rr"] == pytest.approx(expected_rr, rel=0.01)
 
 
 class TestFix4InvalidationLevel:
