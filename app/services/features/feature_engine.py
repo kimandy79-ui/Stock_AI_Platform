@@ -253,7 +253,8 @@ _SELECT_SECTORS: Final[str] = (
 # Earnings: fetch all future/recent entries for the batch; filter per-ticker after load.
 _SELECT_EARNINGS: Final[str] = (
     "SELECT ticker, earnings_date, confidence FROM earnings_calendar "
-    "WHERE ticker IN ({placeholders}) ORDER BY ticker, earnings_date"
+    "WHERE ticker IN ({placeholders}) AND CAST(updated_at AS DATE) <= ? "
+    "ORDER BY ticker, earnings_date"
 )
 
 
@@ -806,7 +807,7 @@ class FeatureEngine:
                 )
 
             # G-EARN gap closure: load earnings_calendar for all process_tickers.
-            earnings_by_ticker = self._read_earnings(connection, process_tickers)
+            earnings_by_ticker = self._read_earnings(connection, process_tickers, end_date)
         finally:
             connection.close()
 
@@ -847,15 +848,18 @@ class FeatureEngine:
         return sector_by_ticker, industry_by_ticker
 
     def _read_earnings(
-        self, connection: Any, process_tickers: list[str]
+        self, connection: Any, process_tickers: list[str], cutoff_date: date
     ) -> dict[str, list[tuple[date, str]]]:
-        """Return {ticker: [(earnings_date, confidence), ...]} sorted ascending."""
+        """Return {ticker: [(earnings_date, confidence), ...]} sorted ascending.
+
+        Only records with updated_at <= cutoff_date are included (point-in-time safe).
+        """
         if not process_tickers:
             return {}
         try:
             placeholders = ", ".join("?" for _ in process_tickers)
             sql = _SELECT_EARNINGS.format(placeholders=placeholders)
-            rows = connection.execute(sql, list(process_tickers)).fetchall()
+            rows = connection.execute(sql, list(process_tickers) + [cutoff_date]).fetchall()
             result: dict[str, list[tuple[date, str]]] = {}
             for ticker, edate, conf in rows:
                 result.setdefault(ticker, []).append((edate, conf or "low"))
