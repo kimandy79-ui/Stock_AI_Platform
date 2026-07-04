@@ -478,6 +478,24 @@ _PROD_TABLE_DDL: Final[tuple[str, ...]] = (
         created_at TIMESTAMP NOT NULL
     );
     """,
+    # Module 23 — Config Recommender (learning layer). Proposals are always
+    # human-gated: activation happens exclusively via a human calling
+    # ConfigService.activate_setup_config() directly; this table only ever
+    # records a proposal + its evidence, never an activation.
+    """
+    CREATE TABLE IF NOT EXISTS config_recommendations (
+        recommendation_id VARCHAR PRIMARY KEY,
+        run_id VARCHAR NOT NULL,
+        setup_type VARCHAR NOT NULL,
+        regime VARCHAR,
+        incumbent_config_id VARCHAR NOT NULL,
+        candidate_config_id VARCHAR NOT NULL,
+        proposal_json JSON NOT NULL,
+        evidence_json JSON NOT NULL,
+        status VARCHAR NOT NULL DEFAULT 'pending',
+        created_at TIMESTAMP NOT NULL
+    );
+    """,
 )
 
 _PROD_INDEX_DDL: Final[tuple[str, ...]] = (
@@ -494,6 +512,7 @@ _PROD_INDEX_DDL: Final[tuple[str, ...]] = (
     "CREATE INDEX IF NOT EXISTS idx_repair_status ON data_repair_queue(status, repair_date);",
     "CREATE INDEX IF NOT EXISTS idx_diag_run_date ON pipeline_run_diagnostics(run_id, signal_date);",
     "CREATE INDEX IF NOT EXISTS idx_diag_run_step ON pipeline_run_diagnostics(run_id, step_name, setup_type);",
+    "CREATE INDEX IF NOT EXISTS idx_config_recs_setup_regime_status ON config_recommendations(setup_type, regime, status);",
 )
 
 _PROD_INDEX_NAMES: Final[tuple[str, ...]] = (
@@ -510,6 +529,7 @@ _PROD_INDEX_NAMES: Final[tuple[str, ...]] = (
     "idx_repair_status",
     "idx_diag_run_date",
     "idx_diag_run_step",
+    "idx_config_recs_setup_regime_status",
 )
 
 _PROD_VIEW_DDL: Final[tuple[str, ...]] = (

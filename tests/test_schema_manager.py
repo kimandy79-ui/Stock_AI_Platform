@@ -55,6 +55,7 @@ EXPECTED_PROD_TABLES: frozenset[str] = frozenset({
     "ai_reviews",
     "execution_decisions",
     "pipeline_run_diagnostics",
+    "config_recommendations",
 })
 
 EXPECTED_SIM_TABLES: frozenset[str] = frozenset({
@@ -82,6 +83,7 @@ FORBIDDEN_IN_SIM: frozenset[str] = frozenset({
     "signal_outcomes",
     "pipeline_runs",
     "pipeline_locks",
+    "config_recommendations",
 })
 
 EXPECTED_PROD_INDEXES: frozenset[str] = frozenset({
@@ -98,6 +100,7 @@ EXPECTED_PROD_INDEXES: frozenset[str] = frozenset({
     "idx_repair_status",
     "idx_diag_run_date",
     "idx_diag_run_step",
+    "idx_config_recs_setup_regime_status",
 })
 
 EXPECTED_SIM_INDEXES: frozenset[str] = frozenset({

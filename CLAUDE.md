@@ -89,6 +89,7 @@ M21  app/dashboard/streamlit_app.py
      app/dashboard/ticker_report.py
 M22  app/services/debug/debug_mode.py
      app/services/diagnostics/funnel_diagnostics.py
+M23  app/services/learning/config_recommender.py
 ```
 
 ### Config layer (cross-cutting)
@@ -143,6 +144,7 @@ M22  app/services/debug/debug_mode.py
      tests/test_dashboard_actions.py         M21 actions
      tests/test_debug_mode.py                M22
      tests/test_funnel_diagnostics.py        M22 diagnostics
+     tests/test_config_recommender.py        M23
      tests/test_config_service.py            config layer
      tests/test_sector_normalization.py      config layer
      tests/test_orchestrator_config_loading.py  config+M20
@@ -193,6 +195,7 @@ M22  app/services/debug/debug_mode.py
      specs/M22_DEBUG_MODE_SPEC.md
      specs/M22_DEBUG_MODE_CONFIG_DELTA.md
      specs/M22_FUNNEL_DIAGNOSTICS_SPEC.md
+     specs/M23_CONFIG_RECOMMENDER_SPEC.md
 ```
 
 ---
