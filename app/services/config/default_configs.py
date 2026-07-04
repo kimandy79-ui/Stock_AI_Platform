@@ -176,6 +176,203 @@ DEFAULT_SETUP_CONFIGS: Final[dict[str, dict[str, Any]]] = {
 }
 
 # --------------------------------------------------------------------------- #
+# Preset setup configs (Phase 1.5) — literature-anchored variants for
+# simulation sweeps only. Never activated (active_flag=FALSE always); prod/debug
+# keep exactly one active config per setup_type (the DEFAULT_SETUP_CONFIGS v1
+# rows above). Each preset's ``parent_config_id`` names the v1 config it was
+# cloned/tightened from, per the immutable clone-and-version rule (CLAUDE.md).
+#
+# Field names are taken verbatim from what each validator in
+# app/services/screening/m14_setup_validators.py actually reads under
+# setup_config["validation"] — no new fields invented. Two criteria named in
+# the Phase 1.5 coder note have **no corresponding field** in the current
+# validators and are called out per-preset below rather than silently
+# approximated as if fully implemented:
+#   - breakout "RS filter": validate_breakout never reads any relative-strength
+#     feature (only validate_trend_continuation does). Not representable
+#     without a Step 4 code change (out of scope — presets are data only).
+#   - trend_continuation "RS vs SPY >0 required not soft" / "price>50MA>150MA>
+#     200MA": relative_strength is scoring-only in validate_trend_continuation
+#     (no hard RS gate exists), and there is no 150-day EMA/SMA feature in the
+#     schema at all. Approximated by raising the "relative_strength" scoring
+#     weight and requiring a high min_ema_alignment instead — not a true hard
+#     requirement.
+# --------------------------------------------------------------------------- #
+PRESET_SETUP_CONFIGS: Final[list[dict[str, Any]]] = [
+    {
+        # canonical — O'Neil/Bulkowski volume-confirmation threshold (~1.5x
+        # avg volume) and entry close to the pivot/resistance level.
+        "config_id": "setup_breakout_canonical",
+        "setup_type": "breakout",
+        "version": "breakout_canonical_v1",
+        "parent_config_id": "setup_breakout_v1",
+        "universe": _UNIVERSE_BLOCK,
+        "features": _FEATURES_BLOCK,
+        "validation": {
+            "breakout_prox_min": -0.05,
+            "breakout_prox_max": 0.5,
+            "min_base_duration": 20,
+            "min_rvol_breakout": 1.5,
+            "rvol_is_hard": True,
+            "min_close_strength": 0.5,
+            "max_stop_distance_pct": 0.10,
+            "k_atr_stop": 1.0,
+            "buffer_atr_multiple": 0.25,
+            "min_rr": 1.8,
+            "min_setup_score": 55,
+        },
+        "scoring_weights": dict(DEFAULT_SETUP_CONFIGS["breakout"]["scoring_weights"]),
+        "ranking": _RANKING_RESERVED,
+        "earnings": _EARNINGS_BLOCK,
+        "macro_event_risk": _MACRO_BLOCK,
+    },
+    {
+        # strict — higher RVOL bar (~2.0x) and a longer, more selective base
+        # (Bulkowski's longer-base/higher-reliability breakout profile). RS
+        # filter from the coder note is not representable (see module note).
+        "config_id": "setup_breakout_strict",
+        "setup_type": "breakout",
+        "version": "breakout_strict_v1",
+        "parent_config_id": "setup_breakout_v1",
+        "universe": _UNIVERSE_BLOCK,
+        "features": _FEATURES_BLOCK,
+        "validation": {
+            "breakout_prox_min": -0.05,
+            "breakout_prox_max": 0.3,
+            "min_base_duration": 35,
+            "min_rvol_breakout": 2.0,
+            "rvol_is_hard": True,
+            "min_close_strength": 0.6,
+            "max_stop_distance_pct": 0.08,
+            "k_atr_stop": 1.0,
+            "buffer_atr_multiple": 0.25,
+            "min_rr": 2.0,
+            "min_setup_score": 65,
+        },
+        "scoring_weights": dict(DEFAULT_SETUP_CONFIGS["breakout"]["scoring_weights"]),
+        "ranking": _RANKING_RESERVED,
+        "earnings": _EARNINGS_BLOCK,
+        "macro_event_risk": _MACRO_BLOCK,
+    },
+    {
+        # strict — tighter ATR-compression / volume dry-up (Minervini VCP-style
+        # "coiling" profile: narrower range, lower volatility, drier volume).
+        "config_id": "setup_consolidation_base_strict",
+        "setup_type": "consolidation_base",
+        "version": "consolidation_base_strict_v1",
+        "parent_config_id": "setup_consolidation_base_v1",
+        "universe": _UNIVERSE_BLOCK,
+        "features": _FEATURES_BLOCK,
+        "validation": {
+            "min_tightness": 75,
+            "max_atr_pct": 0.035,
+            "min_compression": 65,
+            "min_range_duration": 15,
+            "min_dry_up": 55,
+            "min_earnings_days": 5,
+            "max_stop_distance_pct": 0.08,
+            "k_atr_stop": 1.0,
+            "buffer_atr_multiple": 0.25,
+            "min_rr": 1.8,
+            "rvol_required": False,  # not required; controlled/low vol acceptable (AD-22.23)
+            "min_setup_score": 60,
+        },
+        "scoring_weights": dict(DEFAULT_SETUP_CONFIGS["consolidation_base"]["scoring_weights"]),
+        "ranking": _RANKING_RESERVED,
+        "earnings": _EARNINGS_BLOCK,
+        "macro_event_risk": _MACRO_BLOCK,
+    },
+    {
+        # template — Minervini-style idealized trend profile: strong EMA
+        # stacking/alignment, firmly positive 50EMA slope, not overextended.
+        # RS emphasis is scoring-weight only (see module note above).
+        "config_id": "setup_trend_continuation_template",
+        "setup_type": "trend_continuation",
+        "version": "trend_continuation_template_v1",
+        "parent_config_id": "setup_trend_continuation_v1",
+        "universe": _UNIVERSE_BLOCK,
+        "features": _FEATURES_BLOCK,
+        "validation": {
+            "min_ema_alignment": 80,
+            "min_ema50_slope": 0.005,
+            "roc_min": 0.02,
+            "roc_max": 0.35,
+            "max_ext": 0.12,
+            "k_atr_stop": 1.5,
+            "buffer_atr_multiple": 0.25,
+            "min_rr": 1.8,
+            "rvol_is_hard": False,
+            "rvol_moderate_threshold": 1.2,
+            "max_stop_distance_pct": 0.08,
+            "min_setup_score": 65,
+        },
+        "scoring_weights": {
+            "trend_health": 0.25,
+            "relative_strength": 0.30,
+            "extension": 0.10,
+            "momentum": 0.20,
+            "volume_health": 0.05,
+            "target_room": 0.10,
+        },
+        "ranking": _RANKING_RESERVED,
+        "earnings": _EARNINGS_BLOCK,
+        "macro_event_risk": _MACRO_BLOCK,
+    },
+    {
+        # shallow — classic "first pullback" entry: shallow depth, tight
+        # support tolerance (buy the first dip, not a deep retracement).
+        "config_id": "setup_pullback_shallow",
+        "setup_type": "pullback",
+        "version": "pullback_shallow_v1",
+        "parent_config_id": "setup_pullback_v1",
+        "universe": _UNIVERSE_BLOCK,
+        "features": _FEATURES_BLOCK,
+        "validation": {
+            "pull_band": 0.04,
+            "max_pullback_depth": 0.08,
+            "support_break_tol": 0.02,
+            "k_atr_stop": 1.2,
+            "buffer_atr_multiple": 0.25,
+            "min_rr": 1.8,
+            "rvol_is_hard": False,  # never hard reject on low RVOL (AD-22.23)
+            "rvol_bonus_threshold": 1.3,
+            "max_stop_distance_pct": 0.10,
+            "min_setup_score": 55,
+        },
+        "scoring_weights": dict(DEFAULT_SETUP_CONFIGS["pullback"]["scoring_weights"]),
+        "ranking": _RANKING_RESERVED,
+        "earnings": _EARNINGS_BLOCK,
+        "macro_event_risk": _MACRO_BLOCK,
+    },
+    {
+        # fib — deeper retracement toward classic Fibonacci 38.2-61.8% pullback
+        # zones, with a wider support-break tolerance to match the deeper depth.
+        "config_id": "setup_pullback_fib",
+        "setup_type": "pullback",
+        "version": "pullback_fib_v1",
+        "parent_config_id": "setup_pullback_v1",
+        "universe": _UNIVERSE_BLOCK,
+        "features": _FEATURES_BLOCK,
+        "validation": {
+            "pull_band": 0.04,
+            "max_pullback_depth": 0.15,
+            "support_break_tol": 0.04,
+            "k_atr_stop": 1.2,
+            "buffer_atr_multiple": 0.25,
+            "min_rr": 1.8,
+            "rvol_is_hard": False,
+            "rvol_bonus_threshold": 1.3,
+            "max_stop_distance_pct": 0.10,
+            "min_setup_score": 55,
+        },
+        "scoring_weights": dict(DEFAULT_SETUP_CONFIGS["pullback"]["scoring_weights"]),
+        "ranking": _RANKING_RESERVED,
+        "earnings": _EARNINGS_BLOCK,
+        "macro_event_risk": _MACRO_BLOCK,
+    },
+]
+
+# --------------------------------------------------------------------------- #
 # Risk label config seed (01c CONFIG/24)
 # --------------------------------------------------------------------------- #
 DEFAULT_RISK_LABEL_CONFIG: Final[dict[str, Any]] = {
@@ -292,6 +489,16 @@ DEFAULT_RUNTIME_CONFIGS: Final[dict[str, dict[str, Any]]] = {
 def get_default_setup_configs() -> dict[str, dict[str, Any]]:
     """Return copies of the four default setup configs keyed by setup_type."""
     return {k: dict(v) for k, v in DEFAULT_SETUP_CONFIGS.items()}
+
+
+def get_preset_setup_configs() -> list[dict[str, Any]]:
+    """Return copies of the literature-anchored preset setup configs.
+
+    Unlike ``get_default_setup_configs`` (one row per setup_type, seeded
+    active), presets are a list — several per setup_type are allowed, and
+    every preset is seeded inactive (simulation-sweep input only).
+    """
+    return [dict(p) for p in PRESET_SETUP_CONFIGS]
 
 
 def get_default_risk_label_config() -> dict[str, Any]:

@@ -187,6 +187,73 @@ class ConfigService:
         )
 
     # ------------------------------------------------------------------ #
+    # Preset setup config seeding (Phase 1.5 — simulation sweep inputs only)
+    # ------------------------------------------------------------------ #
+    def seed_preset_setup_configs(self, db_role: str) -> ServiceResult:
+        """Seed literature-anchored preset setup configs. Idempotent via ON CONFLICT.
+
+        Unlike ``seed_default_setup_configs``, presets are always inserted with
+        ``active_flag=False`` and this method never calls ``activate_setup_config``
+        for any of them — they exist purely as simulation-sweep variant inputs
+        and must never affect prod/debug's one-active-per-setup_type invariant.
+        """
+        run_id = str(uuid.uuid4())
+        try:
+            cv.validate_db_role(db_role)
+        except cv.ConfigValidationError as exc:
+            return self._failed(run_id, str(exc), {"db_role": db_role})
+
+        presets = default_configs.get_preset_setup_configs()
+        inserted = 0
+        connection = self._db.connect(db_role)
+        try:
+            connection.execute("BEGIN TRANSACTION")
+            try:
+                for payload in presets:
+                    setup_type = payload["setup_type"]
+                    cv.validate_setup_type(setup_type)
+                    cfg = cv.validate_config_payload(payload)
+                    config_hash = cv.deterministic_hash(cfg)
+                    config_id = payload["config_id"]
+                    version = payload["version"]
+                    parent_config_id = payload.get("parent_config_id")
+                    returned = connection.execute(
+                        _INSERT_SETUP_CONFIG,
+                        [
+                            config_id,
+                            setup_type,
+                            version,
+                            parent_config_id,
+                            cv.canonical_json(cfg),
+                            config_hash,
+                            False,  # never active — simulation-sweep input only
+                            "seeded preset (simulation sweep)",
+                        ],
+                    ).fetchall()
+                    inserted += len(returned)
+                connection.execute("COMMIT")
+            except Exception:
+                connection.execute("ROLLBACK")
+                raise
+        except Exception as exc:  # noqa: BLE001
+            _LOG.error("seed_preset_setup_configs failed: %s", exc)
+            return self._failed(run_id, f"{type(exc).__name__}: {exc}", {"db_role": db_role})
+        finally:
+            connection.close()
+
+        return ServiceResult(
+            status=service_result.STATUS_SUCCESS,
+            run_id=run_id,
+            rows_processed=inserted,
+            metadata={
+                "db_role": db_role,
+                "config_kind": "setup_preset",
+                "seeded": inserted,
+                "requested": len(presets),
+            },
+        )
+
+    # ------------------------------------------------------------------ #
     # Risk label config seeding
     # ------------------------------------------------------------------ #
     def seed_default_risk_label_config(self, db_role: str) -> ServiceResult:

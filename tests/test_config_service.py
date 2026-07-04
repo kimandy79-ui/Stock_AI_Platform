@@ -458,3 +458,139 @@ def test_breakout_rvol_is_hard_true() -> None:
     """breakout: RVOL is a hard gate (AD-22.23)."""
     cfgs = default_configs.get_default_setup_configs()
     assert cfgs["breakout"]["validation"]["rvol_is_hard"] is True
+
+
+# --------------------------------------------------------------------------- #
+# 16. Preset setup configs (Phase 1.5 — literature-anchored simulation-sweep
+# inputs). Never active; never touch prod/debug's one-active-per-setup_type
+# invariant.
+# --------------------------------------------------------------------------- #
+_EXPECTED_PRESET_IDS = {
+    "setup_breakout_canonical",
+    "setup_breakout_strict",
+    "setup_consolidation_base_strict",
+    "setup_trend_continuation_template",
+    "setup_pullback_shallow",
+    "setup_pullback_fib",
+}
+
+
+def test_preset_setup_configs_six_entries_all_setup_types_covered() -> None:
+    presets = default_configs.get_preset_setup_configs()
+    assert {p["config_id"] for p in presets} == _EXPECTED_PRESET_IDS
+    covered_types = {p["setup_type"] for p in presets}
+    assert covered_types == set(constants.ALLOWED_SETUP_TYPES)
+
+
+def test_preset_setup_configs_scoring_weights_sum_to_one() -> None:
+    for p in default_configs.get_preset_setup_configs():
+        total = sum(p["scoring_weights"].values())
+        assert abs(total - 1.0) < 1e-6, f"{p['config_id']} weights sum {total} != 1.0"
+
+
+def test_preset_setup_configs_universe_block_matches_v1() -> None:
+    """Presets share the same universe block as the v1 defaults (parity is a
+    run-wide invariant across every config replayed together, per
+    ConfigService.assert_universe_config_parity / step3_universal_eligibility)."""
+    v1_universe = cv.canonical_json(default_configs.DEFAULT_SETUP_CONFIGS["breakout"]["universe"])
+    for p in default_configs.get_preset_setup_configs():
+        assert cv.canonical_json(p["universe"]) == v1_universe, p["config_id"]
+
+
+def test_preset_setup_configs_parent_config_id_references_existing_v1() -> None:
+    v1_ids = {cfg["config_id"] for cfg in default_configs.DEFAULT_SETUP_CONFIGS.values()}
+    for p in default_configs.get_preset_setup_configs():
+        assert p["parent_config_id"] in v1_ids, p["config_id"]
+
+
+def test_seed_preset_setup_configs_inserts_six_rows(prod_schema: ConfigService) -> None:
+    result = prod_schema.seed_preset_setup_configs("prod")
+    assert result.is_ok(), result.errors
+    assert result.rows_processed == 6
+    n = _count(
+        "prod",
+        "SELECT COUNT(*) FROM setup_configs WHERE config_id = ANY(?)",
+        [list(_EXPECTED_PRESET_IDS)],
+    )
+    assert n == 6
+
+
+def test_seed_preset_setup_configs_is_idempotent(prod_schema: ConfigService) -> None:
+    r1 = prod_schema.seed_preset_setup_configs("prod")
+    r2 = prod_schema.seed_preset_setup_configs("prod")
+    assert r1.is_ok() and r2.is_ok()
+    assert r1.rows_processed == 6
+    assert r2.rows_processed == 0  # ON CONFLICT DO NOTHING — no duplicates
+    n = _count(
+        "prod",
+        "SELECT COUNT(*) FROM setup_configs WHERE config_id = ANY(?)",
+        [list(_EXPECTED_PRESET_IDS)],
+    )
+    assert n == 6
+
+
+def test_seed_preset_setup_configs_never_active(prod_schema: ConfigService) -> None:
+    """Presets are simulation-sweep inputs only — never active in prod/debug."""
+    prod_schema.seed_preset_setup_configs("prod")
+    n_active = _count(
+        "prod",
+        "SELECT COUNT(*) FROM setup_configs WHERE config_id = ANY(?) AND active_flag = TRUE",
+        [list(_EXPECTED_PRESET_IDS)],
+    )
+    assert n_active == 0
+
+
+def _active_config_id(setup_type: str) -> str:
+    conn = dbm.connect("prod", read_only=True)
+    try:
+        row = conn.execute(
+            "SELECT config_id FROM setup_configs WHERE setup_type = ? AND active_flag = TRUE",
+            [setup_type],
+        ).fetchone()
+    finally:
+        conn.close()
+    return row[0] if row else None
+
+
+def test_seed_preset_setup_configs_does_not_disturb_v1_activation(seeded_prod: ConfigService) -> None:
+    """Seeding presets after the v1 defaults must not change which config is
+    active per setup_type (presets never call activate_setup_config)."""
+    before = {st: _active_config_id(st) for st in constants.ALLOWED_SETUP_TYPES}
+    seeded_prod.seed_preset_setup_configs("prod")
+    after = {st: _active_config_id(st) for st in constants.ALLOWED_SETUP_TYPES}
+    assert after == before  # same config_id active per setup_type, unchanged
+    for setup_type in constants.ALLOWED_SETUP_TYPES:
+        n = _count(
+            "prod",
+            "SELECT COUNT(*) FROM setup_configs WHERE setup_type = ? AND active_flag = TRUE",
+            [setup_type],
+        )
+        assert n == 1, f"expected exactly 1 active {setup_type} config, got {n}"
+
+
+def test_seed_preset_setup_configs_with_invalid_db_role_fails(prod_schema: ConfigService) -> None:
+    result = prod_schema.seed_preset_setup_configs("bad_role")
+    assert result.status == service_result.STATUS_FAILED
+
+
+def test_validate_setup_config_accepts_every_preset(prod_schema: ConfigService) -> None:
+    """Each preset passes the same structural validation as the v1 defaults
+    (required fields present, setup_type valid, scoring_weights sum to 1.0)."""
+    for p in default_configs.get_preset_setup_configs():
+        result = prod_schema.validate_setup_config(p)
+        assert result.is_ok(), f"{p['config_id']}: {result.errors}"
+
+
+def test_preset_setup_configs_use_only_existing_validator_fields() -> None:
+    """Every validation-block key in every preset already appears in the
+    matching v1 default's validation block — confirms no new fields were
+    invented (Phase 1.5 coder note constraint)."""
+    v1_by_type = default_configs.DEFAULT_SETUP_CONFIGS
+    for p in default_configs.get_preset_setup_configs():
+        st = p["setup_type"]
+        allowed_keys = set(v1_by_type[st]["validation"].keys())
+        preset_keys = set(p["validation"].keys())
+        assert preset_keys <= allowed_keys, (
+            f"{p['config_id']} introduces new validation field(s): "
+            f"{preset_keys - allowed_keys}"
+        )
