@@ -53,7 +53,7 @@ import datetime as _dt
 import json
 import uuid
 from datetime import date
-from typing import Any, Final, Protocol
+from typing import Any, Callable, Final, Protocol
 
 from app.config import constants
 from app.utils import logging_config
@@ -112,6 +112,15 @@ MAX_DRAWDOWN_PCT: Final[float] = 25.0
 # fold's cross-fold spill is measured against the full 40bd realization window).
 SELECTION_HORIZON_BD: Final[int] = 40
 
+# Embargo window (trading days) excluded from a fold's train metrics immediately
+# before its test_start, so signals whose outcome realization overlaps the test
+# period cannot leak forward-looking information into training metrics. Default
+# matches SELECTION_HORIZON_BD; configurable per-engine (see
+# ``SimulationEngine.__init__``), never hardcoded into the metric computation
+# itself (``_fold_train_metrics`` takes it as a parameter, default 0 = off, so
+# existing offline unit tests that don't pass it keep their pre-embargo behavior).
+DEFAULT_EMBARGO_BD: Final[int] = 40
+
 # Exact metadata key set returned on every path.
 RUN_METADATA_KEYS: Final[tuple[str, ...]] = (
     "db_role",
@@ -167,46 +176,101 @@ _SELECT_FEATURE_VERSION: Final[str] = (
     f"SELECT MAX(feature_schema_version) FROM {PROD_ALIAS}.daily_features"
 )
 
-# Step 3 screening input for one sim_date (column order == step3._INPUT_SCHEMA).
-# No-look-ahead: feature_cutoff_date <= sim_date and the joined price row's
-# date <= sim_date (enforced in the JOIN so left-join semantics are preserved).
-_SELECT_SCREENING_INPUT: Final[str] = (
+# Step 3 universe read for one sim_date — mirrors step3_universal_eligibility's
+# _SQL_READ_UNIVERSE column-for-column (same column order as _STEP3_COL_NAMES
+# below) so _check_eligibility / _evaluate_routing / _compute_eligibility_score
+# can be reused verbatim. No-look-ahead: feature_cutoff_date <= sim_date and the
+# joined price row's date <= sim_date (enforced in the JOIN so left-join
+# semantics are preserved, matching prod's ticker_master LEFT JOIN pattern).
+_SELECT_UNIVERSE_STEP3: Final[str] = (
     "SELECT "
-    "  f.ticker AS ticker, "
-    "  f.feature_date AS feature_date, "
-    "  f.feature_ready AS feature_ready, "
-    "  f.ema20, f.ema50, f.ema200, f.ema_alignment_score, "
-    "  f.distance_to_ema50_pct, f.rsi14, f.roc20, f.rvol20, "
-    "  f.avg_dollar_volume_20d, f.breakout_proximity, "
-    "  f.pullback_from_recent_high_pct, f.consolidation_score, "
-    "  f.sector_relative_strength, f.market_regime, "
-    "  tm.symbol_type, p.close_raw, p.close_adj, p.data_quality_status "
-    f"FROM {PROD_ALIAS}.daily_features f "
-    f"LEFT JOIN {PROD_ALIAS}.ticker_master tm ON tm.ticker = f.ticker "
-    f"LEFT JOIN {PROD_ALIAS}.daily_prices p "
-    "  ON p.ticker = f.ticker AND p.date = f.feature_date AND p.date <= ? "
-    "WHERE f.feature_date = ? "
-    "  AND f.feature_cutoff_date <= ? "
-    "  AND f.feature_schema_version = ? "
-    "ORDER BY f.ticker"
+    "  tm.ticker, tm.symbol_type, "
+    "  dp.open_raw, dp.high_raw, dp.low_raw, dp.close_raw, dp.close_adj, "
+    "  CAST(dp.volume_raw AS BIGINT) AS volume_raw, dp.data_quality_status, "
+    "  COALESCE(df.feature_ready, FALSE) AS feature_ready, "
+    "  df.avg_dollar_volume_20d, "
+    "  df.breakout_proximity, df.range_duration, "
+    "  df.ema200, df.pullback_from_recent_high_pct, "
+    "  df.ema20, df.ema50, df.ema_alignment_score, df.ema50_slope, "
+    "  df.range_tightness_score "
+    f"FROM {PROD_ALIAS}.ticker_master tm "
+    f"LEFT JOIN {PROD_ALIAS}.daily_prices dp "
+    "  ON dp.ticker = tm.ticker AND dp.date = ? AND dp.date <= ? "
+    f"LEFT JOIN {PROD_ALIAS}.daily_features df "
+    "  ON df.ticker = tm.ticker AND df.feature_date = ? "
+    "  AND df.feature_cutoff_date <= ? AND df.feature_schema_version = ? "
+    "WHERE tm.active_flag = TRUE AND tm.delisted_flag = FALSE "
+    "ORDER BY tm.ticker"
 )
 
-# Step 4 features + that-day prices for one sim_date (column order == frozen
-# step4 fp_cols). Same no-look-ahead guards.
+# Column order for _SELECT_UNIVERSE_STEP3 rows — identical to
+# step3_universal_eligibility.Step3UniversalEligibilityEngine._read's col_names
+# so _check_eligibility / _evaluate_routing receive the exact same row shape.
+_STEP3_COL_NAMES: Final[tuple[str, ...]] = (
+    "ticker", "symbol_type",
+    "open_raw", "high_raw", "low_raw", "close_raw", "close_adj",
+    "volume_raw", "data_quality_status",
+    "feature_ready", "avg_dollar_volume_20d",
+    "breakout_proximity", "range_duration",
+    "ema200", "pullback_from_recent_high_pct",
+    "ema20", "ema50", "ema_alignment_score", "ema50_slope",
+    "range_tightness_score",
+)
+
+# Step 4/5 features + that-day prices for one sim_date — column order ==
+# _STEP4_FEATURE_COLS below, matching step4_setup_validation_engine.py's
+# _FEATURE_COLS so m14_setup_validators.validate_setup receives the exact same
+# feat-dict shape it gets in prod. Same no-look-ahead guards as prod (feature
+# cutoff + price date ceiling in the JOIN). This single per-date read is shared
+# by every (setup_config_id, risk_label_config_id) variant — it is not
+# re-queried per variant.
 _SELECT_FEATURES_PRICES: Final[str] = (
     "SELECT "
-    "  f.ticker AS ticker, f.ema20, f.ema50, f.ema200, f.ema_alignment_score, "
-    "  f.rsi14, f.roc20, f.rvol20, f.atr14, f.breakout_proximity, "
-    "  f.pullback_from_recent_high_pct, f.consolidation_score, "
-    "  f.sector_relative_strength, f.days_to_earnings_bd, "
-    "  f.macro_event_risk_flag, p.close_raw, p.close_adj, p.open_raw, "
-    "  p.high_raw, p.low_raw "
+    "  f.ticker, f.feature_schema_version, "
+    "  f.ema20, f.ema50, f.ema200, f.ema_alignment_score, "
+    "  f.ema20_slope, f.ema50_slope, "
+    "  f.distance_to_ema20_pct, f.distance_to_ema50_pct, "
+    "  f.rsi14, f.roc20, f.atr14, f.atr_pct, f.atr_compression_score, "
+    "  f.rvol20, f.avg_dollar_volume_20d, "
+    "  f.pullback_from_recent_high_pct, f.pullback_depth_pct, "
+    "  f.breakout_proximity, f.consolidation_score, "
+    "  f.swing_high, f.swing_low, "
+    "  f.support_level, f.resistance_level, f.next_resistance_level, "
+    "  f.base_high, f.base_low, "
+    "  f.range_width_pct, f.range_duration, f.range_tightness_score, "
+    "  f.volume_dry_up_score, f.volume_expansion_score, "
+    "  f.relative_strength_vs_spy, f.sector_relative_strength, "
+    "  f.market_regime, f.days_to_earnings_bd, f.macro_event_risk_flag, "
+    "  p.open_raw, p.high_raw, p.low_raw, p.close_raw, p.close_adj "
     f"FROM {PROD_ALIAS}.daily_features f "
     f"LEFT JOIN {PROD_ALIAS}.daily_prices p "
     "  ON p.ticker = f.ticker AND p.date = f.feature_date AND p.date <= ? "
     "WHERE f.feature_date = ? "
     "  AND f.feature_cutoff_date <= ? "
     "  AND f.feature_schema_version = ?"
+)
+
+# Column order for _SELECT_FEATURES_PRICES rows — identical to
+# step4_setup_validation_engine._FEATURE_COLS. Serves both Step 4
+# (validate_setup) and Step 5 (_build_rows' features_map) — Step 5 only reads a
+# subset of these keys via dict.get(), so one shared per-ticker dict covers both.
+_STEP4_FEATURE_COLS: Final[tuple[str, ...]] = (
+    "ticker", "feature_schema_version",
+    "ema20", "ema50", "ema200", "ema_alignment_score",
+    "ema20_slope", "ema50_slope",
+    "distance_to_ema20_pct", "distance_to_ema50_pct",
+    "rsi14", "roc20", "atr14", "atr_pct", "atr_compression_score",
+    "rvol20", "avg_dollar_volume_20d",
+    "pullback_from_recent_high_pct", "pullback_depth_pct",
+    "breakout_proximity", "consolidation_score",
+    "swing_high", "swing_low",
+    "support_level", "resistance_level", "next_resistance_level",
+    "base_high", "base_low",
+    "range_width_pct", "range_duration", "range_tightness_score",
+    "volume_dry_up_score", "volume_expansion_score",
+    "relative_strength_vs_spy", "sector_relative_strength",
+    "market_regime", "days_to_earnings_bd", "macro_event_risk_flag",
+    "open_raw", "high_raw", "low_raw", "close_raw", "close_adj",
 )
 
 _SELECT_RECENT_20D_LOW: Final[str] = (
@@ -277,21 +341,29 @@ _INSERT_SIM_STEP4: Final[str] = (
     "INSERT INTO sim_step4_analysis "
     "(analysis_id, candidate_id, sim_run_id, fold_id, setup_config_id, "
     " ticker, signal_date, setup_type, setup_score, setup_passed, "
-    " estimated_rr, target_is_structural, stop_price_raw, target_price_raw, "
-    " created_at) "
-    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CAST(now() AS TIMESTAMP))"
+    " estimated_rr, target_is_structural, entry_price_raw, stop_price_raw, "
+    " target_price_raw, created_at) "
+    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CAST(now() AS TIMESTAMP))"
 )
 
+# Full DDL column set (fix 8 parity — was missing risk_score/risk_reasons/
+# price-level/support-resistance/market-context columns; those values are
+# already produced by Step5ProposalEngine._build_rows so writing them is a
+# pure plumbing fix, not a new computation).
 _INSERT_SIM_STEP5: Final[str] = (
     "INSERT INTO sim_step5_proposals "
     "(proposal_id, sim_run_id, fold_id, setup_config_id, ticker, "
-    " signal_date, setup_type, setup_score, risk_label, disposition, "
+    " signal_date, setup_type, setup_score, risk_score, risk_label, "
+    " risk_reasons, disposition, entry_price_raw, stop_price_raw, "
+    " target_price_raw, estimated_rr, target_is_structural, "
+    " support_level, resistance_level, next_resistance_level, "
+    " market_regime, earnings_days, "
     " proposal_score_raw, diversity_penalty, proposal_score_final, "
     " raw_rank, diversified_rank, in_raw_top_n, in_diversified_top_n, "
     " diversification_applied, selected_top_n, selected_flag, "
     " rejection_reason, created_at) "
-    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
-    " CAST(now() AS TIMESTAMP))"
+    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
+    " ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CAST(now() AS TIMESTAMP))"
 )
 
 _INSERT_SIM_OUTCOME: Final[str] = (
@@ -492,31 +564,42 @@ def select_config_for_fold(
 # --------------------------------------------------------------------------- #
 # Simulation engine.
 # --------------------------------------------------------------------------- #
-# Sentinel returned by _run_with_connection when replay is not yet supported.
-_REPLAY_UNSUPPORTED: Final[str] = (
-    "UNSUPPORTED: setup-mode simulation replay (step3_universal_eligibility / "
-    "step4_setup_validation_engine) is not yet implemented in SimulationEngine. "
-    "The engine accepts mode/config validation and writes sim_runs metadata, "
-    "but returns failed before any replay. "
-    "Legacy step3_screening / step4_analysis_engine are NOT executed."
-)
-
-
 class SimulationEngine:
-    """Setup-mode simulation engine (replay phase: pending).
+    """Setup-mode simulation engine.
 
-    Validation, walk-forward fold planning, metric computation, and config
-    comparison helpers are fully functional.  The replay phase
-    (``_replay_date`` / ``_run_with_connection`` past DB init) is guarded and
-    returns a clear ``failed`` ServiceResult rather than executing the legacy
-    ``step3_screening`` / ``step4_analysis_engine`` path.
+    Replays Step 3 (``step3_universal_eligibility``) / Step 4
+    (``m14_setup_validators``) / Step 5 (``step5_proposal_engine``) pure
+    scoring functions against historical prod data, for one or more
+    ``(setup_config_id, risk_label_config_id)`` variants (each ``config_id`` in
+    ``run(config_ids=...)`` names one variant; its ``risk_label_config`` block
+    lives nested in ``setup_configs[config_id]``). Step 3 runs once per
+    ``sim_date`` regardless of variant count; Step 4/5 iterate per variant
+    against that shared Step 3 output (see ``M17_SIMULATION_ENGINE_CONFIG_DELTA.md``).
 
     The optional ``db_manager`` argument exists only for test injection; when
     ``None`` the approved :mod:`app.database.duckdb_manager` is used.
+
+    ``fold_planner`` and ``embargo_bd`` are the walk-forward extension seam:
+    ``fold_planner`` defaults to :func:`plan_walk_forward_folds` (Option B,
+    replay-all) but can be swapped for a different fold-generation strategy
+    (e.g. CPCV) without touching any replay method — every replay/outcome/
+    metric method receives an already-materialized ``folds: list[dict]``, it
+    never calls a fold planner itself. ``embargo_bd`` (default
+    :data:`DEFAULT_EMBARGO_BD`) is the number of trading days immediately
+    before each fold's ``test_start`` excluded from that fold's train metrics,
+    so a signal whose outcome-realization window overlaps the test period
+    cannot leak forward-looking information into training metrics.
     """
 
-    def __init__(self, db_manager: _DbManagerLike | None = None) -> None:
+    def __init__(
+        self,
+        db_manager: _DbManagerLike | None = None,
+        fold_planner: Callable[[date, date], list[dict[str, Any]]] = plan_walk_forward_folds,
+        embargo_bd: int = DEFAULT_EMBARGO_BD,
+    ) -> None:
         self._db_override: _DbManagerLike | None = db_manager
+        self._fold_planner = fold_planner
+        self._embargo_bd = embargo_bd
 
     def _db(self) -> Any:
         """Resolve the DB manager (injected override or the approved manager)."""
@@ -678,20 +761,22 @@ class SimulationEngine:
             sim_dates_count = len(sim_dates)
 
             folds = (
-                plan_walk_forward_folds(start_date, end_date)
+                self._fold_planner(start_date, end_date)
                 if mode == MODE_WALK_FORWARD
                 else []
             )
             folds_count = len(folds)
             fold_ids = {f["fold_number"]: str(uuid.uuid4()) for f in folds}
 
-            # ── Replay guard (setup-mode engines not yet wired) ────────────── #
-            # Legacy step3_screening / step4_analysis_engine must NOT execute.
-            # Return failed before any replay work; sim_run row status → failed.
-            connection.execute(_UPDATE_SIM_RUN_FAILED, [_REPLAY_UNSUPPORTED, run_id])
-            raise _ValidationError(_REPLAY_UNSUPPORTED)
+            # Universe block must be identical across every variant replayed in
+            # this run (mirrors step3_universal_eligibility's prod invariant) —
+            # checked once for the whole run, not per sim_date.
+            s3 = self._step3_module()
+            universe_cfg = s3._parse_universe_config(
+                s3._assert_universe_parity([setup_configs[cid] for cid in config_ids])
+            )
 
-            # --- all replay / write work in one transaction. ----------------- #  # noqa: unreachable
+            # --- all replay / write work in one transaction. ----------------- #
             connection.execute("BEGIN TRANSACTION")
             tx_started = True
 
@@ -702,15 +787,34 @@ class SimulationEngine:
                 "outcomes_written": 0,
             }
             all_outcomes: list[dict[str, Any]] = []
+            sector_industry = self._sector_industry_map(connection)
+            slippage_by_config = {
+                cid: self._slippage_bps(setup_configs[cid]) for cid in config_ids
+            }
 
-            for config_id in config_ids:
-                config = setup_configs[config_id]
-                slippage_bps = self._slippage_bps(config)
-                sector_industry = self._sector_industry_map(connection)
+            for sim_date in sim_dates:
+                fold = self._fold_for_date(folds, sim_date)
+                fold_id = fold_ids.get(fold["fold_number"]) if fold else None
 
-                for sim_date in sim_dates:
-                    fold = self._fold_for_date(folds, sim_date)
-                    fold_id = fold_ids.get(fold["fold_number"]) if fold else None
+                # Step 3 — once per sim_date, shared across every variant.
+                step3 = self._replay_step3(
+                    connection,
+                    run_id=run_id,
+                    fold_id=fold_id,
+                    sim_date=sim_date,
+                    feature_version=feature_version,
+                    universe_cfg=universe_cfg,
+                )
+                counters["step3_rows"] += step3["step3_rows"]
+
+                # Feature+price frame — one read per sim_date, shared across
+                # every variant's Step 4/5 evaluation (no re-query per variant).
+                features_map = self._read_features_prices(
+                    connection, sim_date, feature_version
+                )
+
+                for config_id in config_ids:
+                    config = setup_configs[config_id]
 
                     replay = self._replay_date(
                         connection,
@@ -718,12 +822,11 @@ class SimulationEngine:
                         fold_id=fold_id,
                         config_id=config_id,
                         config=config,
-                        parsed={},
                         sim_date=sim_date,
-                        feature_version=feature_version,
+                        routed_candidates=step3["candidates"],
+                        features_map=features_map,
                         sector_industry=sector_industry,
                     )
-                    counters["step3_rows"] += replay["step3_rows"]
                     counters["step4_rows"] += replay["step4_rows"]
                     counters["step5_rows"] += replay["step5_rows"]
 
@@ -735,7 +838,7 @@ class SimulationEngine:
                         fold_id=fold_id,
                         config_id=config_id,
                         sim_date=sim_date,
-                        slippage_bps=slippage_bps,
+                        slippage_bps=slippage_by_config[config_id],
                         proposals=replay["proposals"],
                         stop_by_ticker=replay["stop_by_ticker"],
                     )
@@ -745,10 +848,14 @@ class SimulationEngine:
                         all_outcomes.append(o)
 
             if mode == MODE_WALK_FORWARD:
-                self._write_folds(connection, run_id, folds, fold_ids, all_outcomes)
+                self._write_folds(
+                    connection, run_id, folds, fold_ids, all_outcomes,
+                    cal=cal, embargo_bd=self._embargo_bd,
+                )
 
             comparisons_written = self._write_comparisons(
-                connection, run_id, mode, config_ids, all_outcomes
+                connection, run_id, mode, config_ids, all_outcomes,
+                setup_configs=setup_configs,
             )
 
             connection.execute(_UPDATE_SIM_RUN_STATUS, [RUN_SUCCESS, run_id])
@@ -807,11 +914,27 @@ class SimulationEngine:
         )
 
     # ------------------------------------------------------------------ #
-    # Config validation helpers.
+    # Frozen setup-mode engine imports — lazy so the pure helpers and
+    # pre-DB validation stay unit-testable without duckdb/polars installed.
+    # Per M17_SIMULATION_ENGINE_CONFIG_DELTA.md: only these pure functions are
+    # called, never Step3UniversalEligibilityEngine.run() /
+    # Step4SetupValidationEngine.run() (I/O orchestration wrappers that would
+    # write prod/debug and break sim DB isolation).
     # ------------------------------------------------------------------ #
-    # _parse_all_configs removed: it imported legacy step3_screening /
-    # step4_analysis_engine engines which must not run in setup-mode.
-    # Config-level validation is now done by _slippage_bps() only.
+    @staticmethod
+    def _step3_module() -> Any:
+        from app.services.screening import step3_universal_eligibility
+        return step3_universal_eligibility
+
+    @staticmethod
+    def _m14_validators_module() -> Any:
+        from app.services.screening import m14_setup_validators
+        return m14_setup_validators
+
+    @staticmethod
+    def _step5_module() -> Any:
+        from app.services.proposal import step5_proposal_engine
+        return step5_proposal_engine
 
     # ------------------------------------------------------------------ #
     # Read helpers.
@@ -836,8 +959,103 @@ class SimulationEngine:
                 return fold
         return None
 
+    def _read_features_prices(
+        self, connection: Any, sim_date: date, feature_version: str | None
+    ) -> dict[str, dict[str, Any]]:
+        """Read one sim_date's feature+price frame, keyed by ticker.
+
+        Shared by every variant's Step 4 (``validate_setup``) and Step 5
+        (``_build_rows``) evaluation for this date — read once, not re-queried
+        per ``(setup_config_id, risk_label_config_id)`` variant.
+        """
+        rows = connection.execute(
+            _SELECT_FEATURES_PRICES, [sim_date, sim_date, sim_date, feature_version]
+        ).fetchall()
+        return {
+            r[0]: dict(zip(_STEP4_FEATURE_COLS, r))
+            for r in rows
+            if r[0] is not None
+        }
+
     # ------------------------------------------------------------------ #
-    # Per-date Step 3/4/5 replay — UNSUPPORTED in current release.
+    # Step 3 — once per sim_date, shared across every variant.
+    # ------------------------------------------------------------------ #
+    def _replay_step3(
+        self,
+        connection: Any,
+        *,
+        run_id: str,
+        fold_id: str | None,
+        sim_date: date,
+        feature_version: str | None,
+        universe_cfg: tuple[float, float, list[str], frozenset[str]],
+    ) -> dict[str, Any]:
+        """Replay Step 3 (universal eligibility + routing) for one sim_date.
+
+        Writes ``sim_step3_candidates`` (config-independent — the table has no
+        ``setup_config_id`` column) and returns the in-memory routed candidate
+        list so Step 4 can filter by ``routed_setup_types`` without a re-read.
+        """
+        s3 = self._step3_module()
+        min_price, min_adv, allowed_types, merger_watch_list = universe_cfg
+
+        rows = connection.execute(
+            _SELECT_UNIVERSE_STEP3,
+            [sim_date, sim_date, sim_date, sim_date, feature_version],
+        ).fetchall()
+        raw_rows = [dict(zip(_STEP3_COL_NAMES, r)) for r in rows]
+
+        eligible_dvols = [
+            r["avg_dollar_volume_20d"] for r in raw_rows
+            if r["avg_dollar_volume_20d"] is not None and r["close_raw"] is not None
+        ]
+        eligible_prices = [
+            r["close_raw"] for r in raw_rows
+            if r["close_raw"] is not None and r["avg_dollar_volume_20d"] is not None
+        ]
+
+        candidates: list[dict[str, Any]] = []
+        for row in raw_rows:
+            reasons = s3._check_eligibility(row, min_price, min_adv, allowed_types, merger_watch_list)
+            passed = not reasons
+            if passed:
+                routed = s3._evaluate_routing(row)
+                routing_status = s3.ROUTING_ROUTED if routed else s3.ROUTING_NO_ROUTE
+                routing_fail_reason = None if routed else s3.ROUTING_FAIL_NO_ROUTE
+                eligibility_score = s3._compute_eligibility_score(row, eligible_dvols, eligible_prices)
+            else:
+                routed = []
+                routing_status = s3.ROUTING_INELIGIBLE
+                routing_fail_reason = reasons[0] if reasons else None
+                eligibility_score = None
+
+            candidates.append({
+                "candidate_id": str(uuid.uuid4()),
+                "ticker": row["ticker"],
+                "eligibility_score": eligibility_score,
+                "passed_eligibility": passed,
+                "routing_status": routing_status,
+                "routing_fail_reason": routing_fail_reason,
+                "eligibility_fail_reasons": reasons,
+                "routed_setup_types": routed,
+            })
+
+        for c in candidates:
+            connection.execute(
+                _INSERT_SIM_STEP3,
+                [
+                    c["candidate_id"], run_id, fold_id, c["ticker"], sim_date,
+                    c["eligibility_score"], c["passed_eligibility"],
+                    c["routing_status"], c["routing_fail_reason"],
+                    json.dumps(c["eligibility_fail_reasons"]),
+                    json.dumps(c["routed_setup_types"]),
+                ],
+            )
+
+        return {"step3_rows": len(candidates), "candidates": candidates}
+
+    # ------------------------------------------------------------------ #
+    # Step 4/5 — per variant, against the shared Step 3 output for this date.
     # ------------------------------------------------------------------ #
     def _replay_date(
         self,
@@ -847,23 +1065,140 @@ class SimulationEngine:
         fold_id: str | None,
         config_id: str,
         config: dict,
-        parsed: dict[str, Any],
         sim_date: date,
-        feature_version: str | None,
+        routed_candidates: list[dict[str, Any]],
+        features_map: dict[str, dict[str, Any]],
         sector_industry: dict[str, tuple[Any, Any]],
     ) -> dict[str, Any]:
-        """Stub — setup-mode replay not yet implemented.
+        """Replay Step 4 (``validate_setup``) + Step 5 (``_build_rows``) for one
+        ``(sim_date, config_id)`` variant, given the date's shared Step 3
+        routing output and shared feature+price frame.
 
-        Legacy ``step3_screening`` / ``step4_analysis_engine`` must not be
-        called.  The replay guard in ``_run_with_connection`` prevents this
-        method from being reached; this stub exists only for static analysis
-        and test inspection.
+        Writes ``sim_step4_analysis`` / ``sim_step5_proposals`` rows and
+        returns ``step4_rows`` / ``step5_rows`` counts plus ``proposals`` /
+        ``stop_by_ticker`` for ``_build_outcomes``.
         """
-        raise _ValidationError(_REPLAY_UNSUPPORTED)
+        m14 = self._m14_validators_module()
+        step5_mod = self._step5_module()
+        sig_iso = sim_date.isoformat()
 
-        # _read_step4_inputs removed: it called legacy step4_analysis_engine.
+        setup_type = config.get("setup_type", "")
+        risk_cfg_raw = config.get("risk_label_config")
+        if not isinstance(risk_cfg_raw, dict):
+            raise _ValidationError(
+                f"config_id {config_id!r} is missing a 'risk_label_config' block "
+                "(each sim variant pairs one setup_config with one risk_label_config)."
+            )
+        parsed_risk_cfg = step5_mod._parse_risk_label_config(risk_cfg_raw)
 
-        # ------------------------------------------------------------------ #
+        analyses: list[dict[str, Any]] = []
+        s3 = self._step3_module()
+        for candidate in routed_candidates:
+            if candidate["routing_status"] != s3.ROUTING_ROUTED:
+                continue
+            if setup_type not in candidate["routed_setup_types"]:
+                continue
+            ticker = candidate["ticker"]
+            feat = features_map.get(ticker)
+            if feat is None:
+                continue
+            feat_for_validator = {**feat, "ticker": ticker, "signal_date": sig_iso}
+            result = m14.validate_setup(setup_type, feat_for_validator, config)
+
+            analysis_id = str(uuid.uuid4())
+            sector, industry = sector_industry.get(ticker, (None, None))
+            analyses.append({
+                "analysis_id": analysis_id,
+                "candidate_id": candidate["candidate_id"],
+                "setup_config_id": result.setup_config_id,
+                "ticker": ticker,
+                "signal_date": sim_date,
+                "setup_type": result.setup_type,
+                "setup_score": result.setup_score,
+                "setup_passed": result.setup_passed,
+                "setup_reasons": result.pass_fail_reasons,
+                "setup_fail_reason": result.setup_fail_reason,
+                "entry_price_raw": result.entry_price_raw,
+                "support_level": result.support_level_raw,
+                "resistance_level": result.resistance_level_raw,
+                "next_resistance_level": result.next_resistance_level_raw,
+                "atr_pct": result.atr_pct,
+                "distance_to_ema20_pct": result.distance_to_ema20_pct,
+                "distance_to_ema50_pct": result.distance_to_ema50_pct,
+                "rvol": result.rvol,
+                "earnings_days": result.earnings_days,
+                "market_regime": result.market_regime,
+                "earnings_penalty": result.earnings_penalty,
+                "macro_penalty": result.macro_penalty,
+                "explanation_json": None,
+                "target_is_structural": result.target_is_structural,
+                "sector": sector,
+                "industry": industry,
+            })
+
+        for a in analyses:
+            connection.execute(
+                _INSERT_SIM_STEP4,
+                [
+                    a["analysis_id"], a["candidate_id"], run_id, fold_id,
+                    config_id, a["ticker"], sim_date, a["setup_type"],
+                    a["setup_score"], a["setup_passed"],
+                    None,  # estimated_rr — Phase 5 only, always NULL from Step 4
+                    a["target_is_structural"],
+                    a["entry_price_raw"],
+                    None,  # stop_price_raw — Phase 5 only
+                    None,  # target_price_raw — Phase 5 only
+                ],
+            )
+
+        rows = step5_mod.Step5ProposalEngine()._build_rows(
+            analyses, features_map, {setup_type: config}, parsed_risk_cfg,
+            run_id, sim_date,
+        )
+
+        for row in rows:
+            connection.execute(_INSERT_SIM_STEP5, self._step5_insert_params(fold_id, row))
+
+        proposals = [
+            {
+                "proposal_id": row["proposal_id"],
+                "ticker": row["ticker"],
+                "setup_type": row["setup_type"],
+                "risk_label": row["risk_label"],
+                "target_price_raw": row["target_price_raw"],
+                "in_raw_top_n": row["in_raw_top_n"],
+                "in_diversified_top_n": row["in_diversified_top_n"],
+            }
+            for row in rows
+        ]
+        stop_by_ticker = {row["ticker"]: row["stop_price_raw"] for row in rows}
+
+        return {
+            "step4_rows": len(analyses),
+            "step5_rows": len(rows),
+            "proposals": proposals,
+            "stop_by_ticker": stop_by_ticker,
+        }
+
+    @staticmethod
+    def _step5_insert_params(fold_id: str | None, row: dict[str, Any]) -> list[Any]:
+        return [
+            row["proposal_id"], row["run_id"], fold_id, row["setup_config_id"],
+            row["ticker"], row["signal_date"], row["setup_type"],
+            row["setup_score"], row["risk_score"], row["risk_label"],
+            row["risk_reasons"], row["disposition"],
+            row["entry_price_raw"], row["stop_price_raw"], row["target_price_raw"],
+            row["estimated_rr"], row["target_is_structural"],
+            row["support_level"], row["resistance_level"], row["next_resistance_level"],
+            row["market_regime"], row["earnings_days"],
+            row["proposal_score_raw"], row["diversity_penalty"], row["proposal_score_final"],
+            row["raw_rank"], row["diversified_rank"],
+            row["in_raw_top_n"], row["in_diversified_top_n"],
+            row["diversification_applied"], row["selected_top_n"], row["selected_flag"],
+            row["rejection_reason"],
+        ]
+
+    # ------------------------------------------------------------------ #
     # Outcomes (Module 16 §64 rules adapted to simulation tables).
     # ------------------------------------------------------------------ #
     def _build_outcomes(
@@ -1035,10 +1370,21 @@ class SimulationEngine:
         folds: list[dict[str, Any]],
         fold_ids: dict[int, str],
         all_outcomes: list[dict[str, Any]],
+        *,
+        cal: Any = None,
+        embargo_bd: int = 0,
     ) -> None:
-        """Select the best config per fold and insert ``sim_folds`` rows."""
+        """Select the best config per fold and insert ``sim_folds`` rows.
+
+        ``cal`` / ``embargo_bd`` are optional (default off) so pre-existing
+        callers that only pass the first five positional args keep their
+        exact pre-embargo behavior; the engine's own run loop always supplies
+        both (see ``_run_with_connection``).
+        """
         for fold in folds:
-            metrics_by_config = self._fold_train_metrics(fold, all_outcomes)
+            metrics_by_config = self._fold_train_metrics(
+                fold, all_outcomes, cal=cal, embargo_bd=embargo_bd
+            )
             selected = select_config_for_fold(metrics_by_config)
             connection.execute(
                 _INSERT_SIM_FOLD,
@@ -1050,20 +1396,52 @@ class SimulationEngine:
             )
 
     @staticmethod
+    def _embargo_cutoff(cal: Any, fold: dict[str, Any], embargo_bd: int) -> date:
+        """Trading day at/after which train-window signals are embargoed.
+
+        The last ``embargo_bd`` trading sessions immediately before
+        ``fold["test_start"]`` are excluded from that fold's training metrics,
+        so a signal near the train/test boundary whose outcome-realization
+        window overlaps the test period cannot leak forward-looking
+        information into training metrics. Falls back to ``train_start``
+        (embargo the whole train window) when it is shorter than
+        ``embargo_bd`` sessions.
+        """
+        pretest = cal.trading_days_between(
+            fold["train_start"], fold["test_start"] - _dt.timedelta(days=1)
+        )
+        if embargo_bd <= 0 or len(pretest) <= embargo_bd:
+            return fold["train_start"]
+        return pretest[-embargo_bd]
+
+    @staticmethod
     def _fold_train_metrics(
-        fold: dict[str, Any], all_outcomes: list[dict[str, Any]]
+        fold: dict[str, Any],
+        all_outcomes: list[dict[str, Any]],
+        *,
+        cal: Any = None,
+        embargo_bd: int = 0,
     ) -> dict[str, dict[str, float | None]]:
         """Per-config training metrics for ``fold`` (diversified list, 40bd).
 
         Train outcomes are those whose ``signal_date`` falls in the fold's train
-        window, excluding ``cross_fold_outcome = TRUE`` rows. Ordered by
-        ``signal_date`` so the drawdown curve is chronological.
+        window, excluding ``cross_fold_outcome = TRUE`` rows and (when
+        ``embargo_bd > 0`` and ``cal`` supplied) rows inside the embargo window
+        immediately before ``test_start``. Ordered by ``signal_date`` so the
+        drawdown curve is chronological.
         """
+        embargo_cutoff = (
+            SimulationEngine._embargo_cutoff(cal, fold, embargo_bd)
+            if embargo_bd > 0 and cal is not None
+            else None
+        )
         by_config: dict[str, list[tuple[date, float | None]]] = {}
         for o in all_outcomes:
             if o["cross_fold_outcome"]:
                 continue
             if not (fold["train_start"] <= o["signal_date"] <= fold["train_end"]):
+                continue
+            if embargo_cutoff is not None and o["signal_date"] >= embargo_cutoff:
                 continue
             if o["list_membership"] not in (LIST_DIVERSIFIED_ONLY, LIST_BOTH):
                 continue
@@ -1086,6 +1464,8 @@ class SimulationEngine:
         mode: str,
         config_ids: list[str],
         all_outcomes: list[dict[str, Any]],
+        *,
+        setup_configs: dict[str, dict] | None = None,
     ) -> int:
         """Insert one ``sim_config_comparisons`` row per (config, horizon, list_type).
 
@@ -1093,6 +1473,12 @@ class SimulationEngine:
         other modes every outcome counts. Metrics are computed per list type
         (``raw`` includes ``raw_only`` + ``both``; ``diversified`` includes
         ``diversified_only`` + ``both``).
+
+        ``setup_configs`` (optional) supplies ``setup_type`` per ``config_id`` —
+        ``sim_config_comparisons.setup_type`` is ``NOT NULL`` in the schema.
+        Defaults to ``None`` per config_id when omitted, so pre-existing direct
+        callers of this method keep working; the engine's own run loop always
+        supplies it (see ``_run_with_connection``).
         """
         relevant = [
             o for o in all_outcomes
@@ -1106,6 +1492,9 @@ class SimulationEngine:
         return_key = {5: "return_5bd_pct", 10: "return_10bd_pct",
                       20: "return_20bd_pct", 40: "return_40bd_pct"}
         for config_id in config_ids:
+            cfg_setup_type = (
+                (setup_configs or {}).get(config_id, {}).get("setup_type")
+            )
             for list_type, memberships in list_types:
                 group = sorted(
                     (
@@ -1122,7 +1511,7 @@ class SimulationEngine:
                         _INSERT_SIM_COMPARISON,
                         [
                             str(uuid.uuid4()), run_id, config_id,
-                            None, None,  # setup_type, risk_label: aggregate comparison row
+                            cfg_setup_type, None,  # risk_label: aggregate comparison row
                             horizon,
                             m["expectancy"], m["win_rate"], m["avg_win"],
                             m["avg_loss"], m["profit_factor"], m["max_drawdown_pct"],

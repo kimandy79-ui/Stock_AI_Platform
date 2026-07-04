@@ -205,7 +205,9 @@ class TestOutcomeQueueCreatorSetupMode:
 # =========================================================================== #
 
 class TestSimulationEngineSetupMode:
-    """SimulationEngine uses setup_configs param; legacy engines are guarded."""
+    """SimulationEngine uses setup_configs param; legacy engines are never
+    imported (replay itself is implemented, not guarded — see
+    M17_SIMULATION_ENGINE_CONFIG_DELTA.md)."""
 
     def test_run_signature_accepts_setup_configs(self):
         """SimulationEngine.run must accept setup_configs keyword argument."""
@@ -329,13 +331,20 @@ class TestSimulationEngineSetupMode:
                     assert "step3_screening" not in (name or ""),                         f"Live import of step3_screening found: {name}"
                     assert "step4_analysis_engine" not in (name or ""),                         f"Live import of step4_analysis_engine found: {name}"
 
-    def test_replay_is_guarded_and_returns_failed(self):
-        """SimulationEngine.run must return failed before executing any replay.
+    def test_replay_executes_and_fails_on_incomplete_config(self):
+        """Setup-mode replay (M17_SIMULATION_ENGINE_CONFIG_DELTA.md) is no
+        longer guarded/stubbed: SimulationEngine.run now actually attempts
+        Step 3/4/5 replay instead of short-circuiting with a hardcoded
+        UNSUPPORTED sentinel. ``_minimal_setup_config()`` intentionally omits
+        the required ``universe`` block, so this still fails — but now for a
+        real configuration reason (surfaced by
+        step3_universal_eligibility._assert_universe_parity), not the old
+        placeholder message.
 
-        Uses a fake DB manager that records the sim_run insert but raises on
-        BEGIN TRANSACTION so the replay never executes.
+        Uses a fake DB manager that records the sim_run insert; replay fails
+        before BEGIN TRANSACTION because the universe block check runs first.
         """
-        from app.services.simulation.simulation_engine import SimulationEngine, _REPLAY_UNSUPPORTED
+        from app.services.simulation.simulation_engine import SimulationEngine
 
         class _FakeSim:
             """Fake simulation connection that tracks calls."""
@@ -372,22 +381,21 @@ class TestSimulationEngineSetupMode:
             setup_configs={"setup_breakout_v1": _minimal_setup_config()},
             db_role="simulation",
         )
-        # Must fail with the unsupported message
+        # Still fails (incomplete fixture config), but for a real reason now.
         assert result.status == "failed"
-        assert _REPLAY_UNSUPPORTED in result.errors[0]
+        assert "universe" in result.errors[0].lower()
+        assert "UNSUPPORTED" not in result.errors[0]
 
         # The AST-level test (test_no_legacy_engine_import_in_module) already
         # verifies no live import statement exists in the module.
         # We do not check sys.modules here because other tests in the suite may
         # import step3_screening independently, contaminating the global state.
 
-    def test_replay_unsupported_sentinel_exists(self):
-        """_REPLAY_UNSUPPORTED constant must be defined and non-empty."""
-        from app.services.simulation.simulation_engine import _REPLAY_UNSUPPORTED
-        assert isinstance(_REPLAY_UNSUPPORTED, str)
-        assert len(_REPLAY_UNSUPPORTED) > 20
-        assert "step3_screening" in _REPLAY_UNSUPPORTED
-        assert "step4_analysis_engine" in _REPLAY_UNSUPPORTED
+    def test_replay_unsupported_sentinel_removed(self):
+        """_REPLAY_UNSUPPORTED was a stub-only placeholder; it must no longer
+        exist now that replay is implemented (M17_SIMULATION_ENGINE_CONFIG_DELTA.md)."""
+        import app.services.simulation.simulation_engine as sim_mod
+        assert not hasattr(sim_mod, "_REPLAY_UNSUPPORTED")
 
 
 # =========================================================================== #

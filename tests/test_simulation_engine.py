@@ -1021,3 +1021,390 @@ def test_integration_walk_forward_smoke(tmp_db_paths) -> None:
     )
     assert res.status == service_result.STATUS_SUCCESS
     assert res.metadata["mode"] == "walk_forward"
+
+
+# --------------------------------------------------------------------------- #
+# Phase 1 (setup-mode replay) — _replay_date / _replay_step3 integration tests.
+#
+# These exercise the real reuse chain (step3_universal_eligibility pure funcs +
+# m14_setup_validators.validate_setup + Step5ProposalEngine._build_rows)
+# against a real tmp DuckDB, per M17_SIMULATION_ENGINE_CONFIG_DELTA.md.
+# --------------------------------------------------------------------------- #
+
+def make_setup_mode_config(
+    setup_type: str,
+    config_id: str,
+    *,
+    min_setup_score: float = 30.0,
+    top_n: int = 10,
+    slippage_bps: float = 10.0,
+    min_rvol_breakout: float = 1.0,
+) -> dict:
+    """A complete setup-mode variant config: one setup_config + its paired
+    risk_label_config, nested together (see SimulationEngine docstring for why
+    risk_label_config travels inside the same per-config_id dict rather than
+    as a separate run() parameter — it keeps the documented public API
+    unchanged while still supporting one risk_label_config per variant)."""
+    return {
+        "config_id": config_id,
+        "setup_type": setup_type,
+        "universe": {
+            "min_price": 5.0,
+            "min_avg_dollar_volume_20d": 1_000_000.0,
+            "allowed_symbol_types": ["stock"],
+        },
+        "validation": {
+            "breakout_prox_min": -1.0,
+            "breakout_prox_max": 0.5,
+            "min_base_duration": 5,
+            "min_rvol_breakout": min_rvol_breakout,
+            "rvol_is_hard": True,
+            "min_setup_score": min_setup_score,
+            "min_atr_stop_floor_multiple": 0.1,
+        },
+        "scoring_weights": {
+            "resistance_clarity": 0.2, "breakout_confirmation": 0.3,
+            "volume_expansion": 0.2, "base_quality": 0.15, "target_room": 0.15,
+        },
+        "earnings": {"avoid_within_bd": 5, "penalty_points_max": -10.0},
+        "macro_event_risk": {"enabled": False, "penalty_points": -5.0},
+        "simulation": {"slippage_bps": slippage_bps},
+        "risk_label_config": {
+            "factor_weights": {},
+            "thresholds": {"low_max": 33, "med_max": 66},
+            "buy_rules": {
+                "min_rr_for_buy": 1.0,
+                "allowed_buy_labels": ["low", "medium", "high"],
+                "block_market_regimes": ["extreme_risk"],
+                "block_if_regime_null": False,
+                "max_stop_distance_pct": 0.5,
+                "min_target_room_pct": 0.01,
+                "min_stop_distance_atr": 0.05,
+            },
+            "ranking": {"top_n": top_n},
+            "diversification": {
+                "hard_cap_enabled": False,
+                "sector_penalty": 0.9, "industry_penalty": 0.9,
+            },
+        },
+    }
+
+
+def _seed_breakout_ticker(conn, ticker: str, sim_date: date, **feature_overrides) -> None:
+    """Seed one ticker's ticker_master/daily_features/daily_prices row for
+    ``sim_date`` such that it is universe-eligible, routes to breakout, and
+    passes validate_breakout with default thresholds. m14 validators only need
+    precomputed feature columns (no raw price-history lookback), so a single
+    day's rows are sufficient for Step 3/4/5 replay."""
+    conn.execute(
+        "INSERT INTO ticker_master (ticker, symbol_type, sector, industry, "
+        "active_flag, delisted_flag) VALUES (?, 'stock', 'Tech', 'Software', TRUE, FALSE)",
+        [ticker],
+    )
+    feat = {
+        "ema20": 100.0, "ema50": 95.0, "ema200": 90.0, "ema_alignment_score": 80.0,
+        "ema20_slope": 0.01, "ema50_slope": 0.01,
+        "distance_to_ema20_pct": 0.02, "distance_to_ema50_pct": 0.05,
+        "rsi14": 60.0, "roc20": 0.08, "atr14": 2.0, "atr_pct": 0.02,
+        "atr_compression_score": 50.0, "rvol20": 2.0, "avg_dollar_volume_20d": 5_000_000.0,
+        "pullback_from_recent_high_pct": -0.05, "pullback_depth_pct": 0.05,
+        "breakout_proximity": 0.0, "consolidation_score": 70.0,
+        "swing_high": 105.0, "swing_low": 90.0,
+        "support_level": 90.0, "resistance_level": 100.0, "next_resistance_level": 120.0,
+        "base_high": 100.0, "base_low": 90.0,
+        "range_width_pct": 0.10, "range_duration": 15, "range_tightness_score": 70.0,
+        "volume_dry_up_score": 50.0, "volume_expansion_score": 70.0,
+        "relative_strength_vs_spy": 0.02, "sector_relative_strength": 60.0,
+        "market_regime": "bull", "days_to_earnings_bd": 30, "macro_event_risk_flag": False,
+    }
+    feat.update(feature_overrides)
+    conn.execute(
+        "INSERT INTO daily_features (ticker, feature_date, feature_cutoff_date, "
+        "feature_schema_version, feature_ready, ema20, ema50, ema200, "
+        "ema_alignment_score, ema20_slope, ema50_slope, distance_to_ema20_pct, "
+        "distance_to_ema50_pct, rsi14, roc20, atr14, atr_pct, "
+        "atr_compression_score, rvol20, avg_dollar_volume_20d, "
+        "pullback_from_recent_high_pct, pullback_depth_pct, breakout_proximity, "
+        "consolidation_score, swing_high, swing_low, support_level, "
+        "resistance_level, next_resistance_level, base_high, base_low, "
+        "range_width_pct, range_duration, range_tightness_score, "
+        "volume_dry_up_score, volume_expansion_score, relative_strength_vs_spy, "
+        "sector_relative_strength, market_regime, days_to_earnings_bd, "
+        "macro_event_risk_flag, calculated_at) "
+        "VALUES (?, ?, ?, 'v1', TRUE, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
+        "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
+        "CAST(now() AS TIMESTAMP))",
+        [
+            ticker, sim_date, sim_date,
+            feat["ema20"], feat["ema50"], feat["ema200"], feat["ema_alignment_score"],
+            feat["ema20_slope"], feat["ema50_slope"], feat["distance_to_ema20_pct"],
+            feat["distance_to_ema50_pct"], feat["rsi14"], feat["roc20"], feat["atr14"],
+            feat["atr_pct"], feat["atr_compression_score"], feat["rvol20"],
+            feat["avg_dollar_volume_20d"], feat["pullback_from_recent_high_pct"],
+            feat["pullback_depth_pct"], feat["breakout_proximity"], feat["consolidation_score"],
+            feat["swing_high"], feat["swing_low"], feat["support_level"],
+            feat["resistance_level"], feat["next_resistance_level"], feat["base_high"],
+            feat["base_low"], feat["range_width_pct"], feat["range_duration"],
+            feat["range_tightness_score"], feat["volume_dry_up_score"],
+            feat["volume_expansion_score"], feat["relative_strength_vs_spy"],
+            feat["sector_relative_strength"], feat["market_regime"],
+            feat["days_to_earnings_bd"], feat["macro_event_risk_flag"],
+        ],
+    )
+    conn.execute(
+        "INSERT INTO daily_prices (ticker, date, open_raw, high_raw, low_raw, "
+        "close_raw, volume_raw, open_adj, high_adj, low_adj, close_adj, "
+        "volume_adj, source_provider, data_quality_status, mutation_flag, created_at) "
+        "VALUES (?, ?, 100, 105, 98, 101, 1000000, 100, 105, 98, 101, 1000000, "
+        "'test', 'ok', FALSE, CAST(now() AS TIMESTAMP))",
+        [ticker, sim_date],
+    )
+
+
+def _seed_forward_prices(conn, ticker: str, dates: list[date]) -> None:
+    """Flat forward price series so outcome horizons resolve to a known return."""
+    for d in dates:
+        conn.execute(
+            "INSERT INTO daily_prices (ticker, date, open_raw, high_raw, low_raw, "
+            "close_raw, volume_raw, open_adj, high_adj, low_adj, close_adj, "
+            "volume_adj, source_provider, data_quality_status, mutation_flag, created_at) "
+            "VALUES (?, ?, 110, 115, 105, 112, 1000000, 110, 115, 105, 112, "
+            "1000000, 'test', 'ok', FALSE, CAST(now() AS TIMESTAMP))",
+            [ticker, d],
+        )
+
+
+@_needs_db
+def test_integration_replay_writes_all_sim_tables_single_variant(tmp_db_paths) -> None:
+    sim_date = SESSIONS[40]
+    prod = _conn(tmp_db_paths["prod"])
+    try:
+        _seed_breakout_ticker(prod, "AAA", sim_date)
+        _seed_forward_prices(prod, "AAA", SESSIONS[41:41 + 45])
+    finally:
+        prod.close()
+
+    cfg = make_setup_mode_config("breakout", "brk-1")
+    res = SimulationEngine().run(
+        sim_name="r1", mode="research", start_date=sim_date, end_date=sim_date,
+        config_ids=["brk-1"], setup_configs={"brk-1": cfg},
+    )
+    assert res.status == service_result.STATUS_SUCCESS, res.errors
+
+    sim = _conn(tmp_db_paths["simulation"])
+    try:
+        s3 = sim.execute(
+            "SELECT ticker, routing_status, routed_setup_types FROM sim_step3_candidates "
+            "WHERE signal_date = ?", [sim_date],
+        ).fetchall()
+        assert any(r[0] == "AAA" and r[1] == "routed" for r in s3)
+
+        s4 = sim.execute(
+            "SELECT setup_type, setup_passed, entry_price_raw, target_is_structural "
+            "FROM sim_step4_analysis WHERE ticker = 'AAA' AND signal_date = ?", [sim_date],
+        ).fetchone()
+        assert s4 is not None
+        assert s4[0] == "breakout"
+        assert s4[1] is True
+        assert s4[2] == pytest.approx(101.0)  # entry_price_raw now populated (fix)
+        assert s4[3] is True
+
+        s5 = sim.execute(
+            "SELECT risk_score, risk_label, entry_price_raw, stop_price_raw, "
+            "target_price_raw, support_level, resistance_level, market_regime "
+            "FROM sim_step5_proposals WHERE ticker = 'AAA' AND signal_date = ?", [sim_date],
+        ).fetchone()
+        assert s5 is not None
+        assert s5[0] is not None  # risk_score now populated (fix)
+        assert s5[2] is not None and s5[3] is not None and s5[4] is not None
+        assert s5[5] is not None and s5[6] is not None
+        assert s5[7] == "bull"
+
+        outc = sim.execute(
+            "SELECT list_membership, entry_price_sim FROM sim_signal_outcomes "
+            "WHERE ticker = 'AAA'"
+        ).fetchall()
+        assert len(outc) >= 1
+
+        cmp_rows = sim.execute(
+            "SELECT setup_type FROM sim_config_comparisons WHERE config_id = 'brk-1'"
+        ).fetchall()
+        assert len(cmp_rows) == 8  # 4 horizons * 2 list types
+        assert all(r[0] == "breakout" for r in cmp_rows)  # NOT NULL fix populated
+    finally:
+        sim.close()
+
+
+@_needs_db
+def test_integration_step3_runs_once_per_date_regardless_of_variant_count(tmp_db_paths) -> None:
+    sim_date = SESSIONS[40]
+    prod = _conn(tmp_db_paths["prod"])
+    try:
+        _seed_breakout_ticker(prod, "AAA", sim_date)
+        _seed_forward_prices(prod, "AAA", SESSIONS[41:41 + 45])
+    finally:
+        prod.close()
+
+    config_ids = ["brk-1", "brk-2", "brk-3"]
+    setup_configs = {
+        cid: make_setup_mode_config("breakout", cid, min_setup_score=score)
+        for cid, score in zip(config_ids, (10.0, 30.0, 90.0))
+    }
+    res = SimulationEngine().run(
+        sim_name="multi", mode="research", start_date=sim_date, end_date=sim_date,
+        config_ids=config_ids, setup_configs=setup_configs,
+    )
+    assert res.status == service_result.STATUS_SUCCESS, res.errors
+
+    sim = _conn(tmp_db_paths["simulation"])
+    try:
+        # Exactly one sim_step3_candidates row for AAA/sim_date, not 3 (one per
+        # variant would prove Step 3 re-ran per config instead of once per date).
+        count = sim.execute(
+            "SELECT COUNT(*) FROM sim_step3_candidates WHERE ticker = 'AAA' AND signal_date = ?",
+            [sim_date],
+        ).fetchone()[0]
+        assert count == 1
+        # But each variant still gets its own Step 4/5 rows.
+        s4_count = sim.execute(
+            "SELECT COUNT(*) FROM sim_step4_analysis WHERE ticker = 'AAA' AND signal_date = ?",
+            [sim_date],
+        ).fetchone()[0]
+        assert s4_count == 3
+    finally:
+        sim.close()
+
+
+@_needs_db
+def test_integration_batch_variants_produce_distinct_outcomes(tmp_db_paths) -> None:
+    """A lenient and a strict min_setup_score variant on the same candidate
+    must diverge: lenient passes, strict (near-unreachable threshold) fails."""
+    sim_date = SESSIONS[40]
+    prod = _conn(tmp_db_paths["prod"])
+    try:
+        _seed_breakout_ticker(prod, "AAA", sim_date)
+        _seed_forward_prices(prod, "AAA", SESSIONS[41:41 + 45])
+    finally:
+        prod.close()
+
+    setup_configs = {
+        "lenient": make_setup_mode_config("breakout", "lenient", min_setup_score=1.0),
+        "strict": make_setup_mode_config("breakout", "strict", min_setup_score=99.9),
+    }
+    res = SimulationEngine().run(
+        sim_name="batch", mode="research", start_date=sim_date, end_date=sim_date,
+        config_ids=["lenient", "strict"], setup_configs=setup_configs,
+    )
+    assert res.status == service_result.STATUS_SUCCESS, res.errors
+
+    sim = _conn(tmp_db_paths["simulation"])
+    try:
+        rows = {
+            r[0]: r[1]
+            for r in sim.execute(
+                "SELECT setup_config_id, setup_passed FROM sim_step4_analysis "
+                "WHERE ticker = 'AAA' AND signal_date = ?", [sim_date],
+            ).fetchall()
+        }
+        assert rows["lenient"] is True
+        assert rows["strict"] is False
+    finally:
+        sim.close()
+
+
+# --------------------------------------------------------------------------- #
+# Embargo (offline — no DB needed, exercises _fold_train_metrics directly).
+# --------------------------------------------------------------------------- #
+def test_fold_train_metrics_embargo_excludes_signals_near_test_boundary() -> None:
+    cal = FakeCalendar(SESSIONS)
+    fold = {
+        "fold_number": 1,
+        "train_start": SESSIONS[0],
+        "train_end": SESSIONS[99],
+        "test_start": SESSIONS[100],
+        "test_end": SESSIONS[150],
+    }
+    # One outcome well inside train window, one in the last 40 sessions before
+    # test_start (should be embargoed), both otherwise identical/diversified.
+    far_signal = SESSIONS[10]
+    near_signal = SESSIONS[95]  # within the last 40 sessions before test_start (idx 100)
+    outcomes = [
+        _outcome("c", far_signal, se.LIST_BOTH, 0.10),
+        _outcome("c", near_signal, se.LIST_BOTH, 0.90),
+    ]
+
+    # No embargo (default off): both count.
+    metrics_off = SimulationEngine._fold_train_metrics(fold, outcomes)
+    assert metrics_off["c"]["expectancy"] == pytest.approx((0.10 + 0.90) / 2)
+
+    # With a 40bd embargo: the near-boundary signal is excluded.
+    metrics_on = SimulationEngine._fold_train_metrics(
+        fold, outcomes, cal=cal, embargo_bd=40
+    )
+    assert metrics_on["c"]["expectancy"] == pytest.approx(0.10)
+
+
+def test_write_folds_default_embargo_off_preserves_prior_behavior() -> None:
+    """Backward-compat: callers that omit cal/embargo_bd keep pre-embargo behavior."""
+    eng = SimulationEngine()
+    conn = FakeConn()
+    folds = [{"fold_number": 1, "train_start": date(2024, 1, 1), "train_end": date(2024, 6, 30),
+              "test_start": date(2024, 7, 1), "test_end": date(2024, 9, 30)}]
+    fold_ids = {1: "fold-uuid-1"}
+    outcomes = [_outcome("good", date(2024, 1, 2) + timedelta(days=i), se.LIST_BOTH, 0.02)
+                for i in range(20)]
+    eng._write_folds(conn, "r", folds, fold_ids, outcomes)
+    row = conn.inserts["sim_folds"][0]
+    assert row[7] == "good"
+
+
+# --------------------------------------------------------------------------- #
+# Fold-planner seam (constructor injection).
+# --------------------------------------------------------------------------- #
+def test_fold_planner_is_injectable() -> None:
+    def custom_planner(start: date, end: date) -> list[dict]:
+        return [{"fold_number": 1, "train_start": start, "train_end": start,
+                  "test_start": end, "test_end": end}]
+
+    eng = SimulationEngine(fold_planner=custom_planner)
+    assert eng._fold_planner is custom_planner
+    assert eng._fold_planner(SESSIONS[0], SESSIONS[10]) == [
+        {"fold_number": 1, "train_start": SESSIONS[0], "train_end": SESSIONS[0],
+         "test_start": SESSIONS[10], "test_end": SESSIONS[10]}
+    ]
+
+
+@_needs_db
+def test_fold_planner_seam_used_by_real_run(tmp_db_paths) -> None:
+    """A custom fold_planner's output reaches sim_folds — proves the seam is
+    wired into _run_with_connection, not just stored on the instance."""
+    sim_date = SESSIONS[40]
+    prod = _conn(tmp_db_paths["prod"])
+    try:
+        _seed_breakout_ticker(prod, "AAA", sim_date)
+        _seed_forward_prices(prod, "AAA", SESSIONS[41:41 + 45])
+    finally:
+        prod.close()
+
+    sentinel_fold = {
+        "fold_number": 7, "train_start": sim_date, "train_end": sim_date,
+        "test_start": sim_date, "test_end": sim_date,
+    }
+
+    def custom_planner(start: date, end: date) -> list[dict]:
+        return [sentinel_fold]
+
+    cfg = make_setup_mode_config("breakout", "brk-1")
+    eng = SimulationEngine(fold_planner=custom_planner)
+    res = eng.run(
+        sim_name="seam", mode="walk_forward", start_date=sim_date, end_date=sim_date,
+        config_ids=["brk-1"], setup_configs={"brk-1": cfg},
+    )
+    assert res.status == service_result.STATUS_SUCCESS, res.errors
+
+    sim = _conn(tmp_db_paths["simulation"])
+    try:
+        row = sim.execute("SELECT fold_number FROM sim_folds").fetchone()
+        assert row == (7,)  # the custom planner's fold_number, not plan_walk_forward_folds'
+    finally:
+        sim.close()

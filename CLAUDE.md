@@ -182,6 +182,7 @@ M22  app/services/debug/debug_mode.py
      specs/M15_STEP5_PROPOSAL_ENGINE_SPEC.md
      specs/M16_OUTCOME_QUEUE_SPEC.md
      specs/M17_SIMULATION_ENGINE_SPEC.md
+     specs/M17_SIMULATION_ENGINE_CONFIG_DELTA.md
      specs/M18_EXPORT_PACKAGE_ENGINE_SPEC.md
      specs/M19_AI_REVIEW_ENGINE_SPEC.md
      specs/M20_PIPELINE_ORCHESTRATOR_SPEC.md
