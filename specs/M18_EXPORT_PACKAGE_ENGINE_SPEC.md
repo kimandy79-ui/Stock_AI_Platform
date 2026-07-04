@@ -1,10 +1,23 @@
 # M18 — Export Package Engine Spec
 
-Module 18 builds reviewer-facing export ZIP packages and records exactly one
-manual review row per export. It is a read-mostly service: it reads existing
+Module 18 builds reviewer-facing export ZIP packages and records one or more
+manual review row(s) per export. It is a read-mostly service: it reads existing
 prod/debug or simulation tables, writes ZIP files under `settings.EXPORTS_DIR`,
-and inserts a single row into `ai_reviews` (ticker) or `sim_ai_reviews`
-(simulation). No other table is mutated.
+and inserts into `ai_reviews` (ticker) or `sim_ai_reviews` (simulation). No
+other table is mutated.
+
+**Phase 3 delta (2026-07-05) — multi-pass review.** By default (no
+`ai_review_config` passed, or a config with `ai_review.multi_pass.enabled`
+falsy) exactly one legacy row is written per export, `review_kind = NULL`,
+`provider = "manual"`, `model = "none"` — byte-identical to pre-Phase-3
+behavior. When `ai_review_config`'s `multi_pass.enabled` is true, **three**
+rows are written per export instead — one each for `review_kind` `thesis` /
+`contrarian` / `audit`, each with that pass's own configured `provider` /
+`model` (so contrarian resolves to a different provider than thesis, per
+`M19_AI_REVIEW_ENGINE_SPEC.md`). All rows for one export are written inside a
+single transaction (all-or-nothing). See
+`default_configs.DEFAULT_RUNTIME_CONFIGS["ai_review"]["multi_pass"]` for the
+config shape.
 
 Source of truth: `01e_UI_AND_TESTING.md` / `UI/96_Export_Package_Specs.md` (ZIP
 manifests), `01b_SCHEMA_AND_DATA.md` + `M02_SCHEMA_SPEC.md` §3.19/§4.9
@@ -21,13 +34,19 @@ class ExportPackageEngine:
 
     def export_ticker_review(
         self, signal_date, strategy_config_id, proposal_ids,
-        db_role="prod", run_id=None,
+        db_role="prod", run_id=None, ai_review_config=None,
     ) -> ServiceResult: ...
 
     def export_simulation_review(
         self, sim_run_id, db_role="simulation", run_id=None,
+        ai_review_config=None,
     ) -> ServiceResult: ...
 ```
+
+`ai_review_config` (Phase 3, optional): overrides
+`default_configs.DEFAULT_RUNTIME_CONFIGS["ai_review"]`, resolved lazily only
+when `None` is passed (the common case costs no extra import). Controls
+legacy-single-row vs. multi-pass-three-row behavior; see the delta note above.
 
 - Always returns `ServiceResult`; never raises for expected validation / DB /
   ZIP failures.
@@ -46,14 +65,18 @@ Validation failures return `failed` with no DB access and no ZIP.
 ## 3. Metadata keys (every return path)
 
 - Ticker: `run_id, export_type, db_role, signal_date, strategy_config_id,
-  proposal_ids, zip_filename, zip_path, review_type, review_table, status,
-  error`.
+  proposal_ids, zip_filename, zip_path, review_type, review_table,
+  ai_review_rows, status, error`.
 - Simulation: `run_id, export_type, db_role, sim_run_id, zip_filename, zip_path,
-  review_type, review_table, status, error`.
+  review_type, review_table, ai_review_rows, status, error`.
 
 `zip_filename` / `zip_path` / `error` are `None` on paths where they are not
 available. `review_type` mirrors `export_type` (`ticker_review` /
 `simulation_review`); `review_table` is `ai_reviews` / `sim_ai_reviews`.
+`ai_review_rows` (Phase 3) is always a list — `[]` on paths where no row was
+written yet, otherwise one `{"review_kind", "ai_review_id", "provider",
+"model"}` dict per row written (length 1 for the legacy path, 3 for
+multi-pass).
 
 ## 4. ZIP contracts
 

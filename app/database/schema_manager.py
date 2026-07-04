@@ -434,6 +434,7 @@ _PROD_TABLE_DDL: Final[tuple[str, ...]] = (
     CREATE TABLE IF NOT EXISTS ai_reviews (
         ai_review_id VARCHAR PRIMARY KEY,
         review_type VARCHAR NOT NULL,
+        review_kind VARCHAR,
         proposal_id VARCHAR,
         sim_run_id VARCHAR,
         setup_type VARCHAR,
@@ -729,6 +730,7 @@ _SIM_TABLE_DDL: Final[tuple[str, ...]] = _SIM_CONFIG_TABLE_DDL + (
     CREATE TABLE IF NOT EXISTS sim_ai_reviews (
         ai_review_id VARCHAR PRIMARY KEY,
         sim_run_id VARCHAR NOT NULL,
+        review_kind VARCHAR,
         provider VARCHAR NOT NULL,
         model VARCHAR NOT NULL,
         prompt_version VARCHAR NOT NULL,

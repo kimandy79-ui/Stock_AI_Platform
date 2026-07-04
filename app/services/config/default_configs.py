@@ -478,6 +478,17 @@ DEFAULT_RUNTIME_CONFIGS: Final[dict[str, dict[str, Any]]] = {
         "prompt_version": "v1",
         "max_tokens": 1500,
         "provider_mode": "manual",
+        # Phase 3 — multi-pass AI review (thesis/contrarian/audit). Disabled
+        # by default: export_ticker_review / export_simulation_review write
+        # the single legacy "manual"/"none" row (review_kind=NULL) exactly as
+        # before when this is False or omitted. Set enabled=True (and real
+        # provider/model values) to opt into writing one row per pass instead.
+        "multi_pass": {
+            "enabled": False,
+            "thesis": {"provider": "anthropic", "model": "claude-sonnet-5"},
+            "contrarian": {"provider": "openai", "model": "gpt-4o"},
+            "audit": {"provider": "anthropic", "model": "claude-haiku-4-5"},
+        },
     },
     "export": {
         "price_window_bd_around_signal": 40,

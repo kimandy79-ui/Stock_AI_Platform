@@ -72,6 +72,17 @@ PROVIDER_MANUAL: Final[str] = "manual"
 MODEL_NONE: Final[str] = "none"
 PROMPT_VERSION_V1: Final[str] = "v1"
 
+# Phase 3 — multi-pass AI review kinds (review_kind column). A legacy /
+# single-row export (ai_review_config.multi_pass.enabled = False, the
+# default) writes one row with review_kind = NULL, unchanged from pre-Phase-3
+# behavior.
+REVIEW_KIND_THESIS: Final[str] = "thesis"
+REVIEW_KIND_CONTRARIAN: Final[str] = "contrarian"
+REVIEW_KIND_AUDIT: Final[str] = "audit"
+ALLOWED_REVIEW_KINDS: Final[tuple[str, ...]] = (
+    REVIEW_KIND_THESIS, REVIEW_KIND_CONTRARIAN, REVIEW_KIND_AUDIT,
+)
+
 STATUS_SUCCESS_META: Final[str] = "success"
 STATUS_FAILED_META: Final[str] = "failed"
 
@@ -105,6 +116,7 @@ TICKER_METADATA_KEYS: Final[tuple[str, ...]] = (
     "zip_path",
     "review_type",
     "review_table",
+    "ai_review_rows",
     "status",
     "error",
 )
@@ -117,6 +129,7 @@ SIM_METADATA_KEYS: Final[tuple[str, ...]] = (
     "zip_path",
     "review_type",
     "review_table",
+    "ai_review_rows",
     "status",
     "error",
 )
@@ -163,6 +176,38 @@ def _mean(values: list[float]) -> float | None:
     return sum(clean) / len(clean)
 
 
+def _resolve_ai_review_config(ai_review_config: dict[str, Any] | None) -> dict[str, Any]:
+    """Return the caller-supplied config, or the in-memory default (lazy
+    import — ``default_configs`` is not needed for the vastly more common
+    single-row / no-config-passed call path)."""
+    if ai_review_config is not None:
+        return ai_review_config
+    from app.services.config import default_configs
+    return default_configs.get_default_runtime_configs()["ai_review"]
+
+
+def _multi_pass_plan(ai_review_config: dict[str, Any]) -> list[tuple[str | None, str, str]]:
+    """Return ``[(review_kind, provider, model), ...]`` to write.
+
+    When ``multi_pass.enabled`` is falsy (the default), returns the single
+    legacy row plan: ``[(None, "manual", "none")]`` — byte-identical to
+    pre-Phase-3 behavior. When enabled, returns one entry per
+    :data:`ALLOWED_REVIEW_KINDS`, in order, with that pass's configured
+    ``provider`` / ``model`` (falling back to the legacy manual/none values
+    for any pass missing its own config block).
+    """
+    multi_pass = ai_review_config.get("multi_pass", {})
+    if not multi_pass.get("enabled", False):
+        return [(None, PROVIDER_MANUAL, MODEL_NONE)]
+    plan: list[tuple[str | None, str, str]] = []
+    for kind in ALLOWED_REVIEW_KINDS:
+        pass_cfg = multi_pass.get(kind, {})
+        provider = pass_cfg.get("provider", PROVIDER_MANUAL)
+        model = pass_cfg.get("model", MODEL_NONE)
+        plan.append((kind, provider, model))
+    return plan
+
+
 def _score_bucket(score: float) -> tuple[int, int] | None:
     """Return the ``[low, high)`` 10-wide bucket for ``score`` in 0–100."""
     if score is None:
@@ -200,8 +245,9 @@ class ExportPackageEngine:
         proposal_ids: list[str],
         db_role: str = "prod",
         run_id: str | None = None,
+        ai_review_config: dict[str, Any] | None = None,
     ) -> ServiceResult:
-        """Build a ticker-review ZIP and write one ``ai_reviews`` row.
+        """Build a ticker-review ZIP and write ``ai_reviews`` row(s).
 
         Parameters
         ----------
@@ -215,6 +261,16 @@ class ExportPackageEngine:
             ``"prod"`` or ``"debug"`` only; anything else fails before DB access.
         run_id:
             A fresh ``uuid4`` is minted when ``None``; a supplied value is kept.
+        ai_review_config:
+            Optional override for the ``ai_review`` runtime config (see
+            ``default_configs.DEFAULT_RUNTIME_CONFIGS["ai_review"]``). Defaults
+            to that config when ``None``. When
+            ``multi_pass.enabled`` is falsy (the default), exactly one legacy
+            row is written (``review_kind=NULL``, ``provider="manual"``,
+            ``model="none"``) — unchanged from pre-Phase-3 behavior. When
+            enabled, one row per review_kind (``thesis`` / ``contrarian`` /
+            ``audit``) is written, each with that pass's configured
+            provider/model.
         """
         # --- normalize proposal_ids first so all failure paths are safe. -- #
         # Guards against None or any non-list type being passed.
@@ -313,7 +369,7 @@ class ExportPackageEngine:
                 proposal_ids, message,
             )
 
-        # --- write the single ai_reviews row (ZIP may remain on failure). - #
+        # --- write the ai_reviews row(s) (ZIP may remain on failure). ----- #
         # Use the first *exported* proposal_id (from validated step5 rows,
         # ordered by proposal_id), not proposal_ids[0] from the raw input.
         first_exported_pid = step5[0]["proposal_id"]
@@ -322,8 +378,9 @@ class ExportPackageEngine:
             signal_iso, setup_config_id, data
         )
         try:
-            self._write_ticker_review_row(
-                db_role, run_id, first_exported_pid, prompt_text, exported_tickers
+            ai_review_rows = self._write_ticker_review_rows(
+                db_role, run_id, first_exported_pid, prompt_text,
+                exported_tickers, ai_review_config,
             )
         except Exception as exc:  # noqa: BLE001 - DB write after ZIP (G-ZIP-CLEANUP)
             message = (
@@ -341,6 +398,7 @@ class ExportPackageEngine:
         return self._ticker_success(
             run_id, db_role, signal_iso, setup_config_id, proposal_ids,
             zip_filename, str(zip_path), rows_processed=len(data["step5"]),
+            ai_review_rows=ai_review_rows,
         )
 
     # ------------------------------------------------------------------ #
@@ -351,8 +409,9 @@ class ExportPackageEngine:
         sim_run_id: str,
         db_role: str = "simulation",
         run_id: str | None = None,
+        ai_review_config: dict[str, Any] | None = None,
     ) -> ServiceResult:
-        """Build a simulation-review ZIP and write one ``sim_ai_reviews`` row.
+        """Build a simulation-review ZIP and write ``sim_ai_reviews`` row(s).
 
         Parameters
         ----------
@@ -362,6 +421,9 @@ class ExportPackageEngine:
             ``"simulation"`` only; anything else fails before DB access.
         run_id:
             A fresh ``uuid4`` is minted when ``None``; a supplied value is kept.
+        ai_review_config:
+            See :meth:`export_ticker_review` — same resolution/back-compat
+            rules apply.
         """
         run_id = run_id if run_id is not None else str(uuid.uuid4())
         log = logging_config.get_logger(__name__, run_id)
@@ -391,7 +453,9 @@ class ExportPackageEngine:
 
         prompt_text = self._sim_prompt_text_v1(sim_run_id, data)
         try:
-            self._write_sim_review_row(db_role, run_id, sim_run_id, prompt_text)
+            ai_review_rows = self._write_sim_review_rows(
+                db_role, run_id, sim_run_id, prompt_text, ai_review_config,
+            )
         except Exception as exc:  # noqa: BLE001 - DB write after ZIP (G-ZIP-CLEANUP)
             message = (
                 f"review write failed: {type(exc).__name__}: {exc} "
@@ -407,6 +471,7 @@ class ExportPackageEngine:
         return self._sim_success(
             run_id, db_role, sim_run_id, zip_filename, str(zip_path),
             rows_processed=len(data["performance_metrics"]),
+            ai_review_rows=ai_review_rows,
         )
 
     # ------------------------------------------------------------------ #
@@ -735,38 +800,57 @@ class ExportPackageEngine:
         )
 
     # ------------------------------------------------------------------ #
-    # Ticker review row write (single row).
+    # Ticker review row write (one row per review_kind in the resolved plan;
+    # a single NULL-review_kind row when multi-pass is not enabled).
     # ------------------------------------------------------------------ #
-    def _write_ticker_review_row(
+    def _write_ticker_review_rows(
         self,
         db_role: str,
         run_id: str,
         proposal_id: str,
         prompt_text: str,
         exported_tickers: list[str],
-    ) -> None:
+        ai_review_config: dict[str, Any] | None,
+    ) -> list[dict[str, Any]]:
+        plan = _multi_pass_plan(_resolve_ai_review_config(ai_review_config))
+        written: list[dict[str, Any]] = []
         connection = self._db.connect(db_role)
         try:
-            connection.execute(
-                "INSERT INTO ai_reviews "
-                "(ai_review_id, review_type, proposal_id, sim_run_id, provider, "
-                " model, prompt_version, prompt_text, selected_tickers_json, "
-                " ai_response_text, human_action, created_at) "
-                "VALUES (?, ?, ?, NULL, ?, ?, ?, ?, ?, NULL, NULL, "
-                " CAST(now() AS TIMESTAMP))",
-                [
-                    str(uuid.uuid4()),
-                    EXPORT_TYPE_TICKER,
-                    proposal_id,
-                    PROVIDER_MANUAL,
-                    MODEL_NONE,
-                    PROMPT_VERSION_V1,
-                    prompt_text,
-                    json.dumps(exported_tickers),
-                ],
-            )
+            connection.execute("BEGIN TRANSACTION")
+            try:
+                for review_kind, provider, model in plan:
+                    ai_review_id = str(uuid.uuid4())
+                    connection.execute(
+                        "INSERT INTO ai_reviews "
+                        "(ai_review_id, review_type, review_kind, proposal_id, "
+                        " sim_run_id, provider, model, prompt_version, "
+                        " prompt_text, selected_tickers_json, ai_response_text, "
+                        " human_action, created_at) "
+                        "VALUES (?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, NULL, NULL, "
+                        " CAST(now() AS TIMESTAMP))",
+                        [
+                            ai_review_id,
+                            EXPORT_TYPE_TICKER,
+                            review_kind,
+                            proposal_id,
+                            provider,
+                            model,
+                            PROMPT_VERSION_V1,
+                            prompt_text,
+                            json.dumps(exported_tickers),
+                        ],
+                    )
+                    written.append({
+                        "review_kind": review_kind, "ai_review_id": ai_review_id,
+                        "provider": provider, "model": model,
+                    })
+                connection.execute("COMMIT")
+            except Exception:
+                connection.execute("ROLLBACK")
+                raise
         finally:
             connection.close()
+        return written
 
     # ------------------------------------------------------------------ #
     # Simulation read phase.
@@ -1081,37 +1165,57 @@ class ExportPackageEngine:
         )
 
     # ------------------------------------------------------------------ #
-    # Simulation review row write (single row).
+    # Simulation review row write (one row per review_kind in the resolved
+    # plan; a single NULL-review_kind row when multi-pass is not enabled).
     # ------------------------------------------------------------------ #
-    def _write_sim_review_row(
-        self, db_role: str, run_id: str, sim_run_id: str, prompt_text: str
-    ) -> None:
-        """Write one ``sim_ai_reviews`` row.
+    def _write_sim_review_rows(
+        self,
+        db_role: str,
+        run_id: str,
+        sim_run_id: str,
+        prompt_text: str,
+        ai_review_config: dict[str, Any] | None,
+    ) -> list[dict[str, Any]]:
+        """Write one or more ``sim_ai_reviews`` rows.
 
-        G-SIM-AI-SCHEMA: the frozen ``sim_ai_reviews`` schema (M02 §4.9) has no
-        ``review_type`` / ``proposal_id`` / ``selected_tickers_json`` columns, so
-        only the columns that exist in the schema are populated. ``review_type``
-        is still recorded in the returned ``ServiceResult`` metadata.
+        G-SIM-AI-SCHEMA: the ``sim_ai_reviews`` schema (M02 §4.9) has no
+        ``review_type`` / ``proposal_id`` / ``selected_tickers_json`` columns,
+        so only the columns that exist in the schema are populated.
+        ``review_type`` is still recorded in the returned ``ServiceResult``
+        metadata (mirroring the ticker flow) even though it isn't a column
+        here.
         """
+        plan = _multi_pass_plan(_resolve_ai_review_config(ai_review_config))
+        written: list[dict[str, Any]] = []
         connection = self._db.connect(db_role)
         try:
-            connection.execute(
-                "INSERT INTO sim_ai_reviews "
-                "(ai_review_id, sim_run_id, provider, model, prompt_version, "
-                " prompt_text, ai_response_text, human_action, created_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, "
-                " CAST(now() AS TIMESTAMP))",
-                [
-                    str(uuid.uuid4()),
-                    sim_run_id,
-                    PROVIDER_MANUAL,
-                    MODEL_NONE,
-                    PROMPT_VERSION_V1,
-                    prompt_text,
-                ],
-            )
+            connection.execute("BEGIN TRANSACTION")
+            try:
+                for review_kind, provider, model in plan:
+                    ai_review_id = str(uuid.uuid4())
+                    connection.execute(
+                        "INSERT INTO sim_ai_reviews "
+                        "(ai_review_id, sim_run_id, review_kind, provider, "
+                        " model, prompt_version, prompt_text, "
+                        " ai_response_text, human_action, created_at) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, NULL, NULL, "
+                        " CAST(now() AS TIMESTAMP))",
+                        [
+                            ai_review_id, sim_run_id, review_kind, provider,
+                            model, PROMPT_VERSION_V1, prompt_text,
+                        ],
+                    )
+                    written.append({
+                        "review_kind": review_kind, "ai_review_id": ai_review_id,
+                        "provider": provider, "model": model,
+                    })
+                connection.execute("COMMIT")
+            except Exception:
+                connection.execute("ROLLBACK")
+                raise
         finally:
             connection.close()
+        return written
 
     # ------------------------------------------------------------------ #
     # Fetch helper.
@@ -1131,6 +1235,7 @@ class ExportPackageEngine:
         self, run_id: str, db_role: str, signal_iso: str,
         setup_config_id: str, proposal_ids: list[str],
         zip_filename: str, zip_path: str, *, rows_processed: int,
+        ai_review_rows: list[dict[str, Any]] | None = None,
     ) -> ServiceResult:
         return ServiceResult(
             status=service_result.STATUS_SUCCESS,
@@ -1139,6 +1244,7 @@ class ExportPackageEngine:
             metadata=self._ticker_metadata(
                 run_id, db_role, signal_iso, setup_config_id, proposal_ids,
                 zip_filename, zip_path, STATUS_SUCCESS_META, None,
+                ai_review_rows,
             ),
         )
 
@@ -1146,6 +1252,7 @@ class ExportPackageEngine:
         self, run_id: str, db_role: str, signal_iso: str,
         setup_config_id: str, proposal_ids: list[str], message: str,
         *, zip_filename: str | None = None, zip_path: str | None = None,
+        ai_review_rows: list[dict[str, Any]] | None = None,
     ) -> ServiceResult:
         return ServiceResult(
             status=service_result.STATUS_FAILED,
@@ -1155,6 +1262,7 @@ class ExportPackageEngine:
             metadata=self._ticker_metadata(
                 run_id, db_role, signal_iso, setup_config_id, proposal_ids,
                 zip_filename, zip_path, STATUS_FAILED_META, message,
+                ai_review_rows,
             ),
         )
 
@@ -1163,6 +1271,7 @@ class ExportPackageEngine:
         run_id: str, db_role: str, signal_iso: str, setup_config_id: str,
         proposal_ids: list[str], zip_filename: str | None, zip_path: str | None,
         status: str, error: str | None,
+        ai_review_rows: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         return {
             "run_id": run_id,
@@ -1175,6 +1284,7 @@ class ExportPackageEngine:
             "zip_path": zip_path,
             "review_type": EXPORT_TYPE_TICKER,
             "review_table": REVIEW_TABLE_TICKER,
+            "ai_review_rows": ai_review_rows or [],
             "status": status,
             "error": error,
         }
@@ -1185,6 +1295,7 @@ class ExportPackageEngine:
     def _sim_success(
         self, run_id: str, db_role: str, sim_run_id: str,
         zip_filename: str, zip_path: str, *, rows_processed: int,
+        ai_review_rows: list[dict[str, Any]] | None = None,
     ) -> ServiceResult:
         return ServiceResult(
             status=service_result.STATUS_SUCCESS,
@@ -1192,13 +1303,14 @@ class ExportPackageEngine:
             rows_processed=rows_processed,
             metadata=self._sim_metadata(
                 run_id, db_role, sim_run_id, zip_filename, zip_path,
-                STATUS_SUCCESS_META, None,
+                STATUS_SUCCESS_META, None, ai_review_rows,
             ),
         )
 
     def _sim_failed(
         self, run_id: str, db_role: str, sim_run_id: str, message: str,
         *, zip_filename: str | None = None, zip_path: str | None = None,
+        ai_review_rows: list[dict[str, Any]] | None = None,
     ) -> ServiceResult:
         return ServiceResult(
             status=service_result.STATUS_FAILED,
@@ -1207,7 +1319,7 @@ class ExportPackageEngine:
             errors=[message],
             metadata=self._sim_metadata(
                 run_id, db_role, sim_run_id, zip_filename, zip_path,
-                STATUS_FAILED_META, message,
+                STATUS_FAILED_META, message, ai_review_rows,
             ),
         )
 
@@ -1215,6 +1327,7 @@ class ExportPackageEngine:
     def _sim_metadata(
         run_id: str, db_role: str, sim_run_id: str, zip_filename: str | None,
         zip_path: str | None, status: str, error: str | None,
+        ai_review_rows: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         return {
             "run_id": run_id,
@@ -1225,6 +1338,7 @@ class ExportPackageEngine:
             "zip_path": zip_path,
             "review_type": EXPORT_TYPE_SIM,
             "review_table": REVIEW_TABLE_SIM,
+            "ai_review_rows": ai_review_rows or [],
             "status": status,
             "error": error,
         }

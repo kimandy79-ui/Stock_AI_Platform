@@ -41,6 +41,7 @@ database access is routed through the approved :mod:`app.database.duckdb_manager
 
 from __future__ import annotations
 
+import json
 import uuid
 from typing import Any, Final, Protocol, runtime_checkable
 
@@ -90,6 +91,7 @@ SEND_METADATA_KEYS: Final[tuple[str, ...]] = (
     "export_type",
     "db_role",
     "ai_review_id",
+    "review_kind",
     "provider",
     "model",
     "prompt_version",
@@ -112,6 +114,112 @@ _PROVIDER_ENV_KEY: Final[dict[str, str]] = {
     "anthropic": "ANTHROPIC_API_KEY",
     "openai": "OPENAI_API_KEY",
 }
+
+# --------------------------------------------------------------------------- #
+# Structured pass-output parsing (Phase 3 — thesis/contrarian/audit).
+#
+# The thesis pass has no special structure requirement (freeform assessment,
+# unchanged from today). The contrarian and audit passes are expected to
+# return a JSON string in ai_response_text; these pure, no-I/O functions
+# parse that JSON into the derived scores Step 5 consumes
+# (contrarian_risk_score / audit_consistency_score). A malformed or
+# unparseable response degrades to None ("no score available yet") rather
+# than a hard penalty — an AI response that failed to follow the requested
+# format is not necessarily evidence of a bad thesis, only of unusable
+# output; Step 5 treats an absent score exactly like a pass that hasn't run.
+# --------------------------------------------------------------------------- #
+AUDIT_CLASSIFICATION_GROUNDED: Final[str] = "grounded"
+AUDIT_CLASSIFICATION_SPECULATIVE: Final[str] = "speculative"
+AUDIT_CLASSIFICATION_UNVERIFIABLE: Final[str] = "unverifiable"
+ALLOWED_AUDIT_CLASSIFICATIONS: Final[tuple[str, ...]] = (
+    AUDIT_CLASSIFICATION_GROUNDED,
+    AUDIT_CLASSIFICATION_SPECULATIVE,
+    AUDIT_CLASSIFICATION_UNVERIFIABLE,
+)
+
+
+def parse_audit_response(response_text: str | None) -> dict[str, Any] | None:
+    """Parse an audit-pass ``ai_response_text`` into claim counts + score.
+
+    Expected JSON shape::
+
+        {"claims": [{"claim": str, "classification":
+            "grounded" | "speculative" | "unverifiable"}, ...]}
+
+    Returns ``None`` when ``response_text`` is falsy, not valid JSON, not a
+    JSON object, has no non-empty ``"claims"`` list, or every claim has an
+    unrecognized/missing classification (so ``total`` would be 0) — see the
+    module-level note on why malformed output degrades to "absent" rather
+    than a penalty.
+
+    Otherwise returns::
+
+        {"grounded": int, "speculative": int, "unverifiable": int,
+         "total": int, "audit_consistency_score": float}  # 0-100
+
+    ``audit_consistency_score = 100 * grounded / total``. Claims with an
+    unrecognized classification are skipped entirely (not counted in any
+    bucket, nor in ``total``).
+    """
+    if not response_text:
+        return None
+    try:
+        parsed = json.loads(response_text)
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    claims = parsed.get("claims")
+    if not isinstance(claims, list) or not claims:
+        return None
+
+    counts = {k: 0 for k in ALLOWED_AUDIT_CLASSIFICATIONS}
+    total = 0
+    for claim in claims:
+        if not isinstance(claim, dict):
+            continue
+        classification = claim.get("classification")
+        if classification not in counts:
+            continue
+        counts[classification] += 1
+        total += 1
+    if total == 0:
+        return None
+
+    return {
+        **counts,
+        "total": total,
+        "audit_consistency_score": 100.0 * counts[AUDIT_CLASSIFICATION_GROUNDED] / total,
+    }
+
+
+def parse_contrarian_response(response_text: str | None) -> dict[str, Any] | None:
+    """Parse a contrarian-pass ``ai_response_text`` into a 0-100 risk score.
+
+    Expected JSON shape: ``{"risk_score": 0-100, "concerns": [str, ...]}``
+    (``concerns`` optional). Returns ``None`` on falsy/unparseable text,
+    non-object JSON, or a missing/non-numeric ``risk_score`` — same
+    "absent, not penalized" degradation as :func:`parse_audit_response`.
+
+    Otherwise returns ``{"risk_score": float, "concerns": list}``, with
+    ``risk_score`` clamped to ``[0, 100]``.
+    """
+    if not response_text:
+        return None
+    try:
+        parsed = json.loads(response_text)
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    risk_score = parsed.get("risk_score")
+    if not isinstance(risk_score, (int, float)) or isinstance(risk_score, bool):
+        return None
+    return {
+        "risk_score": max(0.0, min(100.0, float(risk_score))),
+        "concerns": parsed.get("concerns", []),
+    }
+
 
 # --------------------------------------------------------------------------- #
 # Injected DB manager hook.
@@ -335,6 +443,11 @@ class AiReviewEngine:
         provider = row["provider"]
         model = row["model"]
         prompt_version = row["prompt_version"]
+        # review_kind (Phase 3): thesis/contrarian/audit, or None for a
+        # legacy/single-row export. Each review_kind is its own row (its own
+        # ai_review_id), so the double-send guard below is already per-row
+        # by construction -- no guard logic change was needed for this.
+        review_kind = row.get("review_kind")
 
         # --- double-send guard (no AI call, no write). -------------------- #
         if row["ai_response_text"] is not None:
@@ -342,6 +455,7 @@ class AiReviewEngine:
             return self._send_failed(
                 run_id, export_type, db_role, ai_review_id, ERROR_ALREADY_SENT,
                 provider=provider, model=model, prompt_version=prompt_version,
+                review_kind=review_kind,
             )
 
         # --- AI call (failure => no DB write). ---------------------------- #
@@ -355,6 +469,7 @@ class AiReviewEngine:
             return self._send_failed(
                 run_id, export_type, db_role, ai_review_id, message,
                 provider=provider, model=model, prompt_version=prompt_version,
+                review_kind=review_kind,
             )
 
         response_chars = len(response_text)
@@ -376,7 +491,7 @@ class AiReviewEngine:
             return self._send_failed(
                 run_id, export_type, db_role, ai_review_id, message,
                 provider=provider, model=model, prompt_version=prompt_version,
-                response_chars=response_chars,
+                response_chars=response_chars, review_kind=review_kind,
             )
 
         if rows_updated == 0:
@@ -388,7 +503,7 @@ class AiReviewEngine:
             return self._send_failed(
                 run_id, export_type, db_role, ai_review_id, ERROR_ALREADY_SENT,
                 provider=provider, model=model, prompt_version=prompt_version,
-                response_chars=response_chars,
+                response_chars=response_chars, review_kind=review_kind,
             )
 
         log.info(
@@ -398,7 +513,7 @@ class AiReviewEngine:
         return self._send_success(
             run_id, export_type, db_role, ai_review_id,
             provider=provider, model=model, prompt_version=prompt_version,
-            response_chars=response_chars,
+            response_chars=response_chars, review_kind=review_kind,
         )
 
     # ------------------------------------------------------------------ #
@@ -518,15 +633,20 @@ class AiReviewEngine:
         connection = self._db.connect(db_role)
         try:
             if table == REVIEW_TABLE_SIM:
+                # Pre-existing bug fix: sim_ai_reviews has no review_type
+                # column (G-SIM-AI-SCHEMA) -- selecting it here would raise
+                # against a real DuckDB connection (never caught before since
+                # M19's test suite is entirely offline with a fake
+                # connection). review_kind exists on both tables.
                 cursor = connection.execute(
-                    "SELECT ai_review_id, review_type, prompt_text, "
+                    "SELECT ai_review_id, review_kind, prompt_text, "
                     "ai_response_text, provider, model, prompt_version "
                     "FROM sim_ai_reviews WHERE ai_review_id = ?",
                     [ai_review_id],
                 )
             else:
                 cursor = connection.execute(
-                    "SELECT ai_review_id, review_type, prompt_text, "
+                    "SELECT ai_review_id, review_type, review_kind, prompt_text, "
                     "ai_response_text, provider, model, prompt_version "
                     "FROM ai_reviews WHERE ai_review_id = ?",
                     [ai_review_id],
@@ -589,7 +709,7 @@ class AiReviewEngine:
     def _send_success(
         self, run_id: str, export_type: str, db_role: str, ai_review_id: str,
         *, provider: str | None, model: str | None, prompt_version: str | None,
-        response_chars: int | None,
+        response_chars: int | None, review_kind: str | None = None,
     ) -> ServiceResult:
         return ServiceResult(
             status=service_result.STATUS_SUCCESS,
@@ -598,6 +718,7 @@ class AiReviewEngine:
             metadata=self._send_metadata(
                 run_id, export_type, db_role, ai_review_id, provider, model,
                 prompt_version, response_chars, STATUS_SUCCESS_META, None,
+                review_kind,
             ),
         )
 
@@ -605,6 +726,7 @@ class AiReviewEngine:
         self, run_id: str, export_type: str, db_role: str, ai_review_id: str,
         message: str, *, provider: str | None = None, model: str | None = None,
         prompt_version: str | None = None, response_chars: int | None = None,
+        review_kind: str | None = None,
     ) -> ServiceResult:
         return ServiceResult(
             status=service_result.STATUS_FAILED,
@@ -614,6 +736,7 @@ class AiReviewEngine:
             metadata=self._send_metadata(
                 run_id, export_type, db_role, ai_review_id, provider, model,
                 prompt_version, response_chars, STATUS_FAILED_META, message,
+                review_kind,
             ),
         )
 
@@ -622,12 +745,14 @@ class AiReviewEngine:
         run_id: str, export_type: str, db_role: str, ai_review_id: str,
         provider: str | None, model: str | None, prompt_version: str | None,
         response_chars: int | None, status: str, error: str | None,
+        review_kind: str | None = None,
     ) -> dict[str, Any]:
         return {
             "run_id": run_id,
             "export_type": export_type,
             "db_role": db_role,
             "ai_review_id": ai_review_id,
+            "review_kind": review_kind,
             "provider": provider,
             "model": model,
             "prompt_version": prompt_version,

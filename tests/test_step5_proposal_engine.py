@@ -56,6 +56,7 @@ from app.services.proposal.step5_proposal_engine import (
     REJECT_SECTOR_CAP,
     UNKNOWN_INDUSTRY,
     UNKNOWN_SECTOR,
+    WATCHLIST_AUDIT_INCONSISTENT,
     WATCHLIST_STOP_TOO_WIDE,
     WATCHLIST_TARGET_ROOM_INSUFFICIENT,
     Step5ProposalEngine,
@@ -63,6 +64,7 @@ from app.services.proposal.step5_proposal_engine import (
     _compute_estimated_rr,
     _compute_risk_score,
     _compute_stop_target,
+    _parse_risk_label_config,
     _proposal_score_raw,
     _rr_score,
 )
@@ -1920,3 +1922,165 @@ class TestAppendOnly:
         props = _read_proposals(db, SIGNAL_DATE)
         # Both runs wrote (append-only); 2 rows expected
         assert len(props) == 2
+
+
+# ===========================================================================
+# Phase 3 — AI review score consumption (contrarian_risk_score /
+# audit_consistency_score additive penalties + hard audit downgrade gate).
+# ===========================================================================
+
+class TestProposalScoreRawAiReviewBackCompat:
+    """_proposal_score_raw must be byte-identical to the pre-Phase-3 formula
+    when both AI-review scores are absent (the overwhelming common case)."""
+
+    def test_both_none_matches_pre_phase3_value(self):
+        with_none = _proposal_score_raw(80.0, 2.5, 70.0, "bull", stop_distance_pct=0.05)
+        explicit_none = _proposal_score_raw(
+            80.0, 2.5, 70.0, "bull", stop_distance_pct=0.05,
+            contrarian_risk_score=None, audit_consistency_score=None,
+        )
+        assert with_none == explicit_none
+
+    def test_contrarian_score_present_only_ever_lowers_score(self):
+        base = _proposal_score_raw(80.0, 2.5, 70.0, "bull", stop_distance_pct=0.05)
+        penalized = _proposal_score_raw(
+            80.0, 2.5, 70.0, "bull", stop_distance_pct=0.05,
+            contrarian_risk_score=100.0,
+        )
+        assert penalized < base
+
+    def test_audit_score_present_only_ever_lowers_score(self):
+        base = _proposal_score_raw(80.0, 2.5, 70.0, "bull", stop_distance_pct=0.05)
+        penalized = _proposal_score_raw(
+            80.0, 2.5, 70.0, "bull", stop_distance_pct=0.05,
+            audit_consistency_score=0.0,
+        )
+        assert penalized < base
+
+    def test_perfect_audit_score_no_penalty(self):
+        base = _proposal_score_raw(80.0, 2.5, 70.0, "bull", stop_distance_pct=0.05)
+        perfect = _proposal_score_raw(
+            80.0, 2.5, 70.0, "bull", stop_distance_pct=0.05,
+            audit_consistency_score=100.0,
+        )
+        assert base == pytest.approx(perfect)
+
+    def test_zero_contrarian_risk_no_penalty(self):
+        base = _proposal_score_raw(80.0, 2.5, 70.0, "bull", stop_distance_pct=0.05)
+        safe = _proposal_score_raw(
+            80.0, 2.5, 70.0, "bull", stop_distance_pct=0.05,
+            contrarian_risk_score=0.0,
+        )
+        assert base == pytest.approx(safe)
+
+    def test_custom_penalty_weights_scale_the_deduction(self):
+        small_weight = _proposal_score_raw(
+            80.0, 2.5, 70.0, "bull", contrarian_risk_score=100.0,
+            contrarian_penalty_weight=0.05,
+        )
+        large_weight = _proposal_score_raw(
+            80.0, 2.5, 70.0, "bull", contrarian_risk_score=100.0,
+            contrarian_penalty_weight=0.20,
+        )
+        assert large_weight < small_weight
+
+    def test_still_clamped_0_100_with_penalties(self):
+        s = _proposal_score_raw(
+            100.0, 5.0, 100.0, "bull",
+            contrarian_risk_score=0.0, audit_consistency_score=100.0,
+        )
+        assert s <= 100.0
+
+
+class TestParseRiskLabelConfigAiReviewBlock:
+    def test_absent_block_uses_hardcoded_defaults(self):
+        cfg = _minimal_risk_config()
+        parsed = _parse_risk_label_config(cfg)
+        assert parsed["contrarian_penalty_weight"] == pytest.approx(0.10)
+        assert parsed["audit_penalty_weight"] == pytest.approx(0.10)
+        assert parsed["audit_consistency_min_for_buy"] == pytest.approx(40.0)
+
+    def test_explicit_block_overrides_defaults(self):
+        cfg = _minimal_risk_config()
+        cfg["ai_review"] = {
+            "contrarian_penalty_weight": 0.20,
+            "audit_penalty_weight": 0.15,
+            "audit_consistency_min_for_buy": 60.0,
+        }
+        parsed = _parse_risk_label_config(cfg)
+        assert parsed["contrarian_penalty_weight"] == pytest.approx(0.20)
+        assert parsed["audit_penalty_weight"] == pytest.approx(0.15)
+        assert parsed["audit_consistency_min_for_buy"] == pytest.approx(60.0)
+
+    def test_explicit_zero_is_honored_not_replaced_by_default(self):
+        """A deliberate 0 (e.g. 'disable this penalty') must not be silently
+        replaced by the hardcoded default -- this is the bug an `or default`
+        pattern would introduce for a legitimate falsy override."""
+        cfg = _minimal_risk_config()
+        cfg["ai_review"] = {"contrarian_penalty_weight": 0.0, "audit_consistency_min_for_buy": 0.0}
+        parsed = _parse_risk_label_config(cfg)
+        assert parsed["contrarian_penalty_weight"] == 0.0
+        assert parsed["audit_consistency_min_for_buy"] == 0.0
+
+
+class TestProposeWithAiReviewScores:
+    """End-to-end through the public propose() API with ai_review_scores
+    supplied -- confirms per-ticker scoping (only the named ticker is
+    affected) and the hard audit-consistency disposition downgrade gate."""
+
+    def test_audit_failure_downgrades_disposition_other_ticker_unaffected(self, tmp_db_paths):
+        db = dbm.DB_ROLE_PROD
+        for ticker in ("BASELINE", "AUDITFAIL"):
+            _seed_ticker(db, ticker)
+            _seed_price(db, ticker, SIGNAL_DATE, 100.0, 100.0)
+            _seed_features(db, ticker, SIGNAL_DATE, close_adj=100.0, atr14=2.0)
+            _seed_step4(db, ticker, SIGNAL_DATE, setup_type="breakout",
+                        setup_config_id="setup_breakout_v1", setup_passed=True,
+                        setup_score=75.0, entry_price_raw=100.0, market_regime="bull",
+                        earnings_days=30)
+        cfg = _minimal_risk_config(top_n=5, min_rr=1.5)
+        eng = _make_engine()
+        result = eng.propose(
+            SIGNAL_DATE, risk_label_config=cfg, setup_configs=DEFAULT_SETUP_CONFIGS,
+            db_role=db,
+            ai_review_scores={"AUDITFAIL": {"audit_consistency_score": 10.0}},
+        )
+        assert result.status == sr.STATUS_SUCCESS, result.errors
+
+        props = {p["ticker"]: p for p in _read_proposals(db, SIGNAL_DATE)}
+        # AUDITFAIL is forced to WATCHLIST_ONLY specifically for the audit
+        # reason -- this alone proves the gate fired, regardless of what
+        # disposition this seed data would otherwise naturally land on
+        # (test_buy_eligible_candidate_written establishes this exact seed
+        # can legitimately land on either BUY or WATCHLIST_ONLY).
+        assert props["AUDITFAIL"]["disposition"] == DISPOSITION_WATCHLIST
+        assert props["AUDITFAIL"]["rejection_reason"] == WATCHLIST_AUDIT_INCONSISTENT
+        # The gate is per-ticker: BASELINE (no entry in ai_review_scores) must
+        # never be downgraded for this reason.
+        assert props["BASELINE"]["rejection_reason"] != WATCHLIST_AUDIT_INCONSISTENT
+        # Penalized score is strictly lower than the unaffected baseline's.
+        assert props["AUDITFAIL"]["proposal_score_raw"] < props["BASELINE"]["proposal_score_raw"]
+
+    def test_no_ai_review_scores_leaves_rejection_reason_unset_by_audit_gate(self, tmp_db_paths):
+        """Calling propose() with ai_review_scores=None (the default) must
+        never trigger the audit-consistency gate (no score => gate can't
+        fire) -- the engine still runs and writes normally."""
+        db = dbm.DB_ROLE_PROD
+        _seed_ticker(db, "AAA")
+        _seed_price(db, "AAA", SIGNAL_DATE, 100.0, 100.0)
+        _seed_features(db, "AAA", SIGNAL_DATE, close_adj=100.0, atr14=2.0)
+        _seed_step4(db, "AAA", SIGNAL_DATE, setup_type="breakout",
+                    setup_config_id="setup_breakout_v1", setup_passed=True,
+                    setup_score=75.0, entry_price_raw=100.0, market_regime="bull",
+                    earnings_days=30)
+        cfg = _minimal_risk_config(top_n=5, min_rr=1.5)
+        eng = _make_engine()
+        result = eng.propose(
+            SIGNAL_DATE, risk_label_config=cfg, setup_configs=DEFAULT_SETUP_CONFIGS,
+            db_role=db,
+        )
+        assert result.status == sr.STATUS_SUCCESS, result.errors
+        props = _read_proposals(db, SIGNAL_DATE)
+        assert len(props) == 1
+        assert props[0]["disposition"] in (DISPOSITION_BUY, DISPOSITION_WATCHLIST)
+        assert props[0]["rejection_reason"] != WATCHLIST_AUDIT_INCONSISTENT

@@ -23,10 +23,14 @@ MODULE_PATH = Path(are.__file__)
 SEND_KEYS = frozenset(are.SEND_METADATA_KEYS)
 HA_KEYS = frozenset(are.HUMAN_ACTION_METADATA_KEYS)
 
-# Review-row columns in the engine's SELECT order.
+# Review-row columns in the engine's SELECT order (ticker shape; the fake
+# store keeps one superset dict per row regardless of table, so sim rows
+# simply carry a review_type of None -- sim_ai_reviews genuinely has no such
+# column, per G-SIM-AI-SCHEMA / the Phase 3 bug fix).
 _ROW_COLUMNS = (
     "ai_review_id",
     "review_type",
+    "review_kind",
     "prompt_text",
     "ai_response_text",
     "provider",
@@ -246,25 +250,28 @@ def _engine(store: Store, ai_client=None, db_cls=FakeDbManager):
     return AiReviewEngine(db_manager=db, ai_client=client), db, client
 
 
-def _seed_ticker(store: Store, review_id="rev-1", sent=False, action=None):
+def _seed_ticker(store: Store, review_id="rev-1", sent=False, action=None, review_kind=None,
+                  provider="anthropic", model="claude-3"):
     store.seed(
         "ai_reviews",
         ai_review_id=review_id,
         review_type="ticker_review",
+        review_kind=review_kind,
         prompt_text="[TICKER REVIEW] assess these proposals",
         ai_response_text="prior response" if sent else None,
-        provider="anthropic",
-        model="claude-3",
+        provider=provider,
+        model=model,
         prompt_version="v1",
         human_action=action,
     )
 
 
-def _seed_sim(store: Store, review_id="sim-1", sent=False):
+def _seed_sim(store: Store, review_id="sim-1", sent=False, review_kind=None):
     store.seed(
         "sim_ai_reviews",
         ai_review_id=review_id,
-        review_type="simulation_review",
+        review_type=None,  # sim_ai_reviews genuinely has no review_type column
+        review_kind=review_kind,
         prompt_text="[SIMULATION REVIEW] assess configs",
         ai_response_text="prior" if sent else None,
         provider="openai",
@@ -743,3 +750,140 @@ def test_conditional_update_uses_returning_not_changes():
         tables_seen.add("sim_ai_reviews" if "SIM_AI_REVIEWS" in upper else "ai_reviews")
     # One literal per table.
     assert tables_seen == {"ai_reviews", "sim_ai_reviews"}
+
+
+# =========================================================================== #
+# Phase 3 — review_kind (multi-pass) + structured audit/contrarian parsing.
+# =========================================================================== #
+import json as _json  # noqa: E402
+
+from app.services.ai_review.ai_review_engine import (  # noqa: E402
+    parse_audit_response,
+    parse_contrarian_response,
+)
+
+
+def test_review_kind_echoed_in_send_metadata(store):
+    _seed_ticker(store, review_kind="thesis", provider="anthropic", model="claude-sonnet-5")
+    engine, _, _ = _engine(store)
+    result = engine.send_ticker_review("rev-1")
+    assert result.status == service_result.STATUS_SUCCESS
+    assert result.metadata["review_kind"] == "thesis"
+
+
+def test_review_kind_none_for_legacy_row(store):
+    _seed_ticker(store, review_kind=None)
+    engine, _, _ = _engine(store)
+    result = engine.send_ticker_review("rev-1")
+    assert result.metadata["review_kind"] is None
+
+
+def test_double_send_guard_independent_per_review_kind_row(store):
+    """Two rows for conceptually the same export (different review_kind, each
+    its own ai_review_id) must not block or interfere with each other -- the
+    guard is per-row by construction, not per-proposal."""
+    _seed_ticker(store, review_id="thesis-1", review_kind="thesis", sent=True)
+    _seed_ticker(store, review_id="contrarian-1", review_kind="contrarian", sent=False,
+                 provider="openai", model="gpt-4o")
+    engine, _, _ = _engine(store)
+
+    thesis_result = engine.send_ticker_review("thesis-1")
+    assert thesis_result.status == service_result.STATUS_FAILED
+    assert thesis_result.errors == [are.ERROR_ALREADY_SENT]
+
+    contrarian_result = engine.send_ticker_review("contrarian-1")
+    assert contrarian_result.status == service_result.STATUS_SUCCESS
+    assert contrarian_result.metadata["review_kind"] == "contrarian"
+    assert contrarian_result.metadata["provider"] == "openai"
+
+
+def test_sim_select_does_not_reference_review_type_column():
+    """Bug-fix regression: sim_ai_reviews has no review_type column
+    (G-SIM-AI-SCHEMA); the sim-branch SELECT must not request it."""
+    tree = ast.parse(MODULE_PATH.read_text(encoding="utf-8"))
+    sim_selects = [
+        sql for sql in _execute_sql_strings(tree)
+        if sql.strip().upper().startswith("SELECT") and "SIM_AI_REVIEWS" in sql.upper()
+    ]
+    assert sim_selects, "expected at least one SELECT against sim_ai_reviews"
+    for sql in sim_selects:
+        assert "REVIEW_TYPE" not in sql.upper(), f"sim SELECT references review_type: {sql!r}"
+        assert "REVIEW_KIND" in sql.upper(), f"sim SELECT missing review_kind: {sql!r}"
+
+
+def test_ticker_select_includes_review_kind():
+    tree = ast.parse(MODULE_PATH.read_text(encoding="utf-8"))
+    ticker_selects = [
+        sql for sql in _execute_sql_strings(tree)
+        if sql.strip().upper().startswith("SELECT")
+        and "FROM AI_REVIEWS" in sql.upper()
+    ]
+    assert ticker_selects
+    for sql in ticker_selects:
+        assert "REVIEW_KIND" in sql.upper()
+
+
+# --------------------------------------------------------------------------- #
+# Structured audit/contrarian response parsing (pure, offline).
+# --------------------------------------------------------------------------- #
+def test_parse_audit_response_clean():
+    text = _json.dumps({"claims": [
+        {"claim": "Revenue grew 20%", "classification": "grounded"},
+        {"claim": "Revenue grew 20%", "classification": "grounded"},
+        {"claim": "Might beat guidance", "classification": "speculative"},
+    ]})
+    result = parse_audit_response(text)
+    assert result["grounded"] == 2
+    assert result["speculative"] == 1
+    assert result["unverifiable"] == 0
+    assert result["total"] == 3
+    assert result["audit_consistency_score"] == pytest.approx(200.0 / 3)
+
+
+def test_parse_audit_response_high_unverifiable():
+    text = _json.dumps({"claims": [
+        {"claim": "a", "classification": "unverifiable"},
+        {"claim": "b", "classification": "unverifiable"},
+        {"claim": "c", "classification": "grounded"},
+    ]})
+    result = parse_audit_response(text)
+    assert result["unverifiable"] == 2
+    assert result["audit_consistency_score"] == pytest.approx(100.0 / 3)
+
+
+@pytest.mark.parametrize("bad_text", [
+    None,
+    "",
+    "not json at all",
+    _json.dumps({"claims": []}),
+    _json.dumps({"no_claims_key": []}),
+    _json.dumps(["not", "a", "dict"]),
+    _json.dumps({"claims": [{"classification": "not_a_real_classification"}]}),
+])
+def test_parse_audit_response_malformed_returns_none(bad_text):
+    assert parse_audit_response(bad_text) is None
+
+
+def test_parse_contrarian_response_valid():
+    text = _json.dumps({"risk_score": 72, "concerns": ["overvalued", "insider selling"]})
+    result = parse_contrarian_response(text)
+    assert result["risk_score"] == 72.0
+    assert result["concerns"] == ["overvalued", "insider selling"]
+
+
+def test_parse_contrarian_response_clamps_out_of_range():
+    assert parse_contrarian_response(_json.dumps({"risk_score": 150}))["risk_score"] == 100.0
+    assert parse_contrarian_response(_json.dumps({"risk_score": -20}))["risk_score"] == 0.0
+
+
+@pytest.mark.parametrize("bad_text", [
+    None,
+    "",
+    "garbage",
+    _json.dumps({"no_risk_score": 1}),
+    _json.dumps({"risk_score": "high"}),
+    _json.dumps({"risk_score": True}),
+    _json.dumps(["not", "a", "dict"]),
+])
+def test_parse_contrarian_response_malformed_returns_none(bad_text):
+    assert parse_contrarian_response(bad_text) is None

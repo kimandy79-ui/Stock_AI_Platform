@@ -402,11 +402,25 @@ high   : risk_score > med_max
 - `REJECTED`: `setup_passed = FALSE`
 
 ## Raw proposal score
+**Spec-drift correction (2026-07-05):** this section previously documented a
+4-term formula (0.45/0.25/0.20/0.10) that no longer matched the shipped code.
+A stop-distance-quality term was added to the implementation in a prior
+session's diagnostics-driven fix (2026-06-27) without updating this file. The
+formula below is the actual current 5-term base plus the two Phase 3
+AI-review terms added in this delta — the correction and the new terms are
+both part of this same documented change, per project rule (formula changes
+are reviewed edits, not silent ones).
+
 ```
-proposal_score_raw = 0.45 * setup_score
-                   + 0.25 * rr_score
-                   + 0.20 * confirmation_score
-                   + 0.10 * market_score
+base = 0.40 * setup_score
+     + 0.25 * rr_score
+     + 0.15 * confirmation_score
+     + 0.10 * market_score
+     + 0.10 * stop_quality
+
+proposal_score_raw = base
+                   - contrarian_penalty_weight * contrarian_risk_score        (if present)
+                   - audit_penalty_weight * (100 - audit_consistency_score)   (if present)
 ```
 
 **rr_score:**
@@ -425,6 +439,23 @@ proposal_score_raw = 0.45 * setup_score
 - high_risk → 0
 - extreme_risk → 0
 - NULL (unknown) → 0
+
+**stop_quality:** tighter stop = higher quality; `100 * max(0, 1 - stop_distance_pct / 0.10)`
+when a stop distance is known, else neutral (50).
+
+**contrarian_risk_score / audit_consistency_score (Phase 3, 01c delta
+2026-07-05):** both 0–100, both `NULL`/absent for the large majority of
+proposals — the AI review passes (M19) run later and selectively relative to
+Step 5's original scoring (see `M19_AI_REVIEW_ENGINE_SPEC.md`), so most
+proposals are scored exactly as before this delta. When present, each
+contributes an **additive downgrade-only penalty** (never a bonus):
+`contrarian_penalty_weight` / `audit_penalty_weight` default to 0.10 each,
+config-overridable via `risk_label_config.ai_review.{contrarian_penalty_weight,
+audit_penalty_weight}`. A strong audit failure
+(`audit_consistency_score < risk_label_config.ai_review.audit_consistency_min_for_buy`,
+default 40) additionally forces `disposition = WATCHLIST_ONLY` outright
+(`rejection_reason = 'audit_consistency_below_threshold'`), independent of
+the score penalty above — this is a hard gate, not a soft weighting.
 
 Only `BUY` and `WATCHLIST_ONLY` dispositions are scored and ranked.
 `REJECTED` rows are stored for diagnostics, excluded from ranking.

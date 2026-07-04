@@ -584,3 +584,40 @@ class TestImportSmoke:
 
     def test_database_schema_version_value(self) -> None:
         assert sm.DATABASE_SCHEMA_VERSION == "schema_v02"
+
+
+# --------------------------------------------------------------------------- #
+# Phase 3 — review_kind column (multi-pass AI review)
+# --------------------------------------------------------------------------- #
+class TestReviewKindColumn:
+    def test_ai_reviews_has_review_kind(self, tmp_db_paths: dict[str, Path]) -> None:
+        sm.apply_prod_schema()
+        cols = _columns("prod", "ai_reviews")
+        assert "review_kind" in cols
+        assert "review_type" in cols  # unchanged, distinct dimension
+
+    def test_sim_ai_reviews_has_review_kind_not_review_type(
+        self, tmp_db_paths: dict[str, Path]
+    ) -> None:
+        sm.apply_simulation_schema()
+        cols = _columns("simulation", "sim_ai_reviews")
+        assert "review_kind" in cols
+        assert "review_type" not in cols  # sim_ai_reviews never had this column
+
+    def test_review_kind_column_idempotent_on_reapply(
+        self, tmp_db_paths: dict[str, Path]
+    ) -> None:
+        assert sm.apply_prod_schema().status == service_result.STATUS_SUCCESS
+        first = _columns("prod", "ai_reviews")
+        assert sm.apply_prod_schema().status == service_result.STATUS_SUCCESS
+        second = _columns("prod", "ai_reviews")
+        assert first == second
+        assert first.count("review_kind") == 1
+
+    def test_config_recommendations_table_still_present(
+        self, tmp_db_paths: dict[str, Path]
+    ) -> None:
+        """Unrelated table added the same session (Phase 2) -- quick sanity
+        check the two schema deltas coexist without collision."""
+        sm.apply_prod_schema()
+        assert "config_recommendations" in _tables("prod")

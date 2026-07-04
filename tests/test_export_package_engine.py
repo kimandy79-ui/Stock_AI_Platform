@@ -1010,3 +1010,214 @@ def test_only_allowed_tables_mutated():
             )
     assert insert_targets, "expected at least one INSERT in the module"
     assert set(insert_targets) <= {"AI_REVIEWS", "SIM_AI_REVIEWS"}
+
+
+# =========================================================================== #
+# Phase 3 — multi-pass AI review row creation (fresh, current-schema seeds;
+# the legacy _seed_proposal/seed_ticker/seed_simulation helpers above are
+# stale against the setup-mode schema and unused here).
+# =========================================================================== #
+from app.services.config import default_configs as _default_configs  # noqa: E402
+
+
+def _seed_minimal_proposal(conn, pid: str, ticker: str, cfg: str, sig: date, score: float = 88.0) -> None:
+    conn.execute(
+        "INSERT INTO step5_proposals "
+        "(proposal_id, run_id, setup_config_id, ticker, signal_date, setup_type, "
+        " setup_score, disposition, proposal_score_raw, proposal_score_final, "
+        " raw_rank, diversified_rank, in_raw_top_n, in_diversified_top_n, created_at) "
+        "VALUES (?, 'run', ?, ?, ?, 'breakout', ?, 'BUY', ?, ?, 1, 1, TRUE, TRUE, "
+        " CAST(now() AS TIMESTAMP))",
+        [pid, cfg, ticker, sig, score, score, score],
+    )
+
+
+def _multi_pass_config(enabled: bool = True) -> dict:
+    cfg = {k: dict(v) if isinstance(v, dict) else v
+           for k, v in _default_configs.DEFAULT_RUNTIME_CONFIGS["ai_review"].items()}
+    cfg["multi_pass"] = {
+        "enabled": enabled,
+        "thesis": {"provider": "anthropic", "model": "claude-sonnet-5"},
+        "contrarian": {"provider": "openai", "model": "gpt-4o"},
+        "audit": {"provider": "anthropic", "model": "claude-haiku-4-5"},
+    }
+    return cfg
+
+
+def test_ticker_export_legacy_default_writes_one_null_kind_row(env) -> None:
+    conn = _conn(env["paths"]["prod"])
+    try:
+        _seed_minimal_proposal(conn, "p1", "AAA", CONFIG_ID, SIGNAL_DATE)
+    finally:
+        conn.close()
+
+    engine = ExportPackageEngine(db_manager=env["db"])
+    result = engine.export_ticker_review(
+        SIGNAL_DATE, CONFIG_ID, ["p1"], db_role="prod",
+    )
+    assert result.status == service_result.STATUS_SUCCESS, result.errors
+    assert frozenset(result.metadata) == TICKER_KEYS
+    rows = result.metadata["ai_review_rows"]
+    assert len(rows) == 1
+    assert rows[0]["review_kind"] is None
+    assert rows[0]["provider"] == epe.PROVIDER_MANUAL
+    assert rows[0]["model"] == epe.MODEL_NONE
+
+    conn = _conn(env["paths"]["prod"])
+    try:
+        db_row = conn.execute(
+            "SELECT review_kind, provider, model FROM ai_reviews WHERE ai_review_id = ?",
+            [rows[0]["ai_review_id"]],
+        ).fetchone()
+    finally:
+        conn.close()
+    assert db_row == (None, epe.PROVIDER_MANUAL, epe.MODEL_NONE)
+
+
+def test_ticker_export_multi_pass_writes_three_distinct_rows(env) -> None:
+    conn = _conn(env["paths"]["prod"])
+    try:
+        _seed_minimal_proposal(conn, "p1", "AAA", CONFIG_ID, SIGNAL_DATE)
+    finally:
+        conn.close()
+
+    engine = ExportPackageEngine(db_manager=env["db"])
+    result = engine.export_ticker_review(
+        SIGNAL_DATE, CONFIG_ID, ["p1"], db_role="prod",
+        ai_review_config=_multi_pass_config(),
+    )
+    assert result.status == service_result.STATUS_SUCCESS, result.errors
+    rows = result.metadata["ai_review_rows"]
+    assert len(rows) == 3
+    kinds = {r["review_kind"] for r in rows}
+    assert kinds == {epe.REVIEW_KIND_THESIS, epe.REVIEW_KIND_CONTRARIAN, epe.REVIEW_KIND_AUDIT}
+
+    by_kind = {r["review_kind"]: r for r in rows}
+    assert by_kind[epe.REVIEW_KIND_THESIS]["provider"] == "anthropic"
+    assert by_kind[epe.REVIEW_KIND_CONTRARIAN]["provider"] == "openai"
+    # The whole point: contrarian resolves to a different provider than thesis.
+    assert by_kind[epe.REVIEW_KIND_THESIS]["provider"] != by_kind[epe.REVIEW_KIND_CONTRARIAN]["provider"]
+    assert by_kind[epe.REVIEW_KIND_AUDIT]["model"] == "claude-haiku-4-5"
+
+    conn = _conn(env["paths"]["prod"])
+    try:
+        n = conn.execute(
+            "SELECT COUNT(*) FROM ai_reviews WHERE proposal_id = 'p1'"
+        ).fetchone()[0]
+        db_kinds = {
+            r[0] for r in conn.execute(
+                "SELECT review_kind FROM ai_reviews WHERE proposal_id = 'p1'"
+            ).fetchall()
+        }
+    finally:
+        conn.close()
+    assert n == 3
+    assert db_kinds == kinds
+
+
+def test_ticker_export_multi_pass_disabled_matches_legacy(env) -> None:
+    """multi_pass.enabled=False (explicit) behaves identically to omitting
+    ai_review_config entirely."""
+    conn = _conn(env["paths"]["prod"])
+    try:
+        _seed_minimal_proposal(conn, "p1", "AAA", CONFIG_ID, SIGNAL_DATE)
+    finally:
+        conn.close()
+
+    engine = ExportPackageEngine(db_manager=env["db"])
+    result = engine.export_ticker_review(
+        SIGNAL_DATE, CONFIG_ID, ["p1"], db_role="prod",
+        ai_review_config=_multi_pass_config(enabled=False),
+    )
+    assert result.status == service_result.STATUS_SUCCESS, result.errors
+    assert len(result.metadata["ai_review_rows"]) == 1
+    assert result.metadata["ai_review_rows"][0]["review_kind"] is None
+
+
+def test_simulation_export_legacy_default_writes_one_null_kind_row(env) -> None:
+    conn = _conn(env["paths"]["simulation"])
+    try:
+        conn.execute(
+            "INSERT INTO sim_runs (sim_run_id, sim_name, mode, start_date, end_date, "
+            " created_at, config_ids, status) "
+            "VALUES (?, 'demo', 'research', ?, ?, CAST(now() AS TIMESTAMP), ?, 'success')",
+            [SIM_RUN_ID, SIGNAL_DATE, SIGNAL_DATE, json.dumps([CONFIG_ID])],
+        )
+    finally:
+        conn.close()
+
+    engine = ExportPackageEngine(db_manager=env["db"])
+    result = engine.export_simulation_review(SIM_RUN_ID, db_role="simulation")
+    assert result.status == service_result.STATUS_SUCCESS, result.errors
+    assert frozenset(result.metadata) == SIM_KEYS
+    rows = result.metadata["ai_review_rows"]
+    assert len(rows) == 1
+    assert rows[0]["review_kind"] is None
+
+    conn = _conn(env["paths"]["simulation"])
+    try:
+        db_row = conn.execute(
+            "SELECT review_kind, provider, model FROM sim_ai_reviews WHERE ai_review_id = ?",
+            [rows[0]["ai_review_id"]],
+        ).fetchone()
+    finally:
+        conn.close()
+    assert db_row == (None, epe.PROVIDER_MANUAL, epe.MODEL_NONE)
+
+
+def test_simulation_export_multi_pass_writes_three_distinct_rows(env) -> None:
+    conn = _conn(env["paths"]["simulation"])
+    try:
+        conn.execute(
+            "INSERT INTO sim_runs (sim_run_id, sim_name, mode, start_date, end_date, "
+            " created_at, config_ids, status) "
+            "VALUES (?, 'demo', 'research', ?, ?, CAST(now() AS TIMESTAMP), ?, 'success')",
+            [SIM_RUN_ID, SIGNAL_DATE, SIGNAL_DATE, json.dumps([CONFIG_ID])],
+        )
+    finally:
+        conn.close()
+
+    engine = ExportPackageEngine(db_manager=env["db"])
+    result = engine.export_simulation_review(
+        SIM_RUN_ID, db_role="simulation", ai_review_config=_multi_pass_config(),
+    )
+    assert result.status == service_result.STATUS_SUCCESS, result.errors
+    rows = result.metadata["ai_review_rows"]
+    assert len(rows) == 3
+    assert {r["review_kind"] for r in rows} == {
+        epe.REVIEW_KIND_THESIS, epe.REVIEW_KIND_CONTRARIAN, epe.REVIEW_KIND_AUDIT,
+    }
+
+    conn = _conn(env["paths"]["simulation"])
+    try:
+        n = conn.execute(
+            "SELECT COUNT(*) FROM sim_ai_reviews WHERE sim_run_id = ?", [SIM_RUN_ID]
+        ).fetchone()[0]
+    finally:
+        conn.close()
+    assert n == 3
+
+
+def test_ticker_export_write_failure_rolls_back_all_rows(env) -> None:
+    """A write failure mid-multi-pass must not leave a partial 1-or-2-row state."""
+    conn = _conn(env["paths"]["prod"])
+    try:
+        _seed_minimal_proposal(conn, "p1", "AAA", CONFIG_ID, SIGNAL_DATE)
+    finally:
+        conn.close()
+
+    failing_db = FailingWriteDbManager(env["paths"])
+    engine = ExportPackageEngine(db_manager=failing_db)
+    result = engine.export_ticker_review(
+        SIGNAL_DATE, CONFIG_ID, ["p1"], db_role="prod",
+        ai_review_config=_multi_pass_config(),
+    )
+    assert result.status == service_result.STATUS_FAILED
+    assert "zip retained" in result.errors[0]
+
+    conn = _conn(env["paths"]["prod"])
+    try:
+        n = conn.execute("SELECT COUNT(*) FROM ai_reviews").fetchone()[0]
+    finally:
+        conn.close()
+    assert n == 0  # rolled back -- not 1 or 2 partial rows

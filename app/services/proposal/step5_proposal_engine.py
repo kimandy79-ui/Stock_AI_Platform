@@ -92,6 +92,9 @@ REJECT_SECTOR_CAP: Final[str] = "sector_cap"
 REJECT_INDUSTRY_CAP: Final[str] = "industry_cap"
 WATCHLIST_STOP_TOO_WIDE: Final[str] = "stop_distance_exceeds_max"
 WATCHLIST_TARGET_ROOM_INSUFFICIENT: Final[str] = "target_room_insufficient"
+# Phase 3 — AI review audit-pass hard downgrade (distinct from the score
+# penalty in _proposal_score_raw; this forces WATCHLIST_ONLY outright).
+WATCHLIST_AUDIT_INCONSISTENT: Final[str] = "audit_consistency_below_threshold"
 
 # ---------------------------------------------------------------------------
 # Final trade decision constants (P0 trade readiness, stored in mechanical_explanation)
@@ -142,6 +145,19 @@ _W_STOP_DIST: Final[float] = 0.10
 
 # Normalised stop distance at which stop_quality score reaches 0 (10% = max acceptable)
 _STOP_QUALITY_ZERO_PCT: Final[float] = 0.10
+
+# ---------------------------------------------------------------------------
+# Phase 3 — AI review score adjustments (config-overridable via
+# risk_label_config.ai_review; see _parse_risk_label_config). Additive
+# downgrade-only penalties applied in _proposal_score_raw only when the
+# corresponding score is present (None = that pass hasn't run yet; formula
+# output is then byte-identical to the pre-Phase-3 five-term formula).
+# ---------------------------------------------------------------------------
+_W_CONTRARIAN_PENALTY: Final[float] = 0.10  # max points deducted at contrarian_risk_score=100
+_W_AUDIT_PENALTY: Final[float] = 0.10       # max points deducted at audit_consistency_score=0
+# Hard disposition downgrade (distinct from the score penalty above): an
+# audit_consistency_score below this forces WATCHLIST_ONLY outright.
+_AUDIT_CONSISTENCY_MIN_FOR_BUY: Final[float] = 40.0
 
 # ---------------------------------------------------------------------------
 # Metadata keys contract
@@ -279,6 +295,28 @@ def _parse_risk_label_config(cfg: dict) -> dict[str, Any]:
     sector_penalty = _f(div.get("sector_penalty", div.get("sector_penalty_factor", 0.9))) or 0.9
     industry_penalty = _f(div.get("industry_penalty", div.get("industry_penalty_factor", 0.85))) or 0.85
 
+    # Phase 3: AI review score-adjustment config. Absent block (e.g. an
+    # older-seeded risk_label_config row with no "ai_review" key) resolves to
+    # the same hardcoded defaults the formula used before Phase 3 existed --
+    # full back-compat for configs that predate this feature. Uses an
+    # explicit None-check (not "or default") so a deliberately-set 0 (e.g.
+    # "disable this penalty/gate") is honored rather than silently replaced.
+    ai_review_cfg = cfg.get("ai_review", {})
+
+    def _resolve_ai_review_value(key: str, default: float) -> float:
+        parsed = _f(ai_review_cfg.get(key, default))
+        return parsed if parsed is not None else default
+
+    contrarian_penalty_weight = _resolve_ai_review_value(
+        "contrarian_penalty_weight", _W_CONTRARIAN_PENALTY
+    )
+    audit_penalty_weight = _resolve_ai_review_value(
+        "audit_penalty_weight", _W_AUDIT_PENALTY
+    )
+    audit_consistency_min_for_buy = _resolve_ai_review_value(
+        "audit_consistency_min_for_buy", _AUDIT_CONSISTENCY_MIN_FOR_BUY
+    )
+
     return {
         "factor_weights": factor_weights,
         "low_max": low_max,
@@ -295,6 +333,9 @@ def _parse_risk_label_config(cfg: dict) -> dict[str, Any]:
         "max_sector_count": max_sector,
         "max_industry_count": max_industry,
         "sector_penalty": sector_penalty,
+        "contrarian_penalty_weight": contrarian_penalty_weight,
+        "audit_penalty_weight": audit_penalty_weight,
+        "audit_consistency_min_for_buy": audit_consistency_min_for_buy,
         "industry_penalty": industry_penalty,
     }
 
@@ -774,7 +815,21 @@ def _proposal_score_raw(
     confirmation_score: float,
     market_regime: str | None,
     stop_distance_pct: float | None = None,
+    contrarian_risk_score: float | None = None,
+    audit_consistency_score: float | None = None,
+    contrarian_penalty_weight: float = _W_CONTRARIAN_PENALTY,
+    audit_penalty_weight: float = _W_AUDIT_PENALTY,
 ) -> float:
+    """Raw proposal score (01c §63) plus optional Phase 3 AI-review penalties.
+
+    ``contrarian_risk_score`` / ``audit_consistency_score`` are ``None`` for
+    the overwhelming majority of proposals (the AI review passes run later,
+    selectively, and asynchronously relative to Step 5's original scoring —
+    see ``M19_AI_REVIEW_ENGINE_SPEC.md``). When both are ``None`` this
+    function's output is byte-identical to the pre-Phase-3 five-term
+    formula: the two penalties below are purely additive and contribute
+    exactly 0 when their score is absent.
+    """
     rrsc = _rr_score(estimated_rr)
     msc = _MARKET_SCORE.get(market_regime or "", 0.0) if market_regime else 0.0
     # Tight stop = higher stop quality. Unknown stop treated as neutral (50).
@@ -782,13 +837,18 @@ def _proposal_score_raw(
         stop_quality = _clamp(100.0 * max(0.0, 1.0 - stop_distance_pct / _STOP_QUALITY_ZERO_PCT))
     else:
         stop_quality = 50.0
-    return _clamp(
+    base = (
         _W_SETUP * setup_score
         + _W_RR * rrsc
         + _W_CONFIRMATION * confirmation_score
         + _W_MARKET * msc
         + _W_STOP_DIST * stop_quality
     )
+    if contrarian_risk_score is not None:
+        base -= contrarian_penalty_weight * _clamp(contrarian_risk_score)
+    if audit_consistency_score is not None:
+        base -= audit_penalty_weight * (100.0 - _clamp(audit_consistency_score))
+    return _clamp(base)
 
 
 # ---------------------------------------------------------------------------
@@ -943,8 +1003,18 @@ class Step5ProposalEngine:
         setup_configs: dict[str, dict] | None = None,
         db_role: str = DB_ROLE_PROD,
         run_id: str | None = None,
+        ai_review_scores: dict[str, dict[str, float]] | None = None,
     ) -> ServiceResult:
-        """Run Step 5 for one signal_date."""
+        """Run Step 5 for one signal_date.
+
+        ``ai_review_scores`` (Phase 3, optional) is a pass-through override —
+        see :meth:`_build_rows`. There is no read path here that
+        auto-populates it from ``ai_reviews``/``sim_ai_reviews``; a caller
+        that has already read and parsed those rows (e.g. via
+        ``ai_review_engine.parse_audit_response`` /
+        ``parse_contrarian_response``) supplies it directly. ``None`` (the
+        default) reproduces the pre-Phase-3 scoring exactly.
+        """
         run_id = run_id or str(uuid.uuid4())
         log = logging_config.get_logger(__name__, run_id)
         sig_iso = signal_date.isoformat()
@@ -986,7 +1056,8 @@ class Step5ProposalEngine:
             return self._success(run_id, db_role, sig_iso, 0, [])
 
         rows = self._build_rows(
-            analyses, features_map, setup_configs or {}, parsed_cfg, run_id, signal_date
+            analyses, features_map, setup_configs or {}, parsed_cfg, run_id, signal_date,
+            ai_review_scores,
         )
 
         try:
@@ -1060,9 +1131,22 @@ class Step5ProposalEngine:
         cfg: dict[str, Any],
         run_id: str,
         signal_date: date,
+        ai_review_scores: dict[str, dict[str, float]] | None = None,
     ) -> list[dict[str, Any]]:
+        """Build one step5_proposals row per analyzable Step 4 analysis.
+
+        ``ai_review_scores`` (Phase 3, optional) is keyed by ``ticker`` ->
+        ``{"contrarian_risk_score": float, "audit_consistency_score": float}``
+        — whichever keys are present for that ticker are consumed; absent
+        keys/tickers behave exactly as if AI review had never run (see
+        ``_proposal_score_raw``'s back-compat guarantee). This is normally
+        ``None``: the AI review passes run later and selectively relative to
+        Step 5's original scoring, so most calls have no scores to feed in
+        yet (see ``M19_AI_REVIEW_ENGINE_SPEC.md``).
+        """
         top_n = cfg["top_n"]
         min_target_room_pct = cfg.get("min_target_room_pct", _DEFAULT_MIN_TARGET_ROOM_PCT)
+        ai_review_scores = ai_review_scores or {}
         enriched: list[dict[str, Any]] = []
 
         for a in analyses:
@@ -1071,6 +1155,9 @@ class Step5ProposalEngine:
             setup_passed = bool(a["setup_passed"])
             setup_score = _f(a["setup_score"]) or 0.0
             market_regime = a.get("market_regime")
+            ticker_ai_scores = ai_review_scores.get(ticker, {})
+            contrarian_risk_score = ticker_ai_scores.get("contrarian_risk_score")
+            audit_consistency_score = ticker_ai_scores.get("audit_consistency_score")
             _ed = a.get("earnings_days")
             earnings_days: int | None = None
             if _ed is not None:
@@ -1158,6 +1245,20 @@ class Step5ProposalEngine:
                 disposition = DISPOSITION_WATCHLIST
                 watchlist_reason = WATCHLIST_TARGET_ROOM_INSUFFICIENT
 
+            # Phase 3: strong audit-pass failure forces WATCHLIST_ONLY outright
+            # (distinct from the softer score penalty applied below via
+            # _proposal_score_raw). Absent audit_consistency_score (the
+            # overwhelming majority of proposals -- AI review hasn't run yet)
+            # never triggers this; same "any non-REJECTED candidate" pattern
+            # as the resistance-blocks override above.
+            if (
+                audit_consistency_score is not None
+                and audit_consistency_score < cfg["audit_consistency_min_for_buy"]
+                and disposition != DISPOSITION_REJECTED
+            ):
+                disposition = DISPOSITION_WATCHLIST
+                watchlist_reason = WATCHLIST_AUDIT_INCONSISTENT
+
             min_stop_atr = float(cfg.get("min_stop_distance_atr", _STOP_DISTANCE_ATR_MIN))
             final_trade_decision, ftd_reason_codes = _compute_final_trade_decision(
                 setup_type=setup_type,
@@ -1183,6 +1284,10 @@ class Step5ProposalEngine:
             psc_raw = _proposal_score_raw(
                 setup_score, estimated_rr, confirmation_score, market_regime,
                 stop_distance_pct=stop_distance_pct,
+                contrarian_risk_score=contrarian_risk_score,
+                audit_consistency_score=audit_consistency_score,
+                contrarian_penalty_weight=cfg["contrarian_penalty_weight"],
+                audit_penalty_weight=cfg["audit_penalty_weight"],
             )
 
             # Fix 4: invalidation level = stop_price_raw; documented explicitly

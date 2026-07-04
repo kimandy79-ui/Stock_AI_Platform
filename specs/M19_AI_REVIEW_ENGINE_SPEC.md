@@ -6,6 +6,19 @@ the reviewer's qualitative `human_action`. It is an **UPDATE-only** overlay on
 `ai_reviews` (ticker, `prod` / `debug`) and `sim_ai_reviews` (simulation). No
 row is ever inserted or deleted, and no other table is touched.
 
+**Phase 3 delta (2026-07-05) — multi-pass review (`review_kind`).** Module 18
+may now write **one row per pass** — `thesis` / `contrarian` / `audit` — for a
+single export event, distinguished by the new `review_kind` column (nullable;
+`NULL` = legacy/single-row export, unchanged from pre-Phase-3 behavior). Each
+`review_kind` is its own independent row with its own `ai_review_id`, `provider`,
+`model`, and `ai_response_text` — Module 19's `_send` flow already operates on
+one row per call, so the double-send guard and every other send-flow rule
+below is **unchanged** and already correctly per-row; only the read/metadata
+surface grew to include `review_kind`. See
+`M18_EXPORT_PACKAGE_ENGINE_SPEC.md` for the row-creation side and
+`01c_FORMULAS_AND_CONFIGS.md` §63 for how Step 5 consumes the contrarian/audit
+scores derived from these rows.
+
 Source of truth: `01b_SCHEMA_AND_DATA.md` + `M02_SCHEMA_SPEC.md` §3.19 / §4.9
 (`ai_reviews` / `sim_ai_reviews`), `01a_CORE_PRINCIPLES.md` (`human_action`
 enum), `M18_EXPORT_PACKAGE_ENGINE_SPEC.md` (the review-row write contract this
@@ -54,9 +67,14 @@ Validation failures return `failed` with **no DB access and no AI call**.
 Send methods (`send_ticker_review` / `send_simulation_review`):
 
 ```
-run_id, export_type, db_role, ai_review_id, provider, model,
+run_id, export_type, db_role, ai_review_id, review_kind, provider, model,
 prompt_version, response_chars, status, error
 ```
+
+`review_kind` (Phase 3) echoes the row's `review_kind` column
+(`"thesis"` / `"contrarian"` / `"audit"` / `None` for a legacy row) on every
+return path once the row has been read — `None` on validation-failure /
+row-not-found paths where no row was ever read.
 
 `record_human_action`:
 
@@ -78,11 +96,20 @@ Ticker and simulation share one flow; only the table and allowed role differ.
 1. Validate role + id (no I/O).
 2. Read the review row **read-only**:
    ```sql
-   SELECT ai_review_id, review_type, prompt_text, ai_response_text,
+   SELECT ai_review_id, review_type, review_kind, prompt_text, ai_response_text,
           provider, model, prompt_version
-   FROM ai_reviews        -- sim flow reads sim_ai_reviews
+   FROM ai_reviews
    WHERE ai_review_id = ?
    ```
+   The `sim_ai_reviews` flow reads the equivalent columns **except**
+   `review_type`, which that table does not have (`sim_ai_reviews` has no
+   `review_type` column — see `M02_SCHEMA_SPEC.md` §4.9 /
+   G-SIM-AI-SCHEMA). **Bug fix (Phase 3, 2026-07-05):** the sim-flow read
+   previously selected `review_type` from `sim_ai_reviews` anyway, which
+   would raise against a real DuckDB connection (`column "review_type" not
+   found`) — never caught before because this module's test suite is
+   entirely offline with a fake connection. Fixed while adding `review_kind`
+   to the same query.
 3. Row not found → `failed`; **no AI call, no write**.
 4. `ai_response_text IS NOT NULL` → `failed`; **no AI call, no write**; error
    exactly:
@@ -146,11 +173,46 @@ class AiClientProtocol(Protocol):
 Tests never invoke `DefaultAiClient`; an injected fake `AiClientProtocol` is
 used so no real AI / network call occurs.
 
+## 6a. Structured pass output parsing (Phase 3)
+
+Two pure, no-I/O module-level functions parse a `review_kind`'s
+`ai_response_text` into the derived score Step 5 consumes. Neither is called
+by `_send` itself — they're used by whatever caller (e.g. Step 5's
+`propose(ai_review_scores=...)`) has already read a row's `ai_response_text`
+and wants the derived score.
+
+```python
+def parse_audit_response(response_text: str | None) -> dict[str, Any] | None: ...
+def parse_contrarian_response(response_text: str | None) -> dict[str, Any] | None: ...
+```
+
+- **`parse_audit_response`** expects
+  `{"claims": [{"claim": str, "classification": "grounded"|"speculative"|"unverifiable"}, ...]}`
+  and returns `{"grounded": int, "speculative": int, "unverifiable": int,
+  "total": int, "audit_consistency_score": float}` (`100 * grounded / total`).
+  Claims with an unrecognized classification are skipped (not counted in
+  `total`).
+- **`parse_contrarian_response`** expects
+  `{"risk_score": 0-100, "concerns": [str, ...]}` and returns
+  `{"risk_score": float, "concerns": list}`, `risk_score` clamped to `[0, 100]`.
+- Both return `None` on falsy/unparseable/non-object JSON or missing required
+  fields (empty `claims`, missing/non-numeric `risk_score`). **A malformed
+  response degrades to "no score available" rather than a penalty** — an AI
+  response that failed to follow the requested format is not itself evidence
+  of a bad thesis, only of unusable output; Step 5 treats an absent score
+  exactly like a pass that hasn't run yet.
+- The `thesis` pass has no structured-output requirement (freeform assessment,
+  same as every review before Phase 3).
+
 ## 7. Mutation boundaries
 
 - Mutates **only**: `ai_reviews.ai_response_text`, `ai_reviews.human_action`,
   `sim_ai_reviews.ai_response_text`, `sim_ai_reviews.human_action`.
-- **UPDATE only** — no `INSERT`, no `DELETE`.
+- **UPDATE only** — no `INSERT`, no `DELETE`. This is unchanged by Phase 3:
+  the multi-pass **row creation** (one `INSERT` per `review_kind`) is entirely
+  Module 18's responsibility (`M18_EXPORT_PACKAGE_ENGINE_SPEC.md`) — Module 19
+  only ever `SELECT`s and conditionally `UPDATE`s one already-existing row per
+  `send_*` call, exactly as before.
 - No direct `duckdb` import; all DB access via the injected manager /
   `app.database.duckdb_manager`.
 - No market-data provider imports or calls; Module 19 uses its own AI client
@@ -207,3 +269,12 @@ fake AI client; no DuckDB / network / SDK). Coverage:
   `DELETE`), only `ai_reviews` / `sim_ai_reviews` updated, only
   `ai_response_text` / `human_action` in SET clauses, and no module-level
   provider-SDK import.
+
+**Phase 3 additions:** `review_kind` echoed in send metadata for both a
+`thesis`/`contrarian`/`audit` row and a legacy `None`-kind row; double-send
+guard confirmed independent across two rows sharing the same underlying
+proposal (different `ai_review_id`s, different `review_kind`s) — i.e. sending
+one pass never blocks or is blocked by another pass's row; `parse_audit_response`
+/ `parse_contrarian_response` covered for a clean response, a
+high-`unverifiable` response, and malformed/missing-field inputs (`None` in
+every case, not an exception or a hard-0 score).
