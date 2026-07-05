@@ -738,6 +738,7 @@ def test_sql_write_targets_only_pipeline_tables():
       - cleanup_calculated_outputs_for_date deletes from daily_features,
         step3_candidates, step4_analysis, step5_proposals.
       - _step_earnings upserts into earnings_calendar.
+      - _step_fundamentals (Phase 4) upserts into ticker_fundamentals.
     """
     allowed = {
         "PIPELINE_RUNS",
@@ -750,6 +751,8 @@ def test_sql_write_targets_only_pipeline_tables():
         "STEP5_PROPOSALS",
         # _step_earnings exception
         "EARNINGS_CALENDAR",
+        # _step_fundamentals exception (Phase 4)
+        "TICKER_FUNDAMENTALS",
     }
     source = ORCH_PATH.read_text(encoding="utf-8")
     # Find string literals that look like INSERT/UPDATE/DELETE SQL

@@ -2084,3 +2084,139 @@ class TestProposeWithAiReviewScores:
         assert len(props) == 1
         assert props[0]["disposition"] in (DISPOSITION_BUY, DISPOSITION_WATCHLIST)
         assert props[0]["rejection_reason"] != WATCHLIST_AUDIT_INCONSISTENT
+
+
+class TestProposalScoreRawFundamentalsBackCompat:
+    """_proposal_score_raw must be byte-identical to the pre-Phase-4 formula
+    when fundamentals_quality_score is absent (the default/common case)."""
+
+    def test_absent_matches_pre_phase4_value(self):
+        with_none = _proposal_score_raw(80.0, 2.5, 70.0, "bull", stop_distance_pct=0.05)
+        explicit_none = _proposal_score_raw(
+            80.0, 2.5, 70.0, "bull", stop_distance_pct=0.05,
+            fundamentals_quality_score=None,
+        )
+        assert with_none == explicit_none
+
+    def test_above_neutral_quality_raises_score(self):
+        base = _proposal_score_raw(80.0, 2.5, 70.0, "bull", stop_distance_pct=0.05)
+        boosted = _proposal_score_raw(
+            80.0, 2.5, 70.0, "bull", stop_distance_pct=0.05,
+            fundamentals_quality_score=100.0,
+        )
+        assert boosted > base
+
+    def test_below_neutral_quality_lowers_score(self):
+        base = _proposal_score_raw(80.0, 2.5, 70.0, "bull", stop_distance_pct=0.05)
+        penalized = _proposal_score_raw(
+            80.0, 2.5, 70.0, "bull", stop_distance_pct=0.05,
+            fundamentals_quality_score=0.0,
+        )
+        assert penalized < base
+
+    def test_exactly_neutral_quality_no_adjustment(self):
+        base = _proposal_score_raw(80.0, 2.5, 70.0, "bull", stop_distance_pct=0.05)
+        neutral = _proposal_score_raw(
+            80.0, 2.5, 70.0, "bull", stop_distance_pct=0.05,
+            fundamentals_quality_score=50.0,
+        )
+        assert base == pytest.approx(neutral)
+
+    def test_custom_weight_scales_the_adjustment(self):
+        small_weight = _proposal_score_raw(
+            80.0, 2.5, 70.0, "bull", fundamentals_quality_score=100.0,
+            fundamentals_score_weight=0.05,
+        )
+        large_weight = _proposal_score_raw(
+            80.0, 2.5, 70.0, "bull", fundamentals_quality_score=100.0,
+            fundamentals_score_weight=0.20,
+        )
+        assert large_weight > small_weight
+
+    def test_still_clamped_0_100_with_boost(self):
+        s = _proposal_score_raw(100.0, 5.0, 100.0, "bull", fundamentals_quality_score=100.0)
+        assert s <= 100.0
+
+    def test_fundamentals_and_ai_review_adjustments_compose(self):
+        """Both Phase 3 and Phase 4 optional adjustments can be present at
+        once and combine additively (no interaction/override between them)."""
+        both = _proposal_score_raw(
+            80.0, 2.5, 70.0, "bull", stop_distance_pct=0.05,
+            contrarian_risk_score=0.0, audit_consistency_score=100.0,
+            fundamentals_quality_score=100.0,
+        )
+        fundamentals_only = _proposal_score_raw(
+            80.0, 2.5, 70.0, "bull", stop_distance_pct=0.05,
+            fundamentals_quality_score=100.0,
+        )
+        # Both zero-penalty AI-review scores contribute nothing, so adding
+        # them must not change the fundamentals-only result.
+        assert both == pytest.approx(fundamentals_only)
+
+
+class TestParseRiskLabelConfigFundamentalsBlock:
+    def test_absent_block_uses_hardcoded_default(self):
+        cfg = _minimal_risk_config()
+        parsed = _parse_risk_label_config(cfg)
+        assert parsed["fundamentals_score_weight"] == pytest.approx(0.10)
+
+    def test_explicit_block_overrides_default(self):
+        cfg = _minimal_risk_config()
+        cfg["fundamentals"] = {"score_weight": 0.25}
+        parsed = _parse_risk_label_config(cfg)
+        assert parsed["fundamentals_score_weight"] == pytest.approx(0.25)
+
+    def test_explicit_zero_is_honored_not_replaced_by_default(self):
+        cfg = _minimal_risk_config()
+        cfg["fundamentals"] = {"score_weight": 0.0}
+        parsed = _parse_risk_label_config(cfg)
+        assert parsed["fundamentals_score_weight"] == 0.0
+
+
+class TestProposeWithFundamentalsScores:
+    """End-to-end through the public propose() API with fundamentals_scores
+    supplied -- confirms per-ticker scoping and byte-compat when omitted."""
+
+    def test_fundamentals_score_is_per_ticker_scoped(self, tmp_db_paths):
+        db = dbm.DB_ROLE_PROD
+        for ticker in ("BASELINE", "STRONGFUND"):
+            _seed_ticker(db, ticker)
+            _seed_price(db, ticker, SIGNAL_DATE, 100.0, 100.0)
+            _seed_features(db, ticker, SIGNAL_DATE, close_adj=100.0, atr14=2.0)
+            _seed_step4(db, ticker, SIGNAL_DATE, setup_type="breakout",
+                        setup_config_id="setup_breakout_v1", setup_passed=True,
+                        setup_score=75.0, entry_price_raw=100.0, market_regime="bull",
+                        earnings_days=30)
+        cfg = _minimal_risk_config(top_n=5, min_rr=1.5)
+        eng = _make_engine()
+        result = eng.propose(
+            SIGNAL_DATE, risk_label_config=cfg, setup_configs=DEFAULT_SETUP_CONFIGS,
+            db_role=db,
+            fundamentals_scores={"STRONGFUND": 100.0},
+        )
+        assert result.status == sr.STATUS_SUCCESS, result.errors
+
+        props = {p["ticker"]: p for p in _read_proposals(db, SIGNAL_DATE)}
+        assert (
+            props["STRONGFUND"]["proposal_score_raw"]
+            > props["BASELINE"]["proposal_score_raw"]
+        )
+
+    def test_no_fundamentals_scores_is_byte_compat_default(self, tmp_db_paths):
+        db = dbm.DB_ROLE_PROD
+        _seed_ticker(db, "AAA")
+        _seed_price(db, "AAA", SIGNAL_DATE, 100.0, 100.0)
+        _seed_features(db, "AAA", SIGNAL_DATE, close_adj=100.0, atr14=2.0)
+        _seed_step4(db, "AAA", SIGNAL_DATE, setup_type="breakout",
+                    setup_config_id="setup_breakout_v1", setup_passed=True,
+                    setup_score=75.0, entry_price_raw=100.0, market_regime="bull",
+                    earnings_days=30)
+        cfg = _minimal_risk_config(top_n=5, min_rr=1.5)
+        eng = _make_engine()
+        with_none_score = eng.propose(
+            SIGNAL_DATE, risk_label_config=cfg, setup_configs=DEFAULT_SETUP_CONFIGS,
+            db_role=db, run_id=str(uuid.uuid4()),
+        )
+        assert with_none_score.status == sr.STATUS_SUCCESS, with_none_score.errors
+        props = _read_proposals(db, SIGNAL_DATE)
+        assert len(props) == 1

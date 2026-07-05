@@ -394,6 +394,30 @@ _PROD_TABLE_DDL: Final[tuple[str, ...]] = (
         PRIMARY KEY (ticker, earnings_date)
     );
     """,
+    # Module 04/Phase 4 delta — fundamentals/events companion table. Kept
+    # separate from daily_features (companion table, not new columns there)
+    # since fundamentals update quarterly/irregularly vs daily_features'
+    # daily cadence; FEATURE_SCHEMA_VERSION is unaffected by this table.
+    # as_of_date is the point-in-time anchor (Phase 0 no-look-ahead
+    # discipline) -- the value known/computable as of that date, never a
+    # later restatement. Prod/debug only (mirrors earnings_calendar's scope;
+    # not present in the simulation schema).
+    """
+    CREATE TABLE IF NOT EXISTS ticker_fundamentals (
+        ticker VARCHAR NOT NULL,
+        as_of_date DATE NOT NULL,
+        eps_growth_trend DOUBLE,
+        leverage_ratio DOUBLE,
+        valuation_band VARCHAR,
+        piotroski_f_score INTEGER,
+        altman_z_score DOUBLE,
+        insider_trade_flag BOOLEAN,
+        institutional_ownership_delta DOUBLE,
+        source_provider VARCHAR NOT NULL,
+        calculated_at TIMESTAMP NOT NULL,
+        PRIMARY KEY (ticker, as_of_date)
+    );
+    """,
     """
     CREATE TABLE IF NOT EXISTS macro_events_calendar (
         event_date DATE NOT NULL,

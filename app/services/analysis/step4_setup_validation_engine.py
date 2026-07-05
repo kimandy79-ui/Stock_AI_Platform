@@ -146,6 +146,33 @@ WHERE f.feature_date = ?
 ORDER BY f.ticker
 """
 
+# Fundamentals/events layer (coder-note Phase 4 — not to be confused with the
+# migration-phase numbering in this module's own docstring). Point-in-time
+# correct: only rows with as_of_date <= signal_date are eligible, and the
+# most recent such row per ticker wins (mirrors daily_prices' asof-safe
+# "date <= end_date" pattern from the Phase 0 point-in-time audit).
+_SQL_READ_FUNDAMENTALS: Final[str] = """
+SELECT
+    ticker,
+    eps_growth_trend,
+    leverage_ratio,
+    valuation_band,
+    piotroski_f_score,
+    altman_z_score
+FROM ticker_fundamentals
+WHERE as_of_date <= ?
+QUALIFY ROW_NUMBER() OVER (PARTITION BY ticker ORDER BY as_of_date DESC) = 1
+"""
+
+_FUNDAMENTALS_COLS: Final[tuple[str, ...]] = (
+    "ticker",
+    "eps_growth_trend",
+    "leverage_ratio",
+    "valuation_band",
+    "piotroski_f_score",
+    "altman_z_score",
+)
+
 # Write one analysis row
 _SQL_INSERT: Final[str] = """
 INSERT INTO step4_analysis (
@@ -297,15 +324,42 @@ def _read_features_prices(
     return result
 
 
+def _read_fundamentals(
+    db_mgr: _DbManagerLike, db_role: str, signal_date: date
+) -> dict[str, dict[str, Any]]:
+    """Return dict keyed by ticker -> most recent ticker_fundamentals row
+    known as of signal_date (Phase 4 — coder-note fundamentals/events layer).
+
+    Absence (query returns nothing for a ticker, or the table has no rows at
+    all for it yet) is not an error: validators treat missing fundamentals
+    fields as "no adjustment" (see m14_setup_validators._compute_fundamentals_adjustment),
+    exactly like a routed candidate with no earnings-calendar row.
+    """
+    sig_iso = signal_date.isoformat()
+    conn = db_mgr.connect(db_role)
+    try:
+        rows = conn.execute(_SQL_READ_FUNDAMENTALS, [sig_iso]).fetchall()
+    finally:
+        conn.close()
+    result: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        d = dict(zip(_FUNDAMENTALS_COLS, row))
+        result[d["ticker"]] = d
+    return result
+
+
 def _build_feat_dict(
     candidate: dict[str, Any],
     features_prices: dict[str, dict[str, Any]],
     signal_date: date,
+    fundamentals_by_ticker: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Merge feature snapshot with live feature+price data.
 
     Live data (features_prices) takes priority; snapshot fills gaps.
-    Adds ticker + signal_date keys for validators.
+    Adds ticker + signal_date keys for validators. Fundamentals fields
+    (Phase 4) are merged last under their own keys, which never collide with
+    feature/price columns, so merge order relative to them is immaterial.
     """
     ticker = candidate["ticker"]
     live = features_prices.get(ticker, {})
@@ -318,6 +372,14 @@ def _build_feat_dict(
     # Ensure identity fields
     feat["ticker"] = ticker
     feat["signal_date"] = signal_date.isoformat()
+    if fundamentals_by_ticker is not None:
+        fundamentals = fundamentals_by_ticker.get(ticker)
+        if fundamentals is not None:
+            feat["eps_growth_trend"] = fundamentals["eps_growth_trend"]
+            feat["leverage_ratio"] = fundamentals["leverage_ratio"]
+            feat["valuation_band"] = fundamentals["valuation_band"]
+            feat["piotroski_f_score"] = fundamentals["piotroski_f_score"]
+            feat["altman_z_score"] = fundamentals["altman_z_score"]
     return feat
 
 
@@ -441,6 +503,22 @@ class Step4SetupValidationEngine:
                 metadata=_empty_metadata(db_role, signal_date, run_id),
             )
 
+        # Read fundamentals (Phase 4 — optional, config-weighted soft input;
+        # never a hard gate). A read failure here fails the whole step, same
+        # as a features-read failure, since ticker_fundamentals is a
+        # schema-managed table expected to exist in every migrated DB.
+        try:
+            fundamentals_by_ticker = _read_fundamentals(self._db, db_role, signal_date)
+        except Exception as exc:
+            msg = f"read fundamentals failed: {type(exc).__name__}: {exc}"
+            log.error("Step4 failed: %s", msg)
+            return ServiceResult(
+                status=sr.STATUS_FAILED,
+                run_id=run_id,
+                errors=[msg],
+                metadata=_empty_metadata(db_role, signal_date, run_id),
+            )
+
         # Validate
         analyses: list[tuple[SetupValidationResult, str]] = []  # (result, candidate_id)
         warnings: list[str] = []
@@ -452,7 +530,9 @@ class Step4SetupValidationEngine:
             ticker = candidate["ticker"]
             cand_id = candidate["candidate_id"]
             routed = candidate["routed_setup_types"]
-            feat = _build_feat_dict(candidate, features_prices, signal_date)
+            feat = _build_feat_dict(
+                candidate, features_prices, signal_date, fundamentals_by_ticker
+            )
 
             for setup_type in routed:
                 cfg = setup_configs.get(setup_type)

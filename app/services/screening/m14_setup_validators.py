@@ -217,6 +217,88 @@ def _compute_penalties(
     return earnings_penalty, macro_penalty
 
 
+# Altman Z'-Score interpretive zones (private-firm/book-value variant; see
+# app.providers.edgar_provider.compute_altman_z_score docstring for why this
+# variant is used). Standard textbook zones: >2.9 safe, <1.23 distress.
+_ALTMAN_SAFE_ZONE: Final[float] = 2.9
+_ALTMAN_DISTRESS_ZONE: Final[float] = 1.23
+_VALUATION_BAND_QUALITY: Final[dict[str, float]] = {
+    "cheap": 100.0,
+    "fair": 60.0,
+    "expensive": 20.0,
+    # "unknown" intentionally absent -> excluded from the average, not scored.
+}
+
+
+def _compute_fundamentals_adjustment(
+    feat: dict[str, Any], fundamentals_cfg: dict[str, Any]
+) -> tuple[float, dict[str, Any]]:
+    """Optional, config-weighted soft score adjustment from Phase 4 fundamentals.
+
+    Never a hard gate (mirrors the RVOL precedent, AD-22.23: a signal that is
+    not universally required stays advisory/scoring-only, never a pass/fail
+    check). Disabled by default (``fundamentals_cfg`` empty or
+    ``enabled=False``) -- every existing setup_config that doesn't have a
+    ``fundamentals`` block gets an adjustment of exactly ``0.0``, so this is
+    byte-identical to pre-Phase-4 behavior unless a setup_config opts in.
+
+    Returns ``(adjustment, evidence)`` where ``adjustment`` is added directly
+    into ``penalized_score`` (same additive slot as ``earnings_pen`` /
+    ``macro_pen``) and ``evidence`` documents which of the 5 real
+    fundamentals fields contributed (absent/None fields are simply excluded
+    from the average, not treated as a penalty -- a ticker with no
+    fundamentals coverage yet gets adjustment 0.0, not a downgrade).
+    """
+    enabled = bool(fundamentals_cfg.get("enabled", False))
+    weight = float(fundamentals_cfg.get("weight", 0.0))
+    if not enabled or weight == 0.0:
+        return 0.0, {"enabled": False}
+
+    quality_scores: list[float] = []
+
+    piotroski = feat.get("piotroski_f_score")
+    if piotroski is not None:
+        quality_scores.append(_clamp(100.0 * float(piotroski) / 9.0))
+
+    altman = feat.get("altman_z_score")
+    if altman is not None:
+        altman = float(altman)
+        if altman >= _ALTMAN_SAFE_ZONE:
+            quality_scores.append(100.0)
+        elif altman <= _ALTMAN_DISTRESS_ZONE:
+            quality_scores.append(0.0)
+        else:
+            span = _ALTMAN_SAFE_ZONE - _ALTMAN_DISTRESS_ZONE
+            quality_scores.append(100.0 * (altman - _ALTMAN_DISTRESS_ZONE) / span)
+
+    band = feat.get("valuation_band")
+    if band in _VALUATION_BAND_QUALITY:
+        quality_scores.append(_VALUATION_BAND_QUALITY[band])
+
+    eps_growth = feat.get("eps_growth_trend")
+    if eps_growth is not None:
+        quality_scores.append(_clamp(50.0 + float(eps_growth) * 100.0))
+
+    leverage = feat.get("leverage_ratio")
+    if leverage is not None:
+        quality_scores.append(_clamp(100.0 - float(leverage) * 100.0))
+
+    if not quality_scores:
+        return 0.0, {"enabled": True, "fields_present": 0}
+
+    avg_quality = sum(quality_scores) / len(quality_scores)
+    # Centered at 50 (neutral): above-average fundamentals add points,
+    # below-average subtract -- never enough alone to force a gate.
+    adjustment = weight * (avg_quality - 50.0) / 50.0
+    evidence = {
+        "enabled": True,
+        "fields_present": len(quality_scores),
+        "avg_quality": avg_quality,
+        "adjustment": adjustment,
+    }
+    return adjustment, evidence
+
+
 def _apply_weights(components: dict[str, float], weights: dict[str, float]) -> float:
     """Weighted sum of component scores (0–100 each). Returns 0–100."""
     total_w = 0.0
@@ -334,6 +416,9 @@ def validate_breakout(
         setup_config.get("earnings", {}),
         setup_config.get("macro_event_risk", {}),
     )
+    fundamentals_adj, fundamentals_evidence = _compute_fundamentals_adjustment(
+        feat, setup_config.get("fundamentals", {})
+    )
 
     # --- Hard checks ---
     hard_fails: list[str] = []
@@ -435,7 +520,7 @@ def validate_breakout(
         target_is_structural = False  # would need fixed-R fallback
 
     raw_score = _apply_weights(components, weights)
-    penalized_score = _clamp(raw_score + earnings_pen + macro_pen)
+    penalized_score = _clamp(raw_score + earnings_pen + macro_pen + fundamentals_adj)
 
     setup_passed = setup_passed_hard and penalized_score >= min_setup_score
 
@@ -469,6 +554,8 @@ def validate_breakout(
         "raw_score": raw_score,
         "earnings_penalty": earnings_pen,
         "macro_penalty": macro_pen,
+        "fundamentals_adjustment": fundamentals_adj,
+        "fundamentals_evidence": fundamentals_evidence,
         "penalized_score": penalized_score,
         "target_is_structural": target_is_structural,
         "resistance_blocks": resistance_blocks,
@@ -589,6 +676,9 @@ def validate_pullback(
         feat,
         setup_config.get("earnings", {}),
         setup_config.get("macro_event_risk", {}),
+    )
+    fundamentals_adj, fundamentals_evidence = _compute_fundamentals_adjustment(
+        feat, setup_config.get("fundamentals", {})
     )
 
     # --- Hard checks ---
@@ -729,7 +819,7 @@ def validate_pullback(
     raw_score = _apply_weights(components, weights)
     # Apply RVOL soft bonus capped so total doesn't exceed 100
     raw_score = _clamp(raw_score + rvol_bonus * 0.05)
-    penalized_score = _clamp(raw_score + earnings_pen + macro_pen)
+    penalized_score = _clamp(raw_score + earnings_pen + macro_pen + fundamentals_adj)
 
     setup_passed = setup_passed_hard and penalized_score >= min_setup_score
 
@@ -772,6 +862,8 @@ def validate_pullback(
         "raw_score": raw_score,
         "earnings_penalty": earnings_pen,
         "macro_penalty": macro_pen,
+        "fundamentals_adjustment": fundamentals_adj,
+        "fundamentals_evidence": fundamentals_evidence,
         "penalized_score": penalized_score,
         "target_is_structural": target_is_structural,
         "resistance_blocks": resistance_blocks,
@@ -888,6 +980,9 @@ def validate_trend_continuation(
         feat,
         setup_config.get("earnings", {}),
         setup_config.get("macro_event_risk", {}),
+    )
+    fundamentals_adj, fundamentals_evidence = _compute_fundamentals_adjustment(
+        feat, setup_config.get("fundamentals", {})
     )
 
     # --- Hard checks ---
@@ -1006,7 +1101,7 @@ def validate_trend_continuation(
         target_is_structural = False
 
     raw_score = _apply_weights(components, weights)
-    penalized_score = _clamp(raw_score + earnings_pen + macro_pen)
+    penalized_score = _clamp(raw_score + earnings_pen + macro_pen + fundamentals_adj)
 
     setup_passed = setup_passed_hard and penalized_score >= min_setup_score
 
@@ -1040,6 +1135,8 @@ def validate_trend_continuation(
         "raw_score": raw_score,
         "earnings_penalty": earnings_pen,
         "macro_penalty": macro_pen,
+        "fundamentals_adjustment": fundamentals_adj,
+        "fundamentals_evidence": fundamentals_evidence,
         "penalized_score": penalized_score,
         "target_is_structural": target_is_structural,
         "resistance_blocks": resistance_blocks,
@@ -1156,6 +1253,9 @@ def validate_consolidation_base(
         setup_config.get("earnings", {}),
         setup_config.get("macro_event_risk", {}),
     )
+    fundamentals_adj, fundamentals_evidence = _compute_fundamentals_adjustment(
+        feat, setup_config.get("fundamentals", {})
+    )
 
     # --- Hard checks ---
     hard_fails: list[str] = []
@@ -1265,7 +1365,7 @@ def validate_consolidation_base(
     components["stop_tightness"] = stop_tight
 
     raw_score = _apply_weights(components, weights)
-    penalized_score = _clamp(raw_score + earnings_pen + macro_pen)
+    penalized_score = _clamp(raw_score + earnings_pen + macro_pen + fundamentals_adj)
 
     setup_passed = setup_passed_hard and penalized_score >= min_setup_score
 
@@ -1314,6 +1414,8 @@ def validate_consolidation_base(
         "raw_score": raw_score,
         "earnings_penalty": earnings_pen,
         "macro_penalty": macro_pen,
+        "fundamentals_adjustment": fundamentals_adj,
+        "fundamentals_evidence": fundamentals_evidence,
         "penalized_score": penalized_score,
         "target_is_structural": target_is_structural,
         "confidence": _derive_confidence(penalized_score),

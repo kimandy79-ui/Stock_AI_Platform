@@ -160,6 +160,20 @@ _W_AUDIT_PENALTY: Final[float] = 0.10       # max points deducted at audit_consi
 _AUDIT_CONSISTENCY_MIN_FOR_BUY: Final[float] = 40.0
 
 # ---------------------------------------------------------------------------
+# Phase 4 — fundamentals score adjustment (config-overridable via
+# risk_label_config.fundamentals; see _parse_risk_label_config). Additive,
+# two-sided (unlike the Phase 3 penalties, which only ever subtract):
+# above-neutral fundamentals add points, below-neutral subtract, centered at
+# a quality_score of 50. Applied only when a fundamentals_quality_score is
+# supplied for that ticker (None = no ticker_fundamentals coverage yet or the
+# caller chose not to pass one; formula output is then byte-identical to
+# pre-Phase-4 behavior). Never a hard gate (mirrors the RVOL precedent,
+# AD-22.23) -- there is deliberately no disposition-forcing threshold here,
+# unlike audit_consistency_min_for_buy.
+# ---------------------------------------------------------------------------
+_W_FUNDAMENTALS: Final[float] = 0.10  # +/-5 points at quality_score 100/0
+
+# ---------------------------------------------------------------------------
 # Metadata keys contract
 # ---------------------------------------------------------------------------
 METADATA_KEYS: Final[tuple[str, ...]] = (
@@ -317,6 +331,13 @@ def _parse_risk_label_config(cfg: dict) -> dict[str, Any]:
         "audit_consistency_min_for_buy", _AUDIT_CONSISTENCY_MIN_FOR_BUY
     )
 
+    # Phase 4: fundamentals score-adjustment config, same explicit-None-check
+    # back-compat pattern as the Phase 3 ai_review block above.
+    fundamentals_cfg = cfg.get("fundamentals", {})
+    fundamentals_score_weight = _f(fundamentals_cfg.get("score_weight", _W_FUNDAMENTALS))
+    if fundamentals_score_weight is None:
+        fundamentals_score_weight = _W_FUNDAMENTALS
+
     return {
         "factor_weights": factor_weights,
         "low_max": low_max,
@@ -336,6 +357,7 @@ def _parse_risk_label_config(cfg: dict) -> dict[str, Any]:
         "contrarian_penalty_weight": contrarian_penalty_weight,
         "audit_penalty_weight": audit_penalty_weight,
         "audit_consistency_min_for_buy": audit_consistency_min_for_buy,
+        "fundamentals_score_weight": fundamentals_score_weight,
         "industry_penalty": industry_penalty,
     }
 
@@ -819,16 +841,20 @@ def _proposal_score_raw(
     audit_consistency_score: float | None = None,
     contrarian_penalty_weight: float = _W_CONTRARIAN_PENALTY,
     audit_penalty_weight: float = _W_AUDIT_PENALTY,
+    fundamentals_quality_score: float | None = None,
+    fundamentals_score_weight: float = _W_FUNDAMENTALS,
 ) -> float:
-    """Raw proposal score (01c §63) plus optional Phase 3 AI-review penalties.
+    """Raw proposal score (01c §63) plus optional Phase 3/4 adjustments.
 
     ``contrarian_risk_score`` / ``audit_consistency_score`` are ``None`` for
     the overwhelming majority of proposals (the AI review passes run later,
     selectively, and asynchronously relative to Step 5's original scoring —
-    see ``M19_AI_REVIEW_ENGINE_SPEC.md``). When both are ``None`` this
-    function's output is byte-identical to the pre-Phase-3 five-term
-    formula: the two penalties below are purely additive and contribute
-    exactly 0 when their score is absent.
+    see ``M19_AI_REVIEW_ENGINE_SPEC.md``). ``fundamentals_quality_score``
+    (Phase 4, 0-100) is likewise ``None`` unless a caller supplies one for
+    that ticker. When all three are ``None`` this function's output is
+    byte-identical to the pre-Phase-3 five-term formula: every adjustment
+    below is purely additive and contributes exactly 0 when its score is
+    absent.
     """
     rrsc = _rr_score(estimated_rr)
     msc = _MARKET_SCORE.get(market_regime or "", 0.0) if market_regime else 0.0
@@ -848,6 +874,8 @@ def _proposal_score_raw(
         base -= contrarian_penalty_weight * _clamp(contrarian_risk_score)
     if audit_consistency_score is not None:
         base -= audit_penalty_weight * (100.0 - _clamp(audit_consistency_score))
+    if fundamentals_quality_score is not None:
+        base += fundamentals_score_weight * (_clamp(fundamentals_quality_score) - 50.0)
     return _clamp(base)
 
 
@@ -1004,6 +1032,7 @@ class Step5ProposalEngine:
         db_role: str = DB_ROLE_PROD,
         run_id: str | None = None,
         ai_review_scores: dict[str, dict[str, float]] | None = None,
+        fundamentals_scores: dict[str, float] | None = None,
     ) -> ServiceResult:
         """Run Step 5 for one signal_date.
 
@@ -1014,6 +1043,12 @@ class Step5ProposalEngine:
         ``ai_review_engine.parse_audit_response`` /
         ``parse_contrarian_response``) supplies it directly. ``None`` (the
         default) reproduces the pre-Phase-3 scoring exactly.
+
+        ``fundamentals_scores`` (Phase 4, optional) is the same kind of
+        pass-through, keyed by ``ticker`` -> a 0-100 fundamentals quality
+        score (see ``m14_setup_validators._compute_fundamentals_adjustment``
+        for the same underlying 5-field quality formula). ``None`` (the
+        default) reproduces pre-Phase-4 scoring exactly.
         """
         run_id = run_id or str(uuid.uuid4())
         log = logging_config.get_logger(__name__, run_id)
@@ -1057,7 +1092,7 @@ class Step5ProposalEngine:
 
         rows = self._build_rows(
             analyses, features_map, setup_configs or {}, parsed_cfg, run_id, signal_date,
-            ai_review_scores,
+            ai_review_scores, fundamentals_scores,
         )
 
         try:
@@ -1132,6 +1167,7 @@ class Step5ProposalEngine:
         run_id: str,
         signal_date: date,
         ai_review_scores: dict[str, dict[str, float]] | None = None,
+        fundamentals_scores: dict[str, float] | None = None,
     ) -> list[dict[str, Any]]:
         """Build one step5_proposals row per analyzable Step 4 analysis.
 
@@ -1143,10 +1179,15 @@ class Step5ProposalEngine:
         ``None``: the AI review passes run later and selectively relative to
         Step 5's original scoring, so most calls have no scores to feed in
         yet (see ``M19_AI_REVIEW_ENGINE_SPEC.md``).
+
+        ``fundamentals_scores`` (Phase 4, optional) is keyed by ``ticker`` ->
+        a 0-100 fundamentals quality score. Absent tickers get no
+        adjustment — never treated as a penalty.
         """
         top_n = cfg["top_n"]
         min_target_room_pct = cfg.get("min_target_room_pct", _DEFAULT_MIN_TARGET_ROOM_PCT)
         ai_review_scores = ai_review_scores or {}
+        fundamentals_scores = fundamentals_scores or {}
         enriched: list[dict[str, Any]] = []
 
         for a in analyses:
@@ -1158,6 +1199,7 @@ class Step5ProposalEngine:
             ticker_ai_scores = ai_review_scores.get(ticker, {})
             contrarian_risk_score = ticker_ai_scores.get("contrarian_risk_score")
             audit_consistency_score = ticker_ai_scores.get("audit_consistency_score")
+            fundamentals_quality_score = fundamentals_scores.get(ticker)
             _ed = a.get("earnings_days")
             earnings_days: int | None = None
             if _ed is not None:
@@ -1288,6 +1330,8 @@ class Step5ProposalEngine:
                 audit_consistency_score=audit_consistency_score,
                 contrarian_penalty_weight=cfg["contrarian_penalty_weight"],
                 audit_penalty_weight=cfg["audit_penalty_weight"],
+                fundamentals_quality_score=fundamentals_quality_score,
+                fundamentals_score_weight=cfg["fundamentals_score_weight"],
             )
 
             # Fix 4: invalidation level = stop_price_raw; documented explicitly

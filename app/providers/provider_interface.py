@@ -29,12 +29,14 @@ Symbol-type and benchmark vocabularies are reused from
 from __future__ import annotations
 
 import abc
+import uuid
 from dataclasses import dataclass
 from datetime import date
 from typing import Final
 
 from app.config import constants
 from app.utils import logging_config
+from app.utils import service_result
 from app.utils.service_result import ServiceResult
 
 # Consistency with project modules: every library module binds a logger even if
@@ -227,6 +229,64 @@ class EarningsEvent:
             raise ValueError("EarningsEvent.ticker must be a non-empty string")
 
 
+# --------------------------------------------------------------------------- #
+# Fundamentals value catalogs (Phase 4 — M04_PROVIDER_INTERFACE_CONFIG_DELTA.md)
+# --------------------------------------------------------------------------- #
+VALUATION_BANDS: Final[tuple[str, ...]] = ("cheap", "fair", "expensive", "unknown")
+
+
+@dataclass(frozen=True, kw_only=True)
+class FundamentalSnapshot:
+    """One point-in-time fundamentals/events snapshot for a symbol (provider-neutral).
+
+    Maps downstream onto the ``ticker_fundamentals`` companion table (Phase 4
+    delta — see ``M04_PROVIDER_INTERFACE_CONFIG_DELTA.md``; a companion table
+    was chosen over new ``daily_features`` columns so ``daily_features``'s
+    daily-cadence, high-traffic read path stays free of 7 mostly-NULL,
+    quarterly-cadence columns — ``FEATURE_SCHEMA_VERSION`` is unaffected).
+
+    Every field except ``ticker`` / ``as_of_date`` / ``source_provider`` is
+    optional: a provider that cannot reliably source a given field returns
+    ``None`` for it rather than a fabricated value (per the Phase 4 coder
+    note: "report as blocking issue rather than substituting an alternative
+    field silently" — at the DTO level this means "field absent," not "field
+    guessed").
+
+    ``as_of_date`` is the point-in-time anchor per Phase 0's no-look-ahead
+    discipline: the value known/computable as of this date (e.g. the most
+    recent filing whose period end precedes it), never a later restatement.
+
+    The dataclass is ``kw_only`` for the same reason as :class:`EarningsEvent`
+    — field order can follow the coder note's list verbatim regardless of
+    which fields are required vs optional.
+    """
+
+    ticker: str
+    as_of_date: date
+    eps_growth_trend: float | None = None
+    leverage_ratio: float | None = None
+    valuation_band: str | None = None
+    piotroski_f_score: int | None = None
+    altman_z_score: float | None = None
+    insider_trade_flag: bool | None = None
+    institutional_ownership_delta: float | None = None
+    source_provider: str
+
+    def __post_init__(self) -> None:
+        if not self.ticker:
+            raise ValueError("FundamentalSnapshot.ticker must be a non-empty string")
+        if self.valuation_band is not None and self.valuation_band not in VALUATION_BANDS:
+            raise ValueError(
+                f"FundamentalSnapshot.valuation_band {self.valuation_band!r} "
+                f"not in {VALUATION_BANDS!r}"
+            )
+        if self.piotroski_f_score is not None and not (0 <= self.piotroski_f_score <= 9):
+            raise ValueError(
+                f"FundamentalSnapshot.piotroski_f_score must be in [0, 9], "
+                f"got {self.piotroski_f_score!r}"
+            )
+
+
 @dataclass(frozen=True)
 class ProviderCapabilities:
     """What a concrete provider supports.
@@ -234,6 +294,13 @@ class ProviderCapabilities:
     Lets callers/tests introspect a provider without trial-and-error. Returned
     by :meth:`MarketDataProvider.get_capabilities` in
     ``ServiceResult.metadata['capabilities']``.
+
+    ``supports_fundamentals`` (Phase 4) defaults to ``False`` so every
+    existing concrete-provider construction call (e.g. Module 05's
+    ``YahooProvider``, unchanged by this delta) keeps working without edits —
+    see :meth:`MarketDataProvider.get_fundamentals` for why this is a
+    concrete-default method rather than an ``@abstractmethod`` like the other
+    four.
     """
 
     provider_name: str
@@ -241,6 +308,7 @@ class ProviderCapabilities:
     supports_ticker_listing: bool
     supports_earnings: bool
     supports_adjusted_prices: bool
+    supports_fundamentals: bool = False
 
 
 @dataclass(frozen=True)
@@ -352,6 +420,44 @@ class MarketDataProvider(abc.ABC):
         """
         ...
 
+    # ------------------------------------------------------------------ #
+    # Phase 4 — fundamentals/events (M04_PROVIDER_INTERFACE_CONFIG_DELTA.md).
+    # Concrete-default, NOT @abstractmethod: the other four methods are
+    # abstract, so adding a fifth abstract method would force every existing
+    # concrete provider (Module 05's frozen YahooProvider) to gain a stub
+    # implementation just to keep instantiating — a forced touch to a frozen
+    # module for a capability it doesn't support. A concrete default avoids
+    # that: providers that don't override this method simply return
+    # "unsupported" (this base implementation), exactly like their
+    # ``get_capabilities().supports_fundamentals`` already (correctly)
+    # reports ``False`` without needing an override.
+    # ------------------------------------------------------------------ #
+    def get_fundamentals(self, ticker: str, as_of_date: date) -> ServiceResult:
+        """Return a point-in-time :class:`FundamentalSnapshot` for ``ticker``.
+
+        ``metadata['fundamentals']`` carries one ``FundamentalSnapshot`` (not
+        a list — one point-in-time snapshot per call, unlike the batch-shaped
+        ``get_price_history`` / ``list_symbols`` / ``get_earnings``).
+
+        Base implementation returns ``failed`` with
+        ``metadata['error_detail'].kind == "unsupported_capability"`` — the
+        default for any provider that doesn't override this method. Concrete
+        providers that do support fundamentals (per
+        ``get_capabilities().supports_fundamentals``) override this.
+        """
+        detail = ProviderErrorDetail(
+            kind="unsupported_capability",
+            message="get_fundamentals is not supported by this provider",
+            symbol=ticker,
+        )
+        return ServiceResult(
+            status=service_result.STATUS_FAILED,
+            run_id=str(uuid.uuid4()),
+            rows_processed=0,
+            errors=[detail.message],
+            metadata={"provider_name": "unknown", "error_detail": detail},
+        )
+
 
 __all__ = [
     "MarketDataProvider",
@@ -359,8 +465,10 @@ __all__ = [
     "PriceHistoryRequest",
     "TickerInfo",
     "EarningsEvent",
+    "FundamentalSnapshot",
     "ProviderCapabilities",
     "ProviderErrorDetail",
     "PROVIDER_ERROR_KINDS",
     "EARNINGS_SESSIONS",
+    "VALUATION_BANDS",
 ]

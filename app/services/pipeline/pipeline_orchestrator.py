@@ -6,17 +6,18 @@ Setup-mode step sequence (01d_MODULES_AND_PIPELINE.md §70):
   1. benchmark_etf_ingestion      (critical)
   2. universe_ingestion            (recoverable)
   3. earnings_calendar_refresh     (recoverable) — skipped if calendar already updated today
-  4. price_ingestion               (critical)
-  5. validation                    (critical)
-  6. mutation_detection            (recoverable)
-  7. feature_calculation           (critical)
-  8. market_regime_classification  (recoverable)
-  9. step3_universal_eligibility   (critical, ONCE per signal_date — M13)
- 10. step4_setup_validation        (critical, ONCE per signal_date — M14, iterates setup configs internally)
- 11. step5_proposals               (critical, ONCE per signal_date — M15)
- 12. outcome_queue_creation        (critical)
- 13. outcome_processing            (recoverable)
- 14. dashboard_materialization     (recoverable, V1 no-op)
+  4. fundamentals_refresh          (recoverable) — Phase 4; skipped if already updated today
+  5. price_ingestion               (critical)
+  6. validation                    (critical)
+  7. mutation_detection            (recoverable)
+  8. feature_calculation           (critical)
+  9. market_regime_classification  (recoverable)
+ 10. step3_universal_eligibility   (critical, ONCE per signal_date — M13)
+ 11. step4_setup_validation        (critical, ONCE per signal_date — M14, iterates setup configs internally)
+ 12. step5_proposals               (critical, ONCE per signal_date — M15)
+ 13. outcome_queue_creation        (critical)
+ 14. outcome_processing            (recoverable)
+ 15. dashboard_materialization     (recoverable, V1 no-op)
 
 Hard boundaries:
 - No direct ``duckdb`` import.
@@ -29,7 +30,9 @@ Hard boundaries:
   Exceptions: ``cleanup_calculated_outputs_for_date`` deletes stale rows from
   ``daily_features``, ``step3_candidates``, ``step4_analysis``, and
   ``step5_proposals`` before a (re-)run; ``_step_earnings`` upserts into
-  ``earnings_calendar`` when the calendar was not already refreshed today.
+  ``earnings_calendar`` when the calendar was not already refreshed today;
+  ``_step_fundamentals`` (Phase 4) upserts into ``ticker_fundamentals`` when
+  it was not already refreshed today, mirroring ``_step_earnings`` exactly.
 - All step engines and the default provider are instantiated in ``__init__`` only.
 - The public surface always returns a ``ServiceResult``.
 - No legacy strategy-mode paths (aggressive / normal / conservative).
@@ -71,6 +74,7 @@ STEP_NAMES: Final[tuple[str, ...]] = (
     "benchmark_etf_ingestion",
     "universe_ingestion",
     "earnings_calendar_refresh",
+    "fundamentals_refresh",
     "price_ingestion",
     "validation",
     "mutation_detection",
@@ -101,6 +105,7 @@ RECOVERABLE_STEPS: Final[frozenset[str]] = frozenset(
     {
         "universe_ingestion",
         "earnings_calendar_refresh",
+        "fundamentals_refresh",
         "mutation_detection",
         "market_regime_classification",
         "outcome_queue_creation",   # M16 legacy API; full setup-mode migration is Phase 7
@@ -232,6 +237,34 @@ _SQL_EARNINGS_UPSERT: Final[str] = (
     "confidence = EXCLUDED.confidence, updated_at = EXCLUDED.updated_at"
 )
 
+# --------------------------------------------------------------------------- #
+# SQL — fundamentals refresh (Phase 4; used only by _step_fundamentals).
+# Mirrors _SQL_EARNINGS_* exactly: _SQL_FUNDAMENTALS_CHECK (already refreshed
+# today?), reuses _SQL_EARNINGS_TICKERS (same active-stock-ticker universe),
+# _SQL_FUNDAMENTALS_UPSERT (insert or update one ticker_fundamentals row).
+# --------------------------------------------------------------------------- #
+_SQL_FUNDAMENTALS_CHECK: Final[str] = (
+    "SELECT COUNT(*) FROM ticker_fundamentals "
+    "WHERE CAST(calculated_at AS DATE) = ?"
+)
+_SQL_FUNDAMENTALS_UPSERT: Final[str] = (
+    "INSERT INTO ticker_fundamentals "
+    "(ticker, as_of_date, eps_growth_trend, leverage_ratio, valuation_band, "
+    "piotroski_f_score, altman_z_score, insider_trade_flag, "
+    "institutional_ownership_delta, source_provider, calculated_at) "
+    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP) "
+    "ON CONFLICT (ticker, as_of_date) DO UPDATE SET "
+    "eps_growth_trend = EXCLUDED.eps_growth_trend, "
+    "leverage_ratio = EXCLUDED.leverage_ratio, "
+    "valuation_band = EXCLUDED.valuation_band, "
+    "piotroski_f_score = EXCLUDED.piotroski_f_score, "
+    "altman_z_score = EXCLUDED.altman_z_score, "
+    "insider_trade_flag = EXCLUDED.insider_trade_flag, "
+    "institutional_ownership_delta = EXCLUDED.institutional_ownership_delta, "
+    "source_provider = EXCLUDED.source_provider, "
+    "calculated_at = EXCLUDED.calculated_at"
+)
+
 
 # --------------------------------------------------------------------------- #
 # Internal step-result helper.
@@ -269,6 +302,7 @@ class PipelineOrchestrator:
         self,
         db_manager: Any | None = None,
         provider: Any | None = None,
+        fundamentals_provider: Any | None = None,
         benchmark_loader: Any | None = None,
         universe_engine: Any | None = None,
         ingestion_engine: Any | None = None,
@@ -295,6 +329,11 @@ class PipelineOrchestrator:
             from app.providers.yahoo_provider import YahooProvider
             provider = YahooProvider()
         self._provider = provider
+
+        if fundamentals_provider is None:
+            from app.providers.edgar_provider import EdgarFundamentalsProvider
+            fundamentals_provider = EdgarFundamentalsProvider()
+        self._fundamentals_provider = fundamentals_provider
 
         if benchmark_loader is None:
             from app.services.benchmarks.benchmark_etf_loader import BenchmarkEtfLoader
@@ -483,6 +522,7 @@ class PipelineOrchestrator:
                     ("benchmark_etf_ingestion",       self._step_benchmark),
                     ("universe_ingestion",             self._step_universe),
                     ("earnings_calendar_refresh",      self._step_earnings),
+                    ("fundamentals_refresh",            self._step_fundamentals),
                     ("price_ingestion",                self._step_price),
                     ("validation",                     self._step_validation),
                     ("mutation_detection",             self._step_mutation),
@@ -966,6 +1006,125 @@ class PipelineOrchestrator:
         )
         log.info(
             "earnings_calendar_refresh: upserted %d events for %d tickers",
+            len(upsert_rows), len(tickers),
+        )
+        return ServiceResult(
+            status=status,
+            run_id=run_id,
+            rows_processed=len(upsert_rows),
+            warnings=all_warnings,
+        )
+
+    def _step_fundamentals(self, run_date: date, db_role: str, run_id: str, log: Any):
+        """Ensure ``ticker_fundamentals`` is refreshed for *run_date* (Phase 4).
+
+        Mirrors ``_step_earnings`` exactly (same already-refreshed-today
+        guard, same active-ticker universe, one batch-upsert transaction).
+        Failures are per-ticker warnings, not a hard step failure: this step
+        is recoverable, and a missing fundamentals snapshot leaves
+        ``ticker_fundamentals`` at its pre-step state (all-NULL columns
+        stay NULL), same as ``_step_earnings`` leaving ``days_to_earnings_bd``
+        NULL on failure.
+        """
+        import gc
+
+        conn = self._db.connect(db_role)
+        try:
+            cursor = conn.execute(_SQL_FUNDAMENTALS_CHECK, [run_date])
+            row = cursor.fetchone()
+            already_refreshed = (row[0] > 0) if row else False
+        finally:
+            conn.close()
+
+        if already_refreshed:
+            log.info(
+                "fundamentals_refresh: ticker_fundamentals already updated today (%s); skipping",
+                run_date,
+            )
+            return ServiceResult(
+                status=service_result.STATUS_SUCCESS_WITH_WARNINGS,
+                run_id=run_id, rows_processed=0,
+                warnings=["ticker_fundamentals already refreshed today; skipped"],
+            )
+
+        conn = self._db.connect(db_role)
+        try:
+            cursor = conn.execute(_SQL_EARNINGS_TICKERS)
+            tickers: list[str] = [r[0] for r in cursor.fetchall()]
+        finally:
+            conn.close()
+
+        if not tickers:
+            log.warning("fundamentals_refresh: no active stock tickers found")
+            return ServiceResult(
+                status=service_result.STATUS_SUCCESS_WITH_WARNINGS,
+                run_id=run_id, rows_processed=0,
+                warnings=["fundamentals_refresh: no active stock tickers"],
+            )
+
+        upsert_rows: list[tuple] = []
+        fetch_warnings: list[str] = []
+        for ticker in tickers:
+            try:
+                result = self._fundamentals_provider.get_fundamentals(ticker, run_date)
+            except Exception as exc:  # noqa: BLE001
+                fetch_warnings.append(f"get_fundamentals({ticker}) raised: {exc}")
+                continue
+            if getattr(result, "status", None) == service_result.STATUS_FAILED:
+                fetch_warnings.append(
+                    f"get_fundamentals({ticker}) failed: "
+                    f"{(result.errors or ['unknown'])[0]}"
+                )
+                continue
+            snapshot = (result.metadata or {}).get("fundamentals")
+            if snapshot is None:
+                continue
+            upsert_rows.append((
+                snapshot.ticker,
+                snapshot.as_of_date,
+                snapshot.eps_growth_trend,
+                snapshot.leverage_ratio,
+                snapshot.valuation_band,
+                snapshot.piotroski_f_score,
+                snapshot.altman_z_score,
+                snapshot.insider_trade_flag,
+                snapshot.institutional_ownership_delta,
+                snapshot.source_provider,
+            ))
+
+        if not upsert_rows:
+            msg = f"fundamentals_refresh: 0 snapshots fetched for {len(tickers)} tickers"
+            log.warning(msg)
+            return ServiceResult(
+                status=service_result.STATUS_SUCCESS_WITH_WARNINGS,
+                run_id=run_id, rows_processed=0,
+                warnings=[msg] + fetch_warnings,
+            )
+
+        gc.collect()  # release Windows mmap regions from read connections
+        conn = self._db.connect(db_role, read_only=False)
+        try:
+            conn.execute("BEGIN TRANSACTION")
+            try:
+                for row in upsert_rows:
+                    conn.execute(_SQL_FUNDAMENTALS_UPSERT, list(row))
+                conn.execute("COMMIT")
+            except Exception:
+                try:
+                    conn.execute("ROLLBACK")
+                except Exception:  # noqa: BLE001
+                    pass
+                raise
+        finally:
+            conn.close()
+
+        all_warnings = fetch_warnings
+        status = (
+            service_result.STATUS_SUCCESS_WITH_WARNINGS
+            if all_warnings else service_result.STATUS_SUCCESS
+        )
+        log.info(
+            "fundamentals_refresh: upserted %d snapshot(s) for %d tickers",
             len(upsert_rows), len(tickers),
         )
         return ServiceResult(

@@ -49,6 +49,7 @@ EXPECTED_PROD_TABLES: frozenset[str] = frozenset({
     "outcome_tracking_queue",
     "signal_outcomes",
     "earnings_calendar",
+    "ticker_fundamentals",
     "macro_events_calendar",
     "data_repair_queue",
     "feature_rebuild_log",
@@ -84,6 +85,7 @@ FORBIDDEN_IN_SIM: frozenset[str] = frozenset({
     "pipeline_runs",
     "pipeline_locks",
     "config_recommendations",
+    "ticker_fundamentals",
 })
 
 EXPECTED_PROD_INDEXES: frozenset[str] = frozenset({
@@ -621,3 +623,29 @@ class TestReviewKindColumn:
         check the two schema deltas coexist without collision."""
         sm.apply_prod_schema()
         assert "config_recommendations" in _tables("prod")
+
+
+# --------------------------------------------------------------------------- #
+# Phase 4 — ticker_fundamentals companion table
+# --------------------------------------------------------------------------- #
+class TestTickerFundamentalsSchema:
+    def test_columns(self, tmp_db_paths: dict[str, Path]) -> None:
+        sm.apply_prod_schema()
+        cols = _columns("prod", "ticker_fundamentals")
+        expected = [
+            "ticker", "as_of_date", "eps_growth_trend", "leverage_ratio",
+            "valuation_band", "piotroski_f_score", "altman_z_score",
+            "insider_trade_flag", "institutional_ownership_delta",
+            "source_provider", "calculated_at",
+        ]
+        assert cols == expected
+
+    def test_not_in_simulation_schema(self, tmp_db_paths: dict[str, Path]) -> None:
+        sm.apply_simulation_schema()
+        assert "ticker_fundamentals" not in _tables("simulation")
+
+    def test_idempotent_on_reapply(self, tmp_db_paths: dict[str, Path]) -> None:
+        assert sm.apply_prod_schema().status == service_result.STATUS_SUCCESS
+        first = _columns("prod", "ticker_fundamentals")
+        assert sm.apply_prod_schema().status == service_result.STATUS_SUCCESS
+        assert _columns("prod", "ticker_fundamentals") == first
