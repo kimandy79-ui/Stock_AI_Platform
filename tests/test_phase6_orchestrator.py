@@ -859,3 +859,88 @@ def test_non_trading_parametrized(monkeypatch) -> None:
             f"{bad_date} should be rejected"
         )
         assert not db.executed, f"No DB writes expected for {bad_date}"
+
+
+# --------------------------------------------------------------------------- #
+# Phase 5 — run_id correlation (pipeline_runs / pipeline_run_diagnostics /
+# step-engine ServiceResult).
+# --------------------------------------------------------------------------- #
+class _RunIdEchoingEngine:
+    """Minimal fake proving run_id correlation end-to-end.
+
+    Records the run_id it was invoked with and echoes it back in its own
+    ServiceResult -- exactly the behavior every real step engine already
+    implements via the codebase-wide ``run_id = run_id if run_id is not
+    None else str(uuid.uuid4())`` pattern (confirmed directly in
+    step3_universal_eligibility.py, step4_setup_validation_engine.py,
+    step5_proposal_engine.py, daily_price_ingestion.py, data_validator.py,
+    mutation_detector.py, feature_engine.py, market_regime_engine.py,
+    benchmark_etf_loader.py, universe_snapshot.py, outcome_queue.py). This
+    fake stands in for that already-correct behavior so the test doesn't
+    need a full real-DB fixture run through every engine.
+    """
+
+    def __init__(self) -> None:
+        self.calls: list[dict] = []
+
+    def run(self, **kwargs):
+        self.calls.append(kwargs)
+        return ServiceResult(
+            status=service_result.STATUS_SUCCESS,
+            run_id=kwargs["run_id"],
+            rows_processed=0,
+        )
+
+
+class TestRunIdCorrelation:
+    """A single run_id must correlate pipeline_runs, at least one
+    pipeline_run_diagnostics row, and at least one step engine's own
+    ServiceResult.run_id -- verified end-to-end through one fixture run."""
+
+    def test_run_id_correlates_across_pipeline_runs_diagnostics_and_step_engine(
+        self,
+    ) -> None:
+        from app.services.diagnostics.funnel_diagnostics import (
+            SetupModeFunnelDiagnosticsService,
+        )
+
+        db = FakeDb()
+        echoing_engine = _RunIdEchoingEngine()
+        diagnostics = SetupModeFunnelDiagnosticsService(db_manager=db)
+        fixed_run_id = "11111111-1111-4111-8111-111111111111"
+
+        orch = build_orchestrator(
+            db,
+            eligibility_engine=echoing_engine,
+            diagnostics_service=diagnostics,
+        )
+        result = orch.run(RUN_DATE, run_id=fixed_run_id)
+
+        # 1. pipeline_runs row carries the same run_id.
+        insert_calls = [
+            e for e in db.executed
+            if "INSERT" in e[0].upper() and "PIPELINE_RUNS" in e[0].upper()
+        ]
+        assert insert_calls, "expected an INSERT INTO pipeline_runs"
+        assert any(fixed_run_id in params for _, params, _ in insert_calls), (
+            "pipeline_runs INSERT params must include the same run_id"
+        )
+
+        # 2. At least one pipeline_run_diagnostics row carries the same run_id
+        #    (SetupModeFunnelDiagnosticsService._collect_metrics always emits
+        #    a proposal.final_count row even against an empty/fake DB).
+        diag_calls = [e for e in db.executed if "PIPELINE_RUN_DIAGNOSTICS" in e[0].upper()]
+        assert diag_calls, "expected at least one INSERT INTO pipeline_run_diagnostics"
+        assert any(fixed_run_id in params for _, params, _ in diag_calls), (
+            "pipeline_run_diagnostics INSERT params must include the same run_id"
+        )
+
+        # 3. The step engine invoked (Step 3) received AND echoed back the
+        #    same run_id in its own ServiceResult.
+        assert echoing_engine.calls, "expected the step3 engine to be invoked"
+        assert echoing_engine.calls[0]["run_id"] == fixed_run_id
+
+        # 4. The orchestrator's own top-level ServiceResult is the ultimate
+        #    source of truth and must carry the same value too.
+        assert result.run_id == fixed_run_id
+        assert result.metadata["run_id"] == fixed_run_id
