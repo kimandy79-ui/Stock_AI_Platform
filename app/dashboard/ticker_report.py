@@ -210,6 +210,7 @@ def _fetch_all_data(
         "config_json":       {},   # config for setup_config_id
         "all_configs":       {},   # setup_type → {config_id, config_json}
         "risk_cfg":          {},   # risk_label_config ranking block
+        "buy_rules":         {},   # risk_label_config buy_rules block
         "sector_etf_map":    {},   # sector → etf_ticker from DB table
         "next_earnings_row": None, # (earnings_date, confidence) or None
         "warnings":          [],
@@ -327,6 +328,7 @@ def _fetch_all_data(
                     else rlc_row[0]
                 ) or {}
                 result["risk_cfg"] = rlc.get("ranking", {})
+                result["buy_rules"] = rlc.get("buy_rules", {})
 
             # sector_etf_map table
             try:
@@ -488,7 +490,10 @@ def _penalties_and_score(
     L.append(_check("setup_score >= min_setup_score", pen_sc, min_score, ">="))
 
 
-def _section_breakout(L: list[str], feat: dict, r4: dict, cfg: dict) -> None:
+def _section_breakout(
+    L: list[str], feat: dict, r4: dict, cfg: dict,
+    real_max_stop: float, resolved_stop_dist: float | None,
+) -> None:
     val = cfg.get("validation", {})
     expl: dict = r4.get("explanation_json") or {}
 
@@ -498,13 +503,16 @@ def _section_breakout(L: list[str], feat: dict, r4: dict, cfg: dict) -> None:
     min_rvol    = val.get("min_rvol_breakout", "—")
     rvol_hard   = val.get("rvol_is_hard", True)
     min_score   = val.get("min_setup_score", "—")
-    max_stop    = val.get("max_stop_distance_pct", "—")
+    # The real BUY/WATCHLIST stop-distance gate is risk_label_config.buy_rules
+    # .max_stop_distance_pct (step5_proposal_engine.py), not this setup_config's
+    # own copy of the field — the latter is never read for that decision.
+    max_stop    = real_max_stop
 
     resistance  = feat.get("resistance_level")
     bp          = feat.get("breakout_proximity")
     range_dur   = feat.get("range_duration")
     rvol20      = feat.get("rvol20") or r4.get("rvol")
-    stop_dist   = r4.get("stop_distance_pct")
+    stop_dist   = resolved_stop_dist
 
     L.append("    HARD CHECKS:")
     res_ok = resistance is not None
@@ -553,7 +561,10 @@ def _section_breakout(L: list[str], feat: dict, r4: dict, cfg: dict) -> None:
     L.append(f"      target_is_structural = {_bool_str(r4.get('target_is_structural'))}")
 
 
-def _section_pullback(L: list[str], feat: dict, r4: dict, cfg: dict) -> None:
+def _section_pullback(
+    L: list[str], feat: dict, r4: dict, cfg: dict,
+    real_max_stop: float, resolved_stop_dist: float | None,
+) -> None:
     val = cfg.get("validation", {})
     expl: dict = r4.get("explanation_json") or {}
 
@@ -561,14 +572,16 @@ def _section_pullback(L: list[str], feat: dict, r4: dict, cfg: dict) -> None:
     support_tol  = val.get("support_break_tol", "—")
     rvol_bonus_t = val.get("rvol_bonus_threshold", "—")
     min_score    = val.get("min_setup_score", "—")
-    max_stop     = val.get("max_stop_distance_pct", "—")
+    # Real gate lives in risk_label_config.buy_rules.max_stop_distance_pct —
+    # this setup_config's own copy is never read for that decision.
+    max_stop     = real_max_stop
 
     close_adj  = feat.get("close_adj")
     ema200     = feat.get("ema200")
     ema20      = feat.get("ema20")
     ema50      = feat.get("ema50")
     rvol20     = feat.get("rvol20") or r4.get("rvol")
-    stop_dist  = r4.get("stop_distance_pct")
+    stop_dist  = resolved_stop_dist
 
     # pullback_depth_pct — fallback priority: feat → step4 expl → step4 row
     pb_depth = feat.get("pullback_depth_pct")
@@ -651,7 +664,10 @@ def _section_pullback(L: list[str], feat: dict, r4: dict, cfg: dict) -> None:
     L.append(f"      target_is_structural = {_bool_str(r4.get('target_is_structural'))}")
 
 
-def _section_trend_continuation(L: list[str], feat: dict, r4: dict, cfg: dict) -> None:
+def _section_trend_continuation(
+    L: list[str], feat: dict, r4: dict, cfg: dict,
+    real_max_stop: float, resolved_stop_dist: float | None,
+) -> None:
     val = cfg.get("validation", {})
     expl: dict = r4.get("explanation_json") or {}
 
@@ -661,7 +677,9 @@ def _section_trend_continuation(L: list[str], feat: dict, r4: dict, cfg: dict) -
     roc_max    = val.get("roc_max", "—")
     max_ext    = val.get("max_ext", "—")
     min_score  = val.get("min_setup_score", "—")
-    max_stop   = val.get("max_stop_distance_pct", "—")
+    # Real gate lives in risk_label_config.buy_rules.max_stop_distance_pct —
+    # this setup_config's own copy is never read for that decision.
+    max_stop   = real_max_stop
 
     close_adj   = feat.get("close_adj")
     ema50       = feat.get("ema50")
@@ -671,7 +689,7 @@ def _section_trend_continuation(L: list[str], feat: dict, r4: dict, cfg: dict) -
     roc20       = feat.get("roc20")
     dist_ema50  = feat.get("distance_to_ema50_pct")
     rvol20      = feat.get("rvol20") or r4.get("rvol")
-    stop_dist   = r4.get("stop_distance_pct")
+    stop_dist   = resolved_stop_dist
     rvol_mod    = val.get("rvol_moderate_threshold", "—")
 
     L.append("    HARD CHECKS:")
@@ -726,17 +744,26 @@ def _section_trend_continuation(L: list[str], feat: dict, r4: dict, cfg: dict) -
     L.append(f"      target_is_structural = {_bool_str(r4.get('target_is_structural'))}")
 
 
-def _section_consolidation_base(L: list[str], feat: dict, r4: dict, cfg: dict) -> None:
+def _section_consolidation_base(
+    L: list[str], feat: dict, r4: dict, cfg: dict,
+    real_max_stop: float, resolved_stop_dist: float | None,
+) -> None:
     val = cfg.get("validation", {})
     expl: dict = r4.get("explanation_json") or {}
 
-    min_dur    = val.get("min_base_duration", "—")
-    min_tight  = val.get("min_range_tightness_score", "—")
+    # Field names must match what validate_consolidation_base() actually reads
+    # under setup_config["validation"] (m14_setup_validators.py) — this section
+    # previously read three keys ("min_base_duration", "min_range_tightness_score",
+    # "earnings_avoidance_days"/"min_days_to_earnings") that don't exist in any
+    # consolidation_base config, so these checks always rendered as "—".
+    min_dur    = val.get("min_range_duration", "—")
+    min_tight  = val.get("min_tightness", "—")
     max_atr    = val.get("max_atr_pct", "—")
-    earn_avoid = val.get("earnings_avoidance_days",
-                         val.get("min_days_to_earnings", "—"))
+    earn_avoid = val.get("min_earnings_days", "—")
     min_score  = val.get("min_setup_score", "—")
-    max_stop   = val.get("max_stop_distance_pct", "—")
+    # Real gate lives in risk_label_config.buy_rules.max_stop_distance_pct —
+    # this setup_config's own copy is never read for that decision.
+    max_stop   = real_max_stop
 
     range_dur  = feat.get("range_duration")
     tightness  = feat.get("range_tightness_score")
@@ -745,11 +772,11 @@ def _section_consolidation_base(L: list[str], feat: dict, r4: dict, cfg: dict) -
     base_high  = feat.get("base_high")
     close_raw  = feat.get("close_raw")
     earn_days  = feat.get("days_to_earnings_bd") or r4.get("earnings_days")
-    stop_dist  = r4.get("stop_distance_pct")
+    stop_dist  = resolved_stop_dist
 
     L.append("    HARD CHECKS:")
-    L.append(_check("range_duration >= min_base_duration", range_dur, min_dur, ">="))
-    L.append(_check("range_tightness_score >= min_range_tightness", tightness, min_tight, ">="))
+    L.append(_check("range_duration >= min_range_duration", range_dur, min_dur, ">="))
+    L.append(_check("range_tightness_score >= min_tightness", tightness, min_tight, ">="))
     L.append(_check("atr_pct <= max_atr_pct", atr_pct, max_atr, "<="))
 
     if base_low is not None and base_high is not None and close_raw is not None:
@@ -764,7 +791,7 @@ def _section_consolidation_base(L: list[str], feat: dict, r4: dict, cfg: dict) -
         L.append(f"      base_low <= close_raw <= base_high             "
                  f"base_low={_fmt(base_low)}  base_high={_fmt(base_high)}")
 
-    L.append(_check("days_to_earnings_bd > earnings_avoidance_days",
+    L.append(_check("days_to_earnings_bd > min_earnings_days",
                      earn_days, earn_avoid, ">"))
     if stop_dist is not None:
         L.append(_check("stop_distance_pct <= max_stop_distance_pct", stop_dist, max_stop, "<="))
@@ -813,8 +840,15 @@ def build_ticker_report(
     config_json   = data["config_json"]
     all_configs   = data["all_configs"]
     risk_cfg      = data["risk_cfg"]
+    buy_rules     = data["buy_rules"]
     sector_etf_db = data["sector_etf_map"]
     db_warnings   = data["warnings"]
+
+    # The real BUY/WATCHLIST stop-distance gate (step5_proposal_engine.py) reads
+    # this from risk_label_config.buy_rules, never from a setup_config's own
+    # "max_stop_distance_pct" — use the same source and same fallback here so
+    # the diagnostic report matches what the pipeline actually enforced.
+    real_max_stop = float(buy_rules.get("max_stop_distance_pct", 0.10))
 
     # Feature snapshot (from step3 or empty)
     feat     = step3_row.get("feature_snapshot_json") or {}
@@ -1212,13 +1246,13 @@ def build_ticker_report(
 
         # Setup-specific validation detail
         if selected_setup == "breakout":
-            _section_breakout(L, feat, selected_r4, selected_cfg or {})
+            _section_breakout(L, feat, selected_r4, selected_cfg or {}, real_max_stop, stop_dist)
         elif selected_setup == "pullback":
-            _section_pullback(L, feat, selected_r4, selected_cfg or {})
+            _section_pullback(L, feat, selected_r4, selected_cfg or {}, real_max_stop, stop_dist)
         elif selected_setup == "trend_continuation":
-            _section_trend_continuation(L, feat, selected_r4, selected_cfg or {})
+            _section_trend_continuation(L, feat, selected_r4, selected_cfg or {}, real_max_stop, stop_dist)
         elif selected_setup == "consolidation_base":
-            _section_consolidation_base(L, feat, selected_r4, selected_cfg or {})
+            _section_consolidation_base(L, feat, selected_r4, selected_cfg or {}, real_max_stop, stop_dist)
         blank()
 
         # Explanation JSON supplemental evidence
