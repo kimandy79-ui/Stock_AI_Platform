@@ -773,6 +773,43 @@ class TestEngineOffline:
 # ===========================================================================
 # 7. Universe config parity (unit)
 # ===========================================================================
+class TestExcludeBenchmarksDeadKeyRemoval:
+    """CODER_NOTE v3 item 4 — exclude_benchmarks removed from _UNIVERSE_BLOCK.
+    _parse_universe_config never read it (confirmed by source), so eligibility
+    outcomes must be byte-identical with or without the key present."""
+
+    def test_current_universe_block_has_no_exclude_benchmarks(self) -> None:
+        from app.services.config import default_configs
+        assert "exclude_benchmarks" not in default_configs._UNIVERSE_BLOCK
+
+    def test_parse_universe_config_identical_with_and_without_key(self) -> None:
+        from app.services.screening.step3_universal_eligibility import (
+            _parse_universe_config,
+        )
+        from app.services.config import default_configs
+
+        current = dict(default_configs._UNIVERSE_BLOCK)
+        old_shaped = {**current, "exclude_benchmarks": True}
+
+        assert _parse_universe_config(current) == _parse_universe_config(old_shaped)
+
+    def test_check_eligibility_identical_with_and_without_key(self) -> None:
+        from app.services.config import default_configs
+
+        current = dict(default_configs._UNIVERSE_BLOCK)
+        old_shaped = {**current, "exclude_benchmarks": True}
+
+        for ub in (current, old_shaped):
+            min_price = float(ub["min_price"])
+            min_adv = float(ub["min_avg_dollar_volume_20d"])
+            allowed = list(ub.get("allowed_symbol_types", ["stock"]))
+            reasons_pass = _check_eligibility(_row(), min_price, min_adv, allowed)
+            reasons_fail = _check_eligibility(_row(symbol_type="etf"), min_price, min_adv, allowed)
+            assert reasons_pass == []
+            assert "not_stock" in reasons_fail
+        # identical regardless of whether exclude_benchmarks was present at all
+
+
 class TestUniverseParity:
     def test_identical_configs_pass(self):
         ub = _assert_universe_parity(ALL_SETUP_CONFIGS)

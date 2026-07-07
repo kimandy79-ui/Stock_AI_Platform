@@ -27,7 +27,6 @@ _UNIVERSE_BLOCK: Final[dict[str, Any]] = {
     "min_price": 5,
     "min_avg_dollar_volume_20d": 10_000_000,
     "allowed_symbol_types": ["stock"],
-    "exclude_benchmarks": True,
 }
 
 _FEATURES_BLOCK: Final[dict[str, Any]] = {
@@ -62,8 +61,7 @@ DEFAULT_SETUP_CONFIGS: Final[dict[str, dict[str, Any]]] = {
             "min_base_duration": 10,
             "min_rvol_breakout": 1.5,
             "rvol_is_hard": True,
-            "min_close_strength": 0.5,
-            "max_stop_distance_pct": 0.10,
+            "min_atr_stop_floor_multiple": 0.5,
             "k_atr_stop": 1.0,
             "buffer_atr_multiple": 0.25,
             "min_rr": 1.8,
@@ -90,12 +88,14 @@ DEFAULT_SETUP_CONFIGS: Final[dict[str, dict[str, Any]]] = {
             "pull_band": 0.04,
             "max_pullback_depth": 0.12,
             "support_break_tol": 0.02,
+            "rebound_required": True,
+            "min_rebound_slope": 0.002,
             "k_atr_stop": 1.2,
             "buffer_atr_multiple": 0.25,
             "min_rr": 1.8,
             "rvol_is_hard": False,  # never hard reject on low RVOL (AD-22.23)
             "rvol_bonus_threshold": 1.3,
-            "max_stop_distance_pct": 0.10,
+            "min_atr_stop_floor_multiple": 0.5,
             "min_setup_score": 55,
         },
         "scoring_weights": {
@@ -126,7 +126,7 @@ DEFAULT_SETUP_CONFIGS: Final[dict[str, dict[str, Any]]] = {
             "min_rr": 1.8,
             "rvol_is_hard": False,
             "rvol_moderate_threshold": 1.2,
-            "max_stop_distance_pct": 0.10,
+            "min_atr_stop_floor_multiple": 0.5,
             "min_setup_score": 55,
         },
         "scoring_weights": {
@@ -152,13 +152,18 @@ DEFAULT_SETUP_CONFIGS: Final[dict[str, dict[str, Any]]] = {
             "max_atr_pct": 0.05,
             "min_compression": 50,
             "min_range_duration": 10,
+            "price_above_base_tolerance": 0.01,
             "min_dry_up": 40,
             "min_earnings_days": 5,
             "k_atr_stop": 1.0,
             "buffer_atr_multiple": 0.25,
             "min_rr": 1.8,
             "rvol_required": False,  # not required; controlled/low vol acceptable (AD-22.23)
-            "max_stop_distance_pct": 0.10,
+            "min_atr_stop_floor_multiple": 0.3,
+            # False here freezes v1's existing live behavior exactly (CODER_NOTE v3
+            # item 2, option b) — min_compression/min_dry_up stay read-but-unenforced
+            # until a newly-cloned config version sets this True and is activated.
+            "enforce_compression_floor": False,
             "min_setup_score": 55,
         },
         "scoring_weights": {
@@ -214,8 +219,7 @@ PRESET_SETUP_CONFIGS: Final[list[dict[str, Any]]] = [
             "min_base_duration": 20,
             "min_rvol_breakout": 1.5,
             "rvol_is_hard": True,
-            "min_close_strength": 0.5,
-            "max_stop_distance_pct": 0.10,
+            "min_atr_stop_floor_multiple": 0.5,
             "k_atr_stop": 1.0,
             "buffer_atr_multiple": 0.25,
             "min_rr": 1.8,
@@ -242,8 +246,7 @@ PRESET_SETUP_CONFIGS: Final[list[dict[str, Any]]] = [
             "min_base_duration": 35,
             "min_rvol_breakout": 2.0,
             "rvol_is_hard": True,
-            "min_close_strength": 0.6,
-            "max_stop_distance_pct": 0.08,
+            "min_atr_stop_floor_multiple": 0.5,
             "k_atr_stop": 1.0,
             "buffer_atr_multiple": 0.25,
             "min_rr": 2.0,
@@ -268,13 +271,18 @@ PRESET_SETUP_CONFIGS: Final[list[dict[str, Any]]] = [
             "max_atr_pct": 0.035,
             "min_compression": 65,
             "min_range_duration": 15,
+            "price_above_base_tolerance": 0.01,
             "min_dry_up": 55,
             "min_earnings_days": 5,
-            "max_stop_distance_pct": 0.08,
+            "min_atr_stop_floor_multiple": 0.3,
             "k_atr_stop": 1.0,
             "buffer_atr_multiple": 0.25,
             "min_rr": 1.8,
             "rvol_required": False,  # not required; controlled/low vol acceptable (AD-22.23)
+            # Left False (not enabled) — turning this on is a threshold-tuning
+            # decision reserved for post-diagnostics work (CLAUDE.md), even for a
+            # simulation-only preset. A human can clone+flip this explicitly later.
+            "enforce_compression_floor": False,
             "min_setup_score": 60,
         },
         "scoring_weights": dict(DEFAULT_SETUP_CONFIGS["consolidation_base"]["scoring_weights"]),
@@ -303,7 +311,7 @@ PRESET_SETUP_CONFIGS: Final[list[dict[str, Any]]] = [
             "min_rr": 1.8,
             "rvol_is_hard": False,
             "rvol_moderate_threshold": 1.2,
-            "max_stop_distance_pct": 0.08,
+            "min_atr_stop_floor_multiple": 0.5,
             "min_setup_score": 65,
         },
         "scoring_weights": {
@@ -331,12 +339,14 @@ PRESET_SETUP_CONFIGS: Final[list[dict[str, Any]]] = [
             "pull_band": 0.04,
             "max_pullback_depth": 0.08,
             "support_break_tol": 0.02,
+            "rebound_required": True,
+            "min_rebound_slope": 0.002,
             "k_atr_stop": 1.2,
             "buffer_atr_multiple": 0.25,
             "min_rr": 1.8,
             "rvol_is_hard": False,  # never hard reject on low RVOL (AD-22.23)
             "rvol_bonus_threshold": 1.3,
-            "max_stop_distance_pct": 0.10,
+            "min_atr_stop_floor_multiple": 0.5,
             "min_setup_score": 55,
         },
         "scoring_weights": dict(DEFAULT_SETUP_CONFIGS["pullback"]["scoring_weights"]),
@@ -357,12 +367,14 @@ PRESET_SETUP_CONFIGS: Final[list[dict[str, Any]]] = [
             "pull_band": 0.04,
             "max_pullback_depth": 0.15,
             "support_break_tol": 0.04,
+            "rebound_required": True,
+            "min_rebound_slope": 0.002,
             "k_atr_stop": 1.2,
             "buffer_atr_multiple": 0.25,
             "min_rr": 1.8,
             "rvol_is_hard": False,
             "rvol_bonus_threshold": 1.3,
-            "max_stop_distance_pct": 0.10,
+            "min_atr_stop_floor_multiple": 0.5,
             "min_setup_score": 55,
         },
         "scoring_weights": dict(DEFAULT_SETUP_CONFIGS["pullback"]["scoring_weights"]),
@@ -394,6 +406,10 @@ DEFAULT_RISK_LABEL_CONFIG: Final[dict[str, Any]] = {
         "allowed_buy_labels": ["low", "medium"],
         "block_market_regimes": ["extreme_risk"],
         "block_if_regime_null": True,
+        # The actual BUY/WATCHLIST stop-distance hard gate (step5_proposal_engine.py
+        # Fix 2) reads this key — not the max_stop_distance_pct copy carried in each
+        # setup_config's own validation block, which is display-only.
+        "max_stop_distance_pct": 0.10,
     },
     "market_regime": {
         "high_risk_vix": 25,
@@ -430,6 +446,26 @@ DEFAULT_RISK_LABEL_CONFIG: Final[dict[str, Any]] = {
         "min_resolved_outcomes_pct": 0.85,
         "max_drawdown_constraint_pct": 25,
     },
+}
+
+# --------------------------------------------------------------------------- #
+# Risk label config v2 (CODER_NOTE v3 item 6) — promotes earnings/macro penalty
+# config to a single shared source, instead of the same _EARNINGS_BLOCK/
+# _MACRO_BLOCK values being duplicated identically across every setup_config.
+# Cloned from v1 (never an edit to the active risk_label_config_v1 row — config
+# is immutable; clone-and-version per CLAUDE.md). Seeded via
+# ConfigService.seed_risk_label_config_v2() with active_flag=FALSE always; must
+# be explicitly activated by a human before m14_setup_validators.py's dual-read
+# fallback (_resolve_earnings_macro_cfg) prefers it over each setup_config's own
+# copy. Values are identical to what's already active today via the per-setup-
+# config route, so activating this is a zero-behavior-change operation.
+# --------------------------------------------------------------------------- #
+DEFAULT_RISK_LABEL_CONFIG_V2: Final[dict[str, Any]] = {
+    **DEFAULT_RISK_LABEL_CONFIG,
+    "config_id": "risk_label_config_v2",
+    "version": "risk_v2",
+    "earnings": _EARNINGS_BLOCK,
+    "macro_event_risk": _MACRO_BLOCK,
 }
 
 # --------------------------------------------------------------------------- #
@@ -515,6 +551,14 @@ def get_preset_setup_configs() -> list[dict[str, Any]]:
 def get_default_risk_label_config() -> dict[str, Any]:
     """Return a copy of the default risk-label config."""
     return dict(DEFAULT_RISK_LABEL_CONFIG)
+
+
+def get_risk_label_config_v2() -> dict[str, Any]:
+    """Return a copy of the v2 risk-label config (shared earnings/macro block).
+
+    Not active by default — see ConfigService.seed_risk_label_config_v2.
+    """
+    return dict(DEFAULT_RISK_LABEL_CONFIG_V2)
 
 
 def get_default_runtime_configs() -> dict[str, dict[str, Any]]:

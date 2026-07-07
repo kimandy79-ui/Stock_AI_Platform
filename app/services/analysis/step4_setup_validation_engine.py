@@ -93,6 +93,16 @@ WHERE active_flag = TRUE
 ORDER BY setup_type
 """
 
+# Read the single active risk_label_config (once per run) — CODER_NOTE v3 item 6.
+# Threaded into validate_setup() so validators can prefer its shared
+# earnings/macro block over each setup_config's own copy, when present.
+_SQL_READ_ACTIVE_RISK_LABEL_CONFIG: Final[str] = """
+SELECT config_json
+FROM risk_label_config
+WHERE active_flag = TRUE
+LIMIT 1
+"""
+
 # Read features + prices for signal_date (for all routed tickers in one query)
 _SQL_READ_FEATURES_PRICES: Final[str] = """
 SELECT
@@ -280,6 +290,30 @@ def _load_active_setup_configs(
     return configs
 
 
+def _load_active_risk_label_config(
+    db_mgr: _DbManagerLike, db_role: str
+) -> dict[str, Any]:
+    """Return the active risk_label_config payload, or {} if none is active.
+
+    An empty dict is a safe default — _resolve_earnings_macro_cfg() in
+    m14_setup_validators.py falls back to each setup_config's own
+    earnings/macro_event_risk copy when the shared block is absent.
+    """
+    conn = db_mgr.connect(db_role)
+    try:
+        row = conn.execute(_SQL_READ_ACTIVE_RISK_LABEL_CONFIG).fetchone()
+    finally:
+        conn.close()
+    if not row or not row[0]:
+        return {}
+    config_json_raw = row[0]
+    return (
+        json.loads(config_json_raw)
+        if isinstance(config_json_raw, str)
+        else config_json_raw
+    )
+
+
 def _read_routed_candidates(
     db_mgr: _DbManagerLike, db_role: str, signal_date: date
 ) -> list[dict[str, Any]]:
@@ -403,6 +437,7 @@ class Step4SetupValidationEngine:
         db_role: str = DB_ROLE_PROD,
         run_id: str | None = None,
         setup_configs: dict[str, dict[str, Any]] | None = None,
+        risk_label_config: dict[str, Any] | None = None,
     ) -> ServiceResult:
         """Execute Step 4 for one signal_date.
 
@@ -417,6 +452,13 @@ class Step4SetupValidationEngine:
         setup_configs:
             Pre-loaded dict of {setup_type: config_dict}. If None, loaded from DB.
             Pass explicitly in tests to avoid DB config reads.
+        risk_label_config:
+            Pre-loaded active risk_label_config payload. If None, loaded from DB.
+            Pass explicitly in tests to avoid DB config reads. Passed through to
+            validate_setup() so validators can prefer its shared earnings/macro
+            block (CODER_NOTE v3 item 6) over each setup_config's own copy, when
+            present — {} (the default when nothing is active) falls back to the
+            setup_config's own copy for every setup_type, unchanged from today.
 
         Returns
         -------
@@ -466,6 +508,19 @@ class Step4SetupValidationEngine:
                 warnings=[msg],
                 metadata=_empty_metadata(db_role, signal_date, run_id),
             )
+
+        # Load the active risk_label_config (optional — {} is a safe fallback;
+        # a read problem here must not fail Step 4, unlike setup_configs above).
+        if risk_label_config is None:
+            try:
+                risk_label_config = _load_active_risk_label_config(self._db, db_role)
+            except Exception as exc:
+                log.warning(
+                    "Step4: risk_label_config load failed (%s: %s); "
+                    "falling back to each setup_config's own earnings/macro block",
+                    type(exc).__name__, exc,
+                )
+                risk_label_config = {}
 
         # Read routed candidates
         try:
@@ -542,7 +597,7 @@ class Step4SetupValidationEngine:
                     )
                     continue
                 try:
-                    result = validate_setup(setup_type, feat, cfg)
+                    result = validate_setup(setup_type, feat, cfg, risk_label_config)
                 except Exception as exc:
                     warnings.append(
                         f"{ticker}/{setup_type}: validation error {type(exc).__name__}: {exc}"

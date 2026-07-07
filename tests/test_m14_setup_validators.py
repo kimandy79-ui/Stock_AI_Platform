@@ -472,6 +472,43 @@ class TestBreakoutValidator:
         assert not any("rvol_below_hard_threshold" in r for r in result.pass_fail_reasons)
 
 
+class TestDeadKeyRemovalNoBehaviorChange:
+    """CODER_NOTE v3 items 1 & 5 — max_stop_distance_pct and min_close_strength
+    removed from setup_config.validation templates (confirmed unused by
+    validate_breakout). Injecting them back with adversarial values must not
+    change the validator's output at all — proves they were truly inert."""
+
+    def test_min_close_strength_adversarial_value_no_effect(self) -> None:
+        feat = _breakout_feat()
+        cfg_current = _breakout_config()  # matches today's real (post-removal) shape
+        cfg_old_shaped = _breakout_config(min_close_strength=0.99)  # re-add, extreme value
+        r1 = validate_breakout(feat, cfg_current)
+        r2 = validate_breakout(feat, cfg_old_shaped)
+        assert r1.setup_passed == r2.setup_passed
+        assert r1.setup_score == r2.setup_score
+        assert r1.pass_fail_reasons == r2.pass_fail_reasons
+
+    def test_max_stop_distance_pct_adversarial_value_no_effect(self) -> None:
+        feat = _breakout_feat()
+        cfg_current = _breakout_config()
+        cfg_old_shaped = _breakout_config(max_stop_distance_pct=0.001)  # re-add, tiny value
+        r1 = validate_breakout(feat, cfg_current)
+        r2 = validate_breakout(feat, cfg_old_shaped)
+        assert r1.setup_passed == r2.setup_passed
+        assert r1.setup_score == r2.setup_score
+        assert r1.pass_fail_reasons == r2.pass_fail_reasons
+
+    def test_current_default_configs_breakout_has_neither_key(self) -> None:
+        from app.services.config import default_configs
+        v1 = default_configs.DEFAULT_SETUP_CONFIGS["breakout"]["validation"]
+        assert "min_close_strength" not in v1
+        assert "max_stop_distance_pct" not in v1
+        for p in default_configs.get_preset_setup_configs():
+            if p["setup_type"] == "breakout":
+                assert "min_close_strength" not in p["validation"], p["config_id"]
+                assert "max_stop_distance_pct" not in p["validation"], p["config_id"]
+
+
 # ===========================================================================
 # PULLBACK tests
 # ===========================================================================
@@ -740,6 +777,98 @@ class TestConsolidationBaseValidator:
         feat = _cb_feat(range_tightness_score=50.0)  # would fail default 60
         result = validate_consolidation_base(feat, cfg)
         assert not any("range_tightness_too_low" in r for r in result.pass_fail_reasons)
+
+
+# ===========================================================================
+# Earnings/macro dual-read fallback (CODER_NOTE v3 item 6)
+# ===========================================================================
+
+class TestEarningsMacroDualReadFallback:
+    """risk_cfg is optional and, when its shared earnings/macro_event_risk
+    block is absent, every validator must reproduce today's exact behavior
+    (falls back to the setup_config's own copy). Only when risk_cfg carries
+    the shared block does it take priority."""
+
+    def test_no_risk_cfg_arg_falls_back_to_setup_config_copy(self) -> None:
+        feat = _breakout_feat(days_to_earnings_bd=2)  # inside avoid_within_bd=5
+        cfg = _breakout_config()
+        result = validate_breakout(feat, cfg)  # risk_cfg omitted entirely
+        expected = -15 * (1.0 - 2 / 5)
+        assert result.earnings_penalty == pytest.approx(expected)
+
+    def test_empty_risk_cfg_falls_back_to_setup_config_copy(self) -> None:
+        feat = _breakout_feat(days_to_earnings_bd=2)
+        cfg = _breakout_config()
+        result = validate_breakout(feat, cfg, risk_cfg={})
+        expected = -15 * (1.0 - 2 / 5)
+        assert result.earnings_penalty == pytest.approx(expected)
+
+    def test_risk_cfg_missing_shared_block_falls_back(self) -> None:
+        """Simulates today's active risk_label_config_v1, which carries no
+        'earnings'/'macro_event_risk' keys at all."""
+        feat = _breakout_feat(days_to_earnings_bd=2)
+        cfg = _breakout_config()
+        risk_cfg_v1_shape = {"buy_rules": {"min_rr_for_buy": 1.8}}  # no shared block
+        result = validate_breakout(feat, cfg, risk_cfg=risk_cfg_v1_shape)
+        expected = -15 * (1.0 - 2 / 5)  # setup_config's own copy still wins
+        assert result.earnings_penalty == pytest.approx(expected)
+
+    def test_risk_cfg_shared_earnings_block_takes_priority(self) -> None:
+        """Once a risk_label_config version carrying the shared block is
+        active, its numbers must win over the setup_config's own copy."""
+        feat = _breakout_feat(days_to_earnings_bd=2)
+        cfg = _breakout_config()  # own copy: avoid_within_bd=5, penalty_points_max=-15
+        risk_cfg_v2_shape = {
+            "earnings": {"avoid_within_bd": 10, "penalty_points_max": -30},
+        }
+        result = validate_breakout(feat, cfg, risk_cfg=risk_cfg_v2_shape)
+        expected = -30 * (1.0 - 2 / 10)  # risk_cfg's numbers, not the config's own
+        assert result.earnings_penalty == pytest.approx(expected)
+
+    def test_risk_cfg_shared_macro_block_takes_priority(self) -> None:
+        feat = _breakout_feat(macro_event_risk_flag=True)
+        cfg = _breakout_config()  # own copy: penalty_points=-10
+        risk_cfg_v2_shape = {
+            "macro_event_risk": {"enabled": True, "penalty_points": -25},
+        }
+        result = validate_breakout(feat, cfg, risk_cfg=risk_cfg_v2_shape)
+        assert result.macro_penalty == pytest.approx(-25.0)
+
+    def test_zero_behavior_change_when_shared_block_matches_own_copy(self) -> None:
+        """If/when risk_label_config_v2 (identical values to every setup_config's
+        own copy, by construction) is active, the resolved penalty must be
+        byte-identical to today's fallback-only behavior."""
+        feat = _pullback_feat(days_to_earnings_bd=3, macro_event_risk_flag=True)
+        cfg = _pullback_config()
+        without_risk_cfg = validate_pullback(feat, cfg)
+        v2_shaped_risk_cfg = {
+            "earnings": {"avoid_within_bd": 5, "penalty_points_max": -15},
+            "macro_event_risk": {"enabled": True, "penalty_points": -10},
+        }
+        with_v2_risk_cfg = validate_pullback(feat, cfg, risk_cfg=v2_shaped_risk_cfg)
+        assert with_v2_risk_cfg.earnings_penalty == pytest.approx(without_risk_cfg.earnings_penalty)
+        assert with_v2_risk_cfg.macro_penalty == pytest.approx(without_risk_cfg.macro_penalty)
+
+    def test_dual_read_applies_to_all_four_setup_types(self) -> None:
+        risk_cfg = {"earnings": {"avoid_within_bd": 8, "penalty_points_max": -20}}
+        cases = [
+            (validate_breakout, _breakout_feat(days_to_earnings_bd=2), _breakout_config()),
+            (validate_pullback, _pullback_feat(days_to_earnings_bd=2), _pullback_config()),
+            (validate_trend_continuation, _tc_feat(days_to_earnings_bd=2), _tc_config()),
+            (validate_consolidation_base, _cb_feat(days_to_earnings_bd=2), _cb_config()),
+        ]
+        expected = -20 * (1.0 - 2 / 8)
+        for validator, feat, cfg in cases:
+            result = validator(feat, cfg, risk_cfg)
+            assert result.earnings_penalty == pytest.approx(expected), validator.__name__
+
+    def test_validate_setup_dispatcher_forwards_risk_cfg(self) -> None:
+        risk_cfg = {"earnings": {"avoid_within_bd": 8, "penalty_points_max": -20}}
+        feat = _breakout_feat(days_to_earnings_bd=2)
+        cfg = _breakout_config()
+        result = validate_setup(constants.SETUP_BREAKOUT, feat, cfg, risk_cfg)
+        expected = -20 * (1.0 - 2 / 8)
+        assert result.earnings_penalty == pytest.approx(expected)
 
 
 # ===========================================================================
@@ -1411,6 +1540,94 @@ class TestStep4SetupValidationEngineIntegration:
         assert types_written == set(constants.ALLOWED_SETUP_TYPES)
 
 
+class TestStep4EngineRiskLabelConfigThreading:
+    """CODER_NOTE v3 item 6 — Step4SetupValidationEngine.run() threads
+    risk_label_config through to validate_setup(); loads it from DB when not
+    passed explicitly, exactly mirroring the existing setup_configs pattern."""
+
+    @pytest.fixture(autouse=True)
+    def _setup_db(self, tmp_db_paths: dict[str, Path]) -> None:
+        sm.apply_schema("debug")
+
+    def _seed_and_run(
+        self, run_id: str, risk_label_config: dict[str, Any] | None
+    ) -> float:
+        conn = dbm.connect("debug")
+        try:
+            _seed_ticker(conn, "AAPL")
+            _seed_price(conn, "AAPL", SIGNAL_DATE, close_raw=155.0, close_adj=155.0)
+            _seed_feature_v02(conn, "AAPL", SIGNAL_DATE, days_to_earnings_bd=2)
+            _seed_step3_candidate(conn, "AAPL", SIGNAL_DATE, run_id,
+                                  [constants.SETUP_BREAKOUT])
+        finally:
+            conn.close()
+
+        engine = Step4SetupValidationEngine()
+        result = engine.run(
+            SIGNAL_DATE, db_role="debug", run_id=run_id,
+            setup_configs={constants.SETUP_BREAKOUT: _breakout_config()},
+            risk_label_config=risk_label_config,
+        )
+        assert result.status in ("success", "success_with_warnings")
+
+        conn2 = dbm.connect("debug", read_only=True)
+        try:
+            row = conn2.execute(
+                "SELECT earnings_penalty FROM step4_analysis WHERE run_id = ?",
+                [run_id],
+            ).fetchone()
+        finally:
+            conn2.close()
+        assert row is not None
+        return row[0]
+
+    def test_explicit_risk_label_config_param_overrides_penalty(
+        self, tmp_db_paths: dict[str, Path]
+    ) -> None:
+        run_id = str(uuid.uuid4())
+        override = {"earnings": {"avoid_within_bd": 10, "penalty_points_max": -30}}
+        penalty = self._seed_and_run(run_id, risk_label_config=override)
+        expected = -30 * (1.0 - 2 / 10)  # override's numbers, not the config's own (-15/5)
+        assert penalty == pytest.approx(expected)
+
+    def test_no_active_risk_label_config_row_falls_back_gracefully(
+        self, tmp_db_paths: dict[str, Path]
+    ) -> None:
+        """Fresh debug DB, nothing seeded into risk_label_config at all — the
+        engine must still run successfully and reproduce the setup_config's
+        own earnings block (unchanged from before this change)."""
+        run_id = str(uuid.uuid4())
+        penalty = self._seed_and_run(run_id, risk_label_config=None)
+        expected = -15 * (1.0 - 2 / 5)  # _breakout_config()'s own earnings block
+        assert penalty == pytest.approx(expected)
+
+    def test_loads_active_risk_label_config_from_db_when_not_passed(
+        self, tmp_db_paths: dict[str, Path]
+    ) -> None:
+        """An active risk_label_config row with a custom shared earnings block
+        must be picked up automatically when risk_label_config is omitted."""
+        conn = dbm.connect("debug")
+        try:
+            conn.execute(
+                "INSERT INTO risk_label_config "
+                "(config_id, version, config_json, config_hash, active_flag, created_at, notes) "
+                "VALUES (?, ?, ?, ?, TRUE, now(), 'test row')",
+                [
+                    "risk_label_config_test",
+                    "test_v1",
+                    json.dumps({"earnings": {"avoid_within_bd": 10, "penalty_points_max": -30}}),
+                    "test_hash",
+                ],
+            )
+        finally:
+            conn.close()
+
+        run_id = str(uuid.uuid4())
+        penalty = self._seed_and_run(run_id, risk_label_config=None)
+        expected = -30 * (1.0 - 2 / 10)  # from the DB row, not the setup_config's own
+        assert penalty == pytest.approx(expected)
+
+
 # ===========================================================================
 # New gate tests: ATR stop floor (P1-1), pullback rebound (P1-2),
 # consolidation base identified (P1-3), resistance_blocks (P2-1),
@@ -1529,6 +1746,66 @@ class TestAtrStopFloorGate:
         tc_feat = _tc_feat(swing_low=460.0, atr_pct=0.025)
         tc_result = validate_trend_continuation(tc_feat, _tc_config())
         assert not any("stop_below_atr_floor" in r for r in tc_result.pass_fail_reasons)
+
+
+class TestCompressionFloorGate:
+    """CODER_NOTE v3 item 2: min_compression/min_dry_up wired behind the new
+    opt-in enforce_compression_floor flag (default False, option b) — v1's live
+    behavior must stay frozen; enforcement only fires when explicitly enabled."""
+
+    def test_disabled_by_default_low_scores_do_not_fail(self) -> None:
+        """Flag omitted (matches v1/every existing preset) -> no new hard fail,
+        even though both scores sit below their configured minimums."""
+        feat = _cb_feat(atr_compression_score=10.0, volume_dry_up_score=5.0)
+        cfg = _cb_config(min_compression=50, min_dry_up=40)
+        result = validate_consolidation_base(feat, cfg)
+        assert not any("atr_compression_too_low" in r for r in result.pass_fail_reasons)
+        assert not any("volume_dry_up_too_low" in r for r in result.pass_fail_reasons)
+
+    def test_disabled_explicitly_false_low_scores_do_not_fail(self) -> None:
+        feat = _cb_feat(atr_compression_score=10.0, volume_dry_up_score=5.0)
+        cfg = _cb_config(min_compression=50, min_dry_up=40, enforce_compression_floor=False)
+        result = validate_consolidation_base(feat, cfg)
+        assert result.setup_passed is True
+        assert result.pass_fail_reasons == ["passed"]
+
+    def test_enabled_low_compression_fails(self) -> None:
+        feat = _cb_feat(atr_compression_score=10.0, volume_dry_up_score=60.0)
+        cfg = _cb_config(min_compression=50, min_dry_up=40, enforce_compression_floor=True)
+        result = validate_consolidation_base(feat, cfg)
+        assert result.setup_passed is False
+        assert any("atr_compression_too_low(10.0<50.0)" in r for r in result.pass_fail_reasons)
+
+    def test_enabled_low_dry_up_fails(self) -> None:
+        feat = _cb_feat(atr_compression_score=65.0, volume_dry_up_score=5.0)
+        cfg = _cb_config(min_compression=50, min_dry_up=40, enforce_compression_floor=True)
+        result = validate_consolidation_base(feat, cfg)
+        assert result.setup_passed is False
+        assert any("volume_dry_up_too_low(5.0<40.0)" in r for r in result.pass_fail_reasons)
+
+    def test_enabled_sufficient_scores_pass(self) -> None:
+        feat = _cb_feat(atr_compression_score=65.0, volume_dry_up_score=60.0)
+        cfg = _cb_config(min_compression=50, min_dry_up=40, enforce_compression_floor=True)
+        result = validate_consolidation_base(feat, cfg)
+        assert not any("atr_compression_too_low" in r for r in result.pass_fail_reasons)
+        assert not any("volume_dry_up_too_low" in r for r in result.pass_fail_reasons)
+
+    def test_enabled_missing_scores_fail_explicitly(self) -> None:
+        feat = _cb_feat(atr_compression_score=None, volume_dry_up_score=None)
+        cfg = _cb_config(enforce_compression_floor=True)
+        result = validate_consolidation_base(feat, cfg)
+        assert "missing_atr_compression_score" in result.pass_fail_reasons
+        assert "missing_volume_dry_up_score" in result.pass_fail_reasons
+
+    def test_v1_default_configs_behavior_unchanged(self) -> None:
+        """Reproduces default_configs.py's actual v1 shape (enforce_compression_floor
+        explicitly False) with scores below its own min_compression/min_dry_up
+        defaults -- must behave exactly as before this change (no new hard fails)."""
+        feat = _cb_feat(atr_compression_score=20.0, volume_dry_up_score=15.0)
+        cfg = _cb_config(enforce_compression_floor=False)  # v1's actual value
+        result = validate_consolidation_base(feat, cfg)
+        assert not any("atr_compression_too_low" in r for r in result.pass_fail_reasons)
+        assert not any("volume_dry_up_too_low" in r for r in result.pass_fail_reasons)
 
 
 class TestPullbackReboundGate:

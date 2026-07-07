@@ -217,6 +217,29 @@ def _compute_penalties(
     return earnings_penalty, macro_penalty
 
 
+def _resolve_earnings_macro_cfg(
+    setup_config: dict[str, Any],
+    risk_cfg: dict[str, Any] | None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Prefer the shared earnings/macro block on the active risk_label_config;
+    fall back to this setup_config's own copy when absent.
+
+    CODER_NOTE v3 item 6 — promotes the earnings/macro penalty config (today
+    duplicated identically across every setup_config via _EARNINGS_BLOCK/
+    _MACRO_BLOCK) to a single shared source on risk_label_config, without a
+    behavior change: risk_label_config_v1 (currently active in every prod/debug
+    DB) carries no "earnings"/"macro_event_risk" keys, so this always falls back
+    to the setup_config's own copy today. Only once a version carrying the
+    shared block (e.g. risk_label_config_v2) is explicitly activated does the
+    shared block take over — and its values are identical to the per-setup
+    copies by construction, so that activation is also behavior-preserving.
+    """
+    risk_cfg = risk_cfg or {}
+    earnings_cfg = risk_cfg.get("earnings") or setup_config.get("earnings", {})
+    macro_cfg = risk_cfg.get("macro_event_risk") or setup_config.get("macro_event_risk", {})
+    return earnings_cfg, macro_cfg
+
+
 # Altman Z'-Score interpretive zones (private-firm/book-value variant; see
 # app.providers.edgar_provider.compute_altman_z_score docstring for why this
 # variant is used). Standard textbook zones: >2.9 safe, <1.23 distress.
@@ -320,6 +343,7 @@ def _apply_weights(components: dict[str, float], weights: dict[str, float]) -> f
 def validate_breakout(
     feat: dict[str, Any],
     setup_config: dict[str, Any],
+    risk_cfg: dict[str, Any] | None = None,
 ) -> SetupValidationResult:
     """Validate a breakout setup.
 
@@ -349,7 +373,6 @@ def validate_breakout(
     min_rvol: float = float(val.get("min_rvol_breakout", 1.5))
     rvol_is_hard: bool = bool(val.get("rvol_is_hard", True))
     min_setup_score: float = float(val.get("min_setup_score", 55))
-    min_close_strength: float = float(val.get("min_close_strength", 0.5))
     min_atr_stop_floor: float = float(val.get("min_atr_stop_floor_multiple", 0.5))
 
     # Feature extraction
@@ -411,11 +434,8 @@ def validate_breakout(
         )
 
     # Penalties
-    earnings_pen, macro_pen = _compute_penalties(
-        feat,
-        setup_config.get("earnings", {}),
-        setup_config.get("macro_event_risk", {}),
-    )
+    earnings_cfg, macro_cfg = _resolve_earnings_macro_cfg(setup_config, risk_cfg)
+    earnings_pen, macro_pen = _compute_penalties(feat, earnings_cfg, macro_cfg)
     fundamentals_adj, fundamentals_evidence = _compute_fundamentals_adjustment(
         feat, setup_config.get("fundamentals", {})
     )
@@ -597,6 +617,7 @@ def validate_breakout(
 def validate_pullback(
     feat: dict[str, Any],
     setup_config: dict[str, Any],
+    risk_cfg: dict[str, Any] | None = None,
 ) -> SetupValidationResult:
     """Validate a pullback setup.
 
@@ -672,11 +693,8 @@ def validate_pullback(
 
     entry_raw = close_raw
 
-    earnings_pen, macro_pen = _compute_penalties(
-        feat,
-        setup_config.get("earnings", {}),
-        setup_config.get("macro_event_risk", {}),
-    )
+    earnings_cfg, macro_cfg = _resolve_earnings_macro_cfg(setup_config, risk_cfg)
+    earnings_pen, macro_pen = _compute_penalties(feat, earnings_cfg, macro_cfg)
     fundamentals_adj, fundamentals_evidence = _compute_fundamentals_adjustment(
         feat, setup_config.get("fundamentals", {})
     )
@@ -905,6 +923,7 @@ def validate_pullback(
 def validate_trend_continuation(
     feat: dict[str, Any],
     setup_config: dict[str, Any],
+    risk_cfg: dict[str, Any] | None = None,
 ) -> SetupValidationResult:
     """Validate a trend_continuation setup.
 
@@ -976,11 +995,8 @@ def validate_trend_continuation(
 
     entry_raw = close_raw
 
-    earnings_pen, macro_pen = _compute_penalties(
-        feat,
-        setup_config.get("earnings", {}),
-        setup_config.get("macro_event_risk", {}),
-    )
+    earnings_cfg, macro_cfg = _resolve_earnings_macro_cfg(setup_config, risk_cfg)
+    earnings_pen, macro_pen = _compute_penalties(feat, earnings_cfg, macro_cfg)
     fundamentals_adj, fundamentals_evidence = _compute_fundamentals_adjustment(
         feat, setup_config.get("fundamentals", {})
     )
@@ -1178,6 +1194,7 @@ def validate_trend_continuation(
 def validate_consolidation_base(
     feat: dict[str, Any],
     setup_config: dict[str, Any],
+    risk_cfg: dict[str, Any] | None = None,
 ) -> SetupValidationResult:
     """Validate a consolidation_base setup.
 
@@ -1215,6 +1232,11 @@ def validate_consolidation_base(
     # Allow close to be slightly above base_high before rejecting (borderline breakout candidates)
     above_base_tolerance: float = float(val.get("price_above_base_tolerance", 0.01))
     # rvol_required=False always for consolidation_base (AD-22.23)
+    # Opt-in hard gate on min_compression/min_dry_up (default False preserves
+    # existing v1/preset behavior — these two thresholds were previously read
+    # into config but never enforced; CODER_NOTE v3 item 2, option (b)). Flip
+    # to True only on a newly-cloned config version, never on the active v1 row.
+    enforce_compression_floor: bool = bool(val.get("enforce_compression_floor", False))
 
     # Feature extraction
     close_raw = _f(feat.get("close_raw"))
@@ -1248,11 +1270,8 @@ def validate_consolidation_base(
 
     entry_raw = close_raw
 
-    earnings_pen, macro_pen = _compute_penalties(
-        feat,
-        setup_config.get("earnings", {}),
-        setup_config.get("macro_event_risk", {}),
-    )
+    earnings_cfg, macro_cfg = _resolve_earnings_macro_cfg(setup_config, risk_cfg)
+    earnings_pen, macro_pen = _compute_penalties(feat, earnings_cfg, macro_cfg)
     fundamentals_adj, fundamentals_evidence = _compute_fundamentals_adjustment(
         feat, setup_config.get("fundamentals", {})
     )
@@ -1315,6 +1334,23 @@ def validate_consolidation_base(
         if stop_distance_atr < min_atr_stop_floor:
             hard_fails.append(
                 f"stop_below_atr_floor(stop_atr={stop_distance_atr:.2f}<{min_atr_stop_floor})"
+            )
+
+    # 7. ATR-compression / volume dry-up floors — opt-in only (enforce_compression_floor,
+    # default False). When disabled (default for v1 and every existing preset), these
+    # thresholds are read but not enforced, matching pre-existing behavior exactly.
+    if enforce_compression_floor:
+        if atr_compression_score is None:
+            hard_fails.append("missing_atr_compression_score")
+        elif atr_compression_score < min_compression:
+            hard_fails.append(
+                f"atr_compression_too_low({atr_compression_score:.1f}<{min_compression})"
+            )
+        if volume_dry_up_score is None:
+            hard_fails.append("missing_volume_dry_up_score")
+        elif volume_dry_up_score < min_dry_up:
+            hard_fails.append(
+                f"volume_dry_up_too_low({volume_dry_up_score:.1f}<{min_dry_up})"
             )
 
     # Note: RVOL not required for consolidation_base (AD-22.23)
@@ -1465,6 +1501,7 @@ def validate_setup(
     setup_type: str,
     feat: dict[str, Any],
     setup_config: dict[str, Any],
+    risk_cfg: dict[str, Any] | None = None,
 ) -> SetupValidationResult:
     """Dispatch to the correct validator by setup_type.
 
@@ -1476,7 +1513,7 @@ def validate_setup(
             f"Unknown setup_type {setup_type!r}. "
             f"Allowed: {list(_VALIDATORS)}"
         )
-    return validator(feat, setup_config)
+    return validator(feat, setup_config, risk_cfg)
 
 
 __all__ = [

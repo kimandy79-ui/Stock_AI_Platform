@@ -307,6 +307,64 @@ class ConfigService:
             },
         )
 
+    def seed_risk_label_config_v2(self, db_role: str) -> ServiceResult:
+        """Seed risk_label_config_v2 (CODER_NOTE v3 item 6). Idempotent via ON CONFLICT.
+
+        Unlike ``seed_default_risk_label_config``, this always inserts with
+        ``active_flag=False`` and never calls ``activate_risk_label_config`` —
+        the new shared earnings/macro block only takes effect once a human
+        explicitly activates this version, per the immutable clone-and-version
+        rule (CLAUDE.md: exactly one active risk_label_config in prod/debug).
+        """
+        run_id = str(uuid.uuid4())
+        try:
+            cv.validate_db_role(db_role)
+        except cv.ConfigValidationError as exc:
+            return self._failed(run_id, str(exc), {"db_role": db_role})
+
+        payload = default_configs.get_risk_label_config_v2()
+        inserted = 0
+        connection = self._db.connect(db_role)
+        try:
+            connection.execute("BEGIN TRANSACTION")
+            try:
+                cfg = cv.validate_config_payload(payload)
+                config_hash = cv.deterministic_hash(cfg)
+                config_id = payload["config_id"]
+                version = payload["version"]
+                returned = connection.execute(
+                    _INSERT_RISK_LABEL_CONFIG,
+                    [
+                        config_id,
+                        version,
+                        cv.canonical_json(cfg),
+                        config_hash,
+                        False,
+                        "seeded v2 (inactive; shared earnings/macro block)",
+                    ],
+                ).fetchall()
+                inserted += len(returned)
+                connection.execute("COMMIT")
+            except Exception:
+                connection.execute("ROLLBACK")
+                raise
+        except Exception as exc:  # noqa: BLE001
+            _LOG.error("seed_risk_label_config_v2 failed: %s", exc)
+            return self._failed(run_id, f"{type(exc).__name__}: {exc}", {"db_role": db_role})
+        finally:
+            connection.close()
+
+        return ServiceResult(
+            status=service_result.STATUS_SUCCESS,
+            run_id=run_id,
+            rows_processed=inserted,
+            metadata={
+                "db_role": db_role,
+                "config_kind": "risk_label_v2",
+                "seeded": inserted,
+            },
+        )
+
     # ------------------------------------------------------------------ #
     # Sector alias seeding (retained)
     # ------------------------------------------------------------------ #
@@ -571,6 +629,22 @@ class ConfigService:
             total = sum(weights.values())
             if abs(total - 1.0) > 1e-6:
                 errors.append(f"scoring_weights sum {total:.6f} != 1.0")
+
+        # AD-22.23: RVOL must never hard-reject a pullback setup. m14_setup_validators
+        # .validate_pullback() silently overrides rvol_is_hard=True to False as a
+        # runtime backstop, but that masks the mistake from whoever authored the
+        # config. Reject it here instead, at authoring/clone time, so it's visible
+        # before the config is ever created. This is a creation-time-only check —
+        # confirmed via full-codebase search that validate_setup_config has no
+        # callers in the seeding or pipeline read paths (only test callers today),
+        # so it cannot retroactively invalidate any currently-active config.
+        if setup_type == "pullback":
+            pullback_rvol_is_hard = cfg.get("validation", {}).get("rvol_is_hard")
+            if pullback_rvol_is_hard is True:
+                errors.append(
+                    "pullback config sets rvol_is_hard=True, which violates "
+                    "AD-22.23 (RVOL must never hard-reject for pullback)"
+                )
 
         if errors:
             return self._failed(run_id, "; ".join(errors), {"errors": errors})

@@ -148,6 +148,63 @@ def test_seeding_is_idempotent(prod_schema: ConfigService) -> None:
     assert _count("prod", "SELECT COUNT(*) FROM risk_label_config") == 1
 
 
+def test_dead_key_template_edit_does_not_touch_already_active_row(
+    prod_schema: ConfigService,
+) -> None:
+    """CODER_NOTE v3 items 1/4/5 — proves the idempotency assumption: editing
+    a seed template (removing dead keys) never mutates a row that was already
+    inserted under the same config_id. Simulates a pre-existing DB by
+    inserting an 'old-shaped' payload (dead keys present) directly, then
+    re-running the seeder with today's (dead-key-free) template and confirming
+    the stored row is untouched."""
+    old_shaped_payload = default_configs.get_default_setup_configs()["breakout"]
+    old_shaped_payload["validation"] = {
+        **old_shaped_payload["validation"],
+        "min_close_strength": 0.5,       # removed from the real template (item 5)
+        "max_stop_distance_pct": 0.10,   # removed from the real template (item 1)
+    }
+    old_shaped_json = cv.canonical_json(old_shaped_payload)
+
+    conn = dbm.connect("prod")
+    try:
+        conn.execute(
+            "INSERT INTO setup_configs "
+            "(config_id, setup_type, version, config_json, config_hash, "
+            " active_flag, created_at, notes) "
+            "VALUES (?, ?, ?, ?, ?, TRUE, now(), 'pre-existing row')",
+            [
+                old_shaped_payload["config_id"],
+                old_shaped_payload["setup_type"],
+                old_shaped_payload["version"],
+                old_shaped_json,
+                cv.deterministic_hash(old_shaped_payload),
+            ],
+        )
+    finally:
+        conn.close()
+
+    result = prod_schema.seed_default_setup_configs("prod")
+    assert result.is_ok()
+    # Only the other 3 setup_types get inserted; "setup_breakout_v1" already
+    # exists under that config_id, so ON CONFLICT DO NOTHING skips it.
+    assert result.rows_processed == 3
+
+    conn = dbm.connect("prod", read_only=True)
+    try:
+        row = conn.execute(
+            "SELECT config_json FROM setup_configs WHERE config_id = ?",
+            [old_shaped_payload["config_id"]],
+        ).fetchone()
+    finally:
+        conn.close()
+    assert row is not None
+    stored_json = row[0] if isinstance(row[0], str) else cv.canonical_json(row[0])
+    # Old-shaped row (with dead keys) is exactly as inserted — untouched by
+    # re-seeding with the new (dead-key-free) template.
+    assert "min_close_strength" in stored_json
+    assert "max_stop_distance_pct" in stored_json
+
+
 # --------------------------------------------------------------------------- #
 # 3. Activation constraints
 # --------------------------------------------------------------------------- #
@@ -295,6 +352,62 @@ def test_validate_setup_config_good_weights_sum_passes(prod_schema: ConfigServic
     }
     result = prod_schema.validate_setup_config(cfg)
     assert result.is_ok()
+
+
+# --------------------------------------------------------------------------- #
+# 8b. validate_setup_config — pullback rvol_is_hard rejection (CODER_NOTE v3
+# item 3: validate at authoring time instead of silently overriding at runtime)
+# --------------------------------------------------------------------------- #
+def test_validate_setup_config_pullback_rvol_is_hard_true_fails(
+    prod_schema: ConfigService,
+) -> None:
+    cfg = {
+        "setup_type": "pullback",
+        "scoring_weights": {"a": 1.0},
+        "validation": {"rvol_is_hard": True},
+    }
+    result = prod_schema.validate_setup_config(cfg)
+    assert result.status == service_result.STATUS_FAILED
+    assert "rvol_is_hard" in "; ".join(result.errors)
+
+
+def test_validate_setup_config_pullback_rvol_is_hard_false_passes(
+    prod_schema: ConfigService,
+) -> None:
+    cfg = default_configs.get_default_setup_configs()["pullback"]
+    result = prod_schema.validate_setup_config(cfg)
+    assert result.is_ok()
+
+
+def test_validate_setup_config_pullback_rvol_is_hard_absent_passes(
+    prod_schema: ConfigService,
+) -> None:
+    cfg = {
+        "setup_type": "pullback",
+        "scoring_weights": {"a": 1.0},
+        "validation": {},
+    }
+    result = prod_schema.validate_setup_config(cfg)
+    assert result.is_ok()
+
+
+def test_validate_setup_config_non_pullback_rvol_is_hard_true_passes(
+    prod_schema: ConfigService,
+) -> None:
+    """rvol_is_hard=True is the correct/expected value for breakout — only
+    pullback is restricted (AD-22.23 is pullback-specific)."""
+    cfg = default_configs.get_default_setup_configs()["breakout"]
+    assert cfg["validation"]["rvol_is_hard"] is True
+    result = prod_schema.validate_setup_config(cfg)
+    assert result.is_ok()
+
+
+def test_validate_setup_config_every_preset_still_passes(prod_schema: ConfigService) -> None:
+    """All 6 presets (incl. the 2 pullback ones) keep rvol_is_hard=False and
+    must still pass after adding the new pullback check."""
+    for p in default_configs.get_preset_setup_configs():
+        result = prod_schema.validate_setup_config(p)
+        assert result.is_ok(), f"{p['config_id']}: {result.errors}"
 
 
 # --------------------------------------------------------------------------- #
@@ -594,3 +707,95 @@ def test_preset_setup_configs_use_only_existing_validator_fields() -> None:
             f"{p['config_id']} introduces new validation field(s): "
             f"{preset_keys - allowed_keys}"
         )
+
+
+# --------------------------------------------------------------------------- #
+# 10. risk_label_config_v2 (CODER_NOTE v3 item 6) — cloned, never edits v1 in
+# place, always seeded inactive, never auto-activated.
+# --------------------------------------------------------------------------- #
+def test_risk_label_config_v2_not_equal_to_v1_config_id() -> None:
+    v1 = default_configs.get_default_risk_label_config()
+    v2 = default_configs.get_risk_label_config_v2()
+    assert v1["config_id"] != v2["config_id"]
+    assert v2["config_id"] == "risk_label_config_v2"
+
+
+def test_risk_label_config_v2_carries_shared_earnings_macro_block() -> None:
+    v2 = default_configs.get_risk_label_config_v2()
+    assert v2["earnings"] == {"avoid_within_bd": 5, "penalty_points_max": -15}
+    assert v2["macro_event_risk"]["enabled"] is True
+    assert v2["macro_event_risk"]["penalty_points"] == -10
+
+
+def test_risk_label_config_v2_values_match_per_setup_copies() -> None:
+    """Zero-behavior-change guarantee: v2's shared block must equal what every
+    setup_config's own earnings/macro_event_risk block already carries."""
+    v2 = default_configs.get_risk_label_config_v2()
+    for cfg in default_configs.get_default_setup_configs().values():
+        assert cfg["earnings"] == v2["earnings"]
+        assert cfg["macro_event_risk"] == v2["macro_event_risk"]
+
+
+def test_default_risk_label_config_v1_has_no_shared_earnings_macro_block() -> None:
+    """v1 (currently active in every prod/debug DB) must NOT carry these keys —
+    this is what makes the dual-read fallback in m14_setup_validators.py a
+    no-op today (falls back to each setup_config's own copy)."""
+    v1 = default_configs.get_default_risk_label_config()
+    assert "earnings" not in v1
+    assert "macro_event_risk" not in v1
+
+
+def test_seed_risk_label_config_v2_inserts_one_row(prod_schema: ConfigService) -> None:
+    result = prod_schema.seed_risk_label_config_v2("prod")
+    assert result.is_ok(), result.errors
+    assert result.rows_processed == 1
+    n = _count(
+        "prod",
+        "SELECT COUNT(*) FROM risk_label_config WHERE config_id = ?",
+        ["risk_label_config_v2"],
+    )
+    assert n == 1
+
+
+def test_seed_risk_label_config_v2_is_idempotent(prod_schema: ConfigService) -> None:
+    r1 = prod_schema.seed_risk_label_config_v2("prod")
+    r2 = prod_schema.seed_risk_label_config_v2("prod")
+    assert r1.is_ok() and r2.is_ok()
+    assert r1.rows_processed == 1
+    assert r2.rows_processed == 0  # ON CONFLICT DO NOTHING
+
+
+def test_seed_risk_label_config_v2_never_active(prod_schema: ConfigService) -> None:
+    prod_schema.seed_risk_label_config_v2("prod")
+    n_active = _count(
+        "prod",
+        "SELECT COUNT(*) FROM risk_label_config WHERE config_id = ? AND active_flag = TRUE",
+        ["risk_label_config_v2"],
+    )
+    assert n_active == 0
+
+
+def test_seed_risk_label_config_v2_does_not_disturb_v1_activation(
+    seeded_prod: ConfigService,
+) -> None:
+    before = _count(
+        "prod", "SELECT COUNT(*) FROM risk_label_config WHERE active_flag = TRUE"
+    )
+    seeded_prod.seed_risk_label_config_v2("prod")
+    after = _count(
+        "prod", "SELECT COUNT(*) FROM risk_label_config WHERE active_flag = TRUE"
+    )
+    assert before == after == 1  # still exactly one active risk_label_config
+
+
+def test_seed_risk_label_config_v2_with_invalid_db_role_fails(
+    prod_schema: ConfigService,
+) -> None:
+    result = prod_schema.seed_risk_label_config_v2("bad_role")
+    assert result.status == service_result.STATUS_FAILED
+
+
+def test_validate_risk_label_config_accepts_v2(prod_schema: ConfigService) -> None:
+    v2 = default_configs.get_risk_label_config_v2()
+    result = prod_schema.validate_risk_label_config(v2)
+    assert result.is_ok(), result.errors
