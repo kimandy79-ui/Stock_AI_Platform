@@ -479,6 +479,16 @@ def validate_breakout(
                 f"stop_below_atr_floor(stop_atr={stop_distance_atr:.2f}<{min_atr_stop_floor})"
             )
 
+    # 5. Optional earnings hard-block (P1.2, opt-in — default False, zero
+    # behavior change until explicitly enabled on a setup_config version)
+    if bool(earnings_cfg.get("earnings_hard_block", False)):
+        avoid_bd = int(earnings_cfg.get("avoid_within_bd", 5))
+        days_to_earnings = _f(earnings_days)
+        if days_to_earnings is not None and 0 < days_to_earnings <= avoid_bd:
+            hard_fails.append(
+                f"earnings_too_close({days_to_earnings:.0f}bd<={avoid_bd}bd)"
+            )
+
     setup_passed_hard = len(hard_fails) == 0
 
     # --- Soft checks / scoring ---
@@ -757,6 +767,16 @@ def validate_pullback(
             )
 
     # Note: RVOL is NOT a hard check for pullback (AD-22.23)
+
+    # 7. Optional earnings hard-block (P1.2, opt-in — default False, zero
+    # behavior change until explicitly enabled on a setup_config version)
+    if bool(earnings_cfg.get("earnings_hard_block", False)):
+        avoid_bd = int(earnings_cfg.get("avoid_within_bd", 5))
+        days_to_earnings = _f(earnings_days)
+        if days_to_earnings is not None and 0 < days_to_earnings <= avoid_bd:
+            hard_fails.append(
+                f"earnings_too_close({days_to_earnings:.0f}bd<={avoid_bd}bd)"
+            )
 
     setup_passed_hard = len(hard_fails) == 0
 
@@ -1053,6 +1073,16 @@ def validate_trend_continuation(
         if stop_distance_atr < min_atr_stop_floor:
             hard_fails.append(
                 f"stop_below_atr_floor(stop_atr={stop_distance_atr:.2f}<{min_atr_stop_floor})"
+            )
+
+    # 8. Optional earnings hard-block (P1.2, opt-in — default False, zero
+    # behavior change until explicitly enabled on a setup_config version)
+    if bool(earnings_cfg.get("earnings_hard_block", False)):
+        avoid_bd = int(earnings_cfg.get("avoid_within_bd", 5))
+        days_to_earnings = _f(earnings_days)
+        if days_to_earnings is not None and 0 < days_to_earnings <= avoid_bd:
+            hard_fails.append(
+                f"earnings_too_close({days_to_earnings:.0f}bd<={avoid_bd}bd)"
             )
 
     setup_passed_hard = len(hard_fails) == 0

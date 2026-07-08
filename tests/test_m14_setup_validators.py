@@ -2128,3 +2128,93 @@ class TestSwingLowGuard:
         result = validate_trend_continuation(feat, _tc_config())
         ev = result.evidence_json
         assert ev.get("swing_low_raw") is None
+
+
+class TestEarningsHardBlockGate:
+    """P1.2 (CODER_NOTE P1 batch, architect-approved hard-reject shape,
+    2026-07-08): optional `earnings_hard_block` flag on the shared `earnings`
+    config block, mirroring `enforce_compression_floor`'s opt-in pattern
+    (default False, zero behavior change) — breakout/pullback/trend_continuation
+    only; consolidation_base already has its own unconditional hard gate via
+    `min_earnings_days`."""
+
+    def _with_earnings(self, cfg: dict[str, Any], **earnings_overrides: Any) -> dict[str, Any]:
+        cfg["earnings"] = {**cfg["earnings"], **earnings_overrides}
+        return cfg
+
+    # --- breakout ---
+
+    def test_breakout_disabled_by_default_within_window_soft_penalty_only(self) -> None:
+        feat = _breakout_feat(days_to_earnings_bd=3)  # within default avoid_within_bd=5
+        result = validate_breakout(feat, _breakout_config())
+        assert result.setup_passed is True
+        assert not any("earnings_too_close" in r for r in result.pass_fail_reasons)
+
+    def test_breakout_enabled_within_window_hard_fails(self) -> None:
+        feat = _breakout_feat(days_to_earnings_bd=3)
+        cfg = self._with_earnings(_breakout_config(), earnings_hard_block=True)
+        result = validate_breakout(feat, cfg)
+        assert result.setup_passed is False
+        assert any("earnings_too_close(3bd<=5bd)" in r for r in result.pass_fail_reasons)
+
+    def test_breakout_enabled_outside_window_passes(self) -> None:
+        feat = _breakout_feat(days_to_earnings_bd=20)
+        cfg = self._with_earnings(_breakout_config(), earnings_hard_block=True)
+        result = validate_breakout(feat, cfg)
+        assert result.setup_passed is True
+        assert not any("earnings_too_close" in r for r in result.pass_fail_reasons)
+
+    # --- pullback ---
+
+    def test_pullback_disabled_by_default_within_window_soft_penalty_only(self) -> None:
+        feat = _pullback_feat(days_to_earnings_bd=3)
+        result = validate_pullback(feat, _pullback_config())
+        assert result.setup_passed is True
+        assert not any("earnings_too_close" in r for r in result.pass_fail_reasons)
+
+    def test_pullback_enabled_within_window_hard_fails(self) -> None:
+        feat = _pullback_feat(days_to_earnings_bd=3)
+        cfg = self._with_earnings(_pullback_config(), earnings_hard_block=True)
+        result = validate_pullback(feat, cfg)
+        assert result.setup_passed is False
+        assert any("earnings_too_close(3bd<=5bd)" in r for r in result.pass_fail_reasons)
+
+    def test_pullback_enabled_outside_window_passes(self) -> None:
+        feat = _pullback_feat(days_to_earnings_bd=30)
+        cfg = self._with_earnings(_pullback_config(), earnings_hard_block=True)
+        result = validate_pullback(feat, cfg)
+        assert result.setup_passed is True
+        assert not any("earnings_too_close" in r for r in result.pass_fail_reasons)
+
+    # --- trend_continuation ---
+
+    def test_tc_disabled_by_default_within_window_soft_penalty_only(self) -> None:
+        feat = _tc_feat(days_to_earnings_bd=3)
+        result = validate_trend_continuation(feat, _tc_config())
+        assert result.setup_passed is True
+        assert not any("earnings_too_close" in r for r in result.pass_fail_reasons)
+
+    def test_tc_enabled_within_window_hard_fails(self) -> None:
+        feat = _tc_feat(days_to_earnings_bd=3)
+        cfg = self._with_earnings(_tc_config(), earnings_hard_block=True)
+        result = validate_trend_continuation(feat, cfg)
+        assert result.setup_passed is False
+        assert any("earnings_too_close(3bd<=5bd)" in r for r in result.pass_fail_reasons)
+
+    def test_tc_enabled_outside_window_passes(self) -> None:
+        feat = _tc_feat(days_to_earnings_bd=30)
+        cfg = self._with_earnings(_tc_config(), earnings_hard_block=True)
+        result = validate_trend_continuation(feat, cfg)
+        assert result.setup_passed is True
+        assert not any("earnings_too_close" in r for r in result.pass_fail_reasons)
+
+    # --- v1 default configs behavior unchanged (byte-identical proof) ---
+
+    def test_v1_default_configs_have_no_earnings_hard_block_key(self) -> None:
+        """default_configs.py's _EARNINGS_BLOCK carries no earnings_hard_block
+        key at all (not even False) — confirms the flag is purely opt-in via
+        .get(..., False), not a new required field on every existing config."""
+        from app.services.config.default_configs import DEFAULT_SETUP_CONFIGS
+
+        for setup_type in ("breakout", "pullback", "trend_continuation"):
+            assert "earnings_hard_block" not in DEFAULT_SETUP_CONFIGS[setup_type]["earnings"]
