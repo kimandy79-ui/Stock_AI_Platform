@@ -235,12 +235,22 @@ If `market_regime IS NULL` or equals any unrecognised value:
 
 ## BREAKOUT (config: setup_breakout_v1)
 
+> **Note on the stop-distance gate (all four setup types below):** the
+> `stop_distance_pct <= max_stop_distance_pct` ceiling is a **risk-sizing**
+> gate, not a setup-validation gate. It requires the actual structural stop
+> price, which is only computed in Step 5. It is enforced there, universally
+> across all setup types, via `risk_label_config.buy_rules.max_stop_distance_pct`
+> (see Step 5 / risk labeling section) — it is not duplicated per-setup at
+> Step 4. What Step 4 enforces instead, per setup, is an ATR-normalized
+> minimum stop-tightness floor (below), which needs only `atr_pct` and
+> guards against stops so tight they'd be triggered by normal ATR noise.
+
 **Hard checks (any failure → setup_passed = FALSE):**
 - `resistance_level` exists (not NULL)
 - `breakout_proximity` in `[breakout_prox_min, breakout_prox_max]`
 - `range_duration >= min_base_duration`
 - RVOL hard gate: `rvol20 >= min_rvol_breakout` (when `rvol_is_hard = TRUE`)
-- `stop_distance_pct <= max_stop_distance_pct`
+- `stop_distance_atr = stop_distance_pct / atr_pct >= min_atr_stop_floor_multiple`
 
 **Soft checks (score contributions):**
 - Close strength: `(close_raw - low_raw) / (high_raw - low_raw) >= min_close_strength`
@@ -264,7 +274,7 @@ If `market_regime IS NULL` or equals any unrecognised value:
 - `ema20 > ema50`
 - `pullback_depth_pct <= max_pullback_depth`
 - `close_raw >= support_raw * (1 - support_break_tol)`
-- `stop_distance_pct <= max_stop_distance_pct`
+- `stop_distance_atr = stop_distance_pct / atr_pct >= min_atr_stop_floor_multiple`
 - RVOL: **never a hard reject** (`rvol_is_hard = FALSE`). Low RVOL → soft penalty only.
 
 **Soft checks:**
@@ -288,7 +298,7 @@ If `market_regime IS NULL` or equals any unrecognised value:
 - `close_adj > ema200`
 - `roc20 BETWEEN roc_min AND roc_max`
 - `distance_to_ema50_pct <= max_ext` (not too extended)
-- `stop_distance_pct <= max_stop_distance_pct`
+- `stop_distance_atr = stop_distance_pct / atr_pct >= min_atr_stop_floor_multiple`
 - RVOL: soft confirmation only. `rvol_is_hard = FALSE`.
 
 **Soft checks:**
@@ -313,7 +323,7 @@ If `market_regime IS NULL` or equals any unrecognised value:
 - `base_low_raw <= close_raw <= base_high_raw` (price still inside base)
 - `range_duration >= min_range_duration`
 - `days_to_earnings_bd > min_earnings_days` OR within earnings penalty band
-- `stop_distance_pct <= max_stop_distance_pct`
+- `stop_distance_atr = stop_distance_pct / atr_pct >= min_atr_stop_floor_multiple`
 - RVOL: **not required** (`rvol_required = FALSE`). Controlled/low volume inside base is acceptable.
 
 **Soft checks:**
