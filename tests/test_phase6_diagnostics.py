@@ -28,6 +28,7 @@ from app.services.diagnostics.funnel_diagnostics import (
     FunnelDiagnosticsService,
     ACTIVE_SETUP_TYPES,
     _normalize_validation_reason,
+    _rpt_evidence,
 )
 from app.utils.service_result import ServiceResult
 
@@ -690,3 +691,44 @@ def test_pipeline_run_diagnostics_schema():
         "setup_type", "metric_name", "metric_value", "reason", "metadata_json", "created_at"
     }
     assert required <= col_names, f"Missing schema columns: {required - col_names}"
+
+
+# --------------------------------------------------------------------------- #
+# P1.3 (CODER_NOTE P1 batch, 2026-07-08): breakout_proximity instrumentation
+# --------------------------------------------------------------------------- #
+def _s4_row(setup_type: str, setup_passed: bool, breakout_proximity: float | None = None,
+            setup_score: float = 70.0) -> dict:
+    return {
+        "setup_type": setup_type,
+        "setup_passed": setup_passed,
+        "setup_score": setup_score,
+        "rvol": None,
+        "atr_pct": None,
+        "distance_to_ema20_pct": None,
+        "distance_to_ema50_pct": None,
+        "estimated_rr": None,
+        "stop_distance_pct": None,
+        "explanation_json": {"breakout_proximity": breakout_proximity},
+    }
+
+
+def test_evidence_summaries_collects_breakout_proximity_for_passed_breakout():
+    s4 = [_s4_row("breakout", True, breakout_proximity=-0.02)]
+    result = _rpt_evidence(s4, [], None)
+    bp = result["breakout"]["breakout_proximity"]
+    assert bp["n"] == 1
+    assert bp["min"] == bp["max"] == -0.02
+
+
+def test_evidence_summaries_breakout_proximity_absent_when_no_passed_rows():
+    # Matches every other evidence field: only setup_passed=True rows are
+    # summarized at all, so a breakout-only-failing day has no key, not n=0.
+    s4 = [_s4_row("breakout", False, breakout_proximity=-0.9)]
+    result = _rpt_evidence(s4, [], None)
+    assert "breakout_proximity" not in result["breakout"]
+
+
+def test_evidence_summaries_other_setup_types_have_no_breakout_proximity_key():
+    s4 = [_s4_row("trend_continuation", True)]
+    result = _rpt_evidence(s4, [], None)
+    assert "breakout_proximity" not in result["trend_continuation"]

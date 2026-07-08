@@ -1014,6 +1014,12 @@ def _rpt_evidence(
             if st == "consolidation_base":
                 _collect(d, "support_found", 1 if expl.get("support_raw") is not None else 0)
                 _collect(d, "resistance_found", 1 if expl.get("resistance_raw") is not None else 0)
+            if st == "breakout":
+                # P1.3 (CODER_NOTE P1 batch, 2026-07-08): instrumentation only —
+                # anticipatory ([-1.0,-0.05)) vs confirmed ([-0.05,0.5]) breakout
+                # semantics decision stays open pending more data; this field was
+                # previously absent from evidence_summaries entirely.
+                _collect(d, "breakout_proximity", expl.get("breakout_proximity"))
 
     for r in s5:
         st = r.get("setup_type") or ""
