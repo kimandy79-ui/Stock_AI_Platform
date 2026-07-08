@@ -53,6 +53,7 @@ Key contracts:
 
 from __future__ import annotations
 
+import bisect
 import json
 import math
 import uuid
@@ -831,6 +832,25 @@ def _compute_final_trade_decision(
 # Proposal score (01c §63)
 # ---------------------------------------------------------------------------
 
+def _percentile_rank(sorted_values: list[float], value: float) -> float:
+    """0-100 percentile rank of ``value`` within ``sorted_values`` (ascending).
+
+    ``n<=1`` -> 100.0: a lone candidate has no peers to rank against, so it
+    ranks at the top of its own (single-member) family rather than producing
+    an undefined/NaN result the way a z-score would.
+    """
+    n = len(sorted_values)
+    if n <= 1:
+        return 100.0
+    return 100.0 * bisect.bisect_left(sorted_values, value) / (n - 1)
+
+
+def _confirmation_score_raw(a: dict[str, Any], feat: dict[str, Any]) -> float:
+    """RVOL-derived confirmation proxy, pre-normalization."""
+    rvol_val = _f(a.get("rvol")) or _f(feat.get("rvol20"))
+    return _clamp((rvol_val or 0.0) * 50.0)
+
+
 def _proposal_score_raw(
     setup_score: float,
     estimated_rr: float | None,
@@ -1190,6 +1210,26 @@ class Step5ProposalEngine:
         fundamentals_scores = fundamentals_scores or {}
         enriched: list[dict[str, Any]] = []
 
+        # P1.4 Part A (M15 double-credit fix, m15_double_credit_bug_finding.md
+        # Cause 1): confirmation_score is RVOL-derived, but only breakout
+        # hard-gates on RVOL (min_rvol_breakout, rvol_is_hard=True) --
+        # pullback/trend_continuation are RVOL soft-only (AD-22.23). Applying
+        # the same absolute RVOL-based formula to every setup_type
+        # double-credits breakout survivors, who are already pre-filtered
+        # for high RVOL by Step 4. Normalize confirmation_score to a
+        # percentile rank within each setup_type's own same-day distribution
+        # (passed candidates only) before it enters the composite formula.
+        confirmation_by_type: dict[str, list[float]] = {}
+        for a in analyses:
+            if a["setup_passed"]:
+                st = a.get("setup_type") or ""
+                feat = features_map.get(a["ticker"], {})
+                confirmation_by_type.setdefault(st, []).append(
+                    _confirmation_score_raw(a, feat)
+                )
+        for _scores in confirmation_by_type.values():
+            _scores.sort()
+
         for a in analyses:
             ticker = a["ticker"]
             setup_type = a.get("setup_type") or ""
@@ -1245,9 +1285,15 @@ class Step5ProposalEngine:
             if eff_entry and stop is not None and eff_entry > 0:
                 stop_distance_pct = (eff_entry - stop) / eff_entry
 
-            # confirmation_score: rvol-based proxy
+            # confirmation_score: rvol-based proxy, normalized per setup_type
+            # (P1.4 Part A -- see confirmation_by_type pre-pass above).
+            # rvol_val itself is still needed unnormalized below for
+            # _compute_final_trade_decision.
             rvol_val = _f(a.get("rvol")) or _f(feat.get("rvol20"))
-            confirmation_score = _clamp((rvol_val or 0.0) * 50.0)
+            confirmation_score = _percentile_rank(
+                confirmation_by_type.get(setup_type) or [],
+                _confirmation_score_raw(a, feat),
+            )
 
             # P1: pullback confirmation inputs from features
             roc20_val = _f(feat.get("roc20"))
@@ -1394,9 +1440,28 @@ class Step5ProposalEngine:
             if t not in ticker_best or item["proposal_score_raw"] > ticker_best[t]["proposal_score_raw"]:
                 ticker_best[t] = item
 
+        # P1.4 Part B (M15 double-credit fix, defense-in-depth): percentile-
+        # rank the composite proposal_score_raw within each setup_type's
+        # same-day distribution before the global cross-setup-type merge/
+        # sort. Independent of Part A (normalizing confirmation_score at the
+        # source) -- this is a second guard so a future hard-gate/soft-score
+        # overlap for a different component or setup type doesn't reproduce
+        # the same class of bug. proposal_score_raw/_final keep their
+        # existing stored meaning (audit trail, unaffected by this); this
+        # new field drives ranking/selection only and is not persisted.
+        ranked_by_type: dict[str, list[float]] = {}
+        for item in ticker_best.values():
+            ranked_by_type.setdefault(item["setup_type"], []).append(item["proposal_score_raw"])
+        for _scores in ranked_by_type.values():
+            _scores.sort()
+        for item in ticker_best.values():
+            item["proposal_score_ranked"] = _percentile_rank(
+                ranked_by_type.get(item["setup_type"]) or [], item["proposal_score_raw"]
+            )
+
         def _sort_key(x: dict) -> tuple:
             d = 0 if x["disposition"] == DISPOSITION_BUY else 1
-            return (d, -x["proposal_score_raw"], -(x["estimated_rr"] or 0.0), x["ticker"])
+            return (d, -x["proposal_score_ranked"], -(x["estimated_rr"] or 0.0), x["ticker"])
 
         all_ranked = sorted(ticker_best.values(), key=_sort_key)
 
@@ -1548,7 +1613,9 @@ class Step5ProposalEngine:
         # Apply caps independently within each setup_type's candidate pool so that
         # one setup_type cannot exhaust all sector/industry slots before candidates
         # from other setup_types are evaluated. Survivors are then merged and
-        # re-ranked by proposal_score_raw for the shared top_n cutoff.
+        # re-ranked by proposal_score_ranked (P1.4 Part B) for the shared top_n
+        # cutoff -- proposal_score_final stays a plain copy of proposal_score_raw
+        # here, unchanged from before Part B (hard-cap mode applies no penalty).
         by_setup: dict[str, list[dict]] = {}
         for item in ranked:
             by_setup.setdefault(item["setup_type"], []).append(item)
@@ -1580,7 +1647,7 @@ class Step5ProposalEngine:
         # Merge survivors across setup_types; re-rank by score for final top_n.
         survivors.sort(key=lambda x: (
             0 if x["disposition"] == DISPOSITION_BUY else 1,
-            -x["proposal_score_raw"],
+            -x["proposal_score_ranked"],
             x["ticker"],
         ))
         for nxt, item in enumerate(survivors, start=1):
@@ -1588,6 +1655,19 @@ class Step5ProposalEngine:
 
     @staticmethod
     def _apply_soft_penalty(ranked: list[dict], cfg: dict) -> None:
+        # P1.4 Part B: 01c "Diversified ranking" spec is explicit --
+        # proposal_score_final = proposal_score_raw * sector_penalty *
+        # industry_penalty. Base stays proposal_score_raw, unchanged from
+        # before Part B (an earlier version of this fix used
+        # proposal_score_ranked here; reverted 2026-07-08 after review --
+        # that would have silently redefined a spec-mandated formula and
+        # double-applied the family normalization: once via the percentile
+        # transform itself, again via the multiplicative penalty on an
+        # already-compressed number). The candidate *iteration order* (which
+        # determines ps/pi, i.e. who gets penalized first/least) still comes
+        # from `ranked`, which Part B's _sort_key already reordered by
+        # proposal_score_ranked -- so the fairness fix still reaches this
+        # mode via ordering, without redefining the stored score itself.
         sp = cfg["sector_penalty"]
         ip_ = cfg["industry_penalty"]
         ss: dict[str, int] = {}

@@ -64,7 +64,9 @@ from app.services.proposal.step5_proposal_engine import (
     _compute_estimated_rr,
     _compute_risk_score,
     _compute_stop_target,
+    _confirmation_score_raw,
     _parse_risk_label_config,
+    _percentile_rank,
     _proposal_score_raw,
     _rr_score,
 )
@@ -1120,6 +1122,26 @@ class TestSoftPenaltyDiversification:
         rankable = [p for p in props if p["raw_rank"] is not None]
         for p in rankable:
             assert p["diversified_rank"] is not None
+        # Formula-output-value assertion (01c "Diversified ranking" spec,
+        # hard_cap_enabled=FALSE case): proposal_score_final =
+        # proposal_score_raw * sector_penalty^n * industry_penalty^n, where
+        # n = prior same-sector/same-industry candidates already processed
+        # (sector_count_at_selection/industry_count_at_selection are stored
+        # 1-indexed, i.e. n = count - 1). Base is proposal_score_raw, NOT
+        # proposal_score_ranked (m15_double_credit_bug_finding.md -- an
+        # earlier version of the P1.4 fix used proposal_score_ranked here
+        # and was reverted after this exact assertion would have failed:
+        # with all 3 candidates tied on setup_score, proposal_score_ranked
+        # collapses every one of them to 0.0, zeroing proposal_score_final
+        # for the whole group regardless of penalty).
+        assert len(rankable) == 3
+        penalized = [p for p in rankable if p["sector_count_at_selection"] > 1]
+        assert penalized, "fixture must produce at least one penalized candidate"
+        for p in rankable:
+            n_sector = p["sector_count_at_selection"] - 1
+            n_industry = p["industry_count_at_selection"] - 1
+            expected = p["proposal_score_raw"] * (0.9 ** n_sector) * (0.85 ** n_industry)
+            assert p["proposal_score_final"] == pytest.approx(expected, abs=1e-6)
 
 
 class TestProductionDiversificationLimits:
@@ -2220,3 +2242,121 @@ class TestProposeWithFundamentalsScores:
         assert with_none_score.status == sr.STATUS_SUCCESS, with_none_score.errors
         props = _read_proposals(db, SIGNAL_DATE)
         assert len(props) == 1
+
+
+class TestPercentileRank:
+    """P1.4 Part A + Part B shared primitive (m15_double_credit_bug_finding.md)."""
+
+    def test_lone_value_is_100(self):
+        assert _percentile_rank([42.0], 42.0) == 100.0
+
+    def test_empty_list_is_100(self):
+        assert _percentile_rank([], 5.0) == 100.0
+
+    def test_orders_low_mid_high(self):
+        sorted_values = [10.0, 20.0, 30.0]
+        assert _percentile_rank(sorted_values, 10.0) == 0.0
+        assert _percentile_rank(sorted_values, 20.0) == 50.0
+        assert _percentile_rank(sorted_values, 30.0) == 100.0
+
+    def test_five_member_family_spreads_evenly(self):
+        # Matches the redistribution test below: n=5 -> ranks 0/25/50/75/100.
+        sorted_values = [1.0, 2.0, 3.0, 4.0, 5.0]
+        assert [
+            _percentile_rank(sorted_values, v) for v in sorted_values
+        ] == [0.0, 25.0, 50.0, 75.0, 100.0]
+
+    def test_duplicate_values_rank_at_first_occurrence(self):
+        # bisect_left semantics: ties rank at the lower index, not averaged.
+        sorted_values = [10.0, 10.0, 20.0]
+        assert _percentile_rank(sorted_values, 10.0) == 0.0
+        assert _percentile_rank(sorted_values, 20.0) == 100.0
+
+
+class TestConfirmationScoreRaw:
+    """P1.4 Part A input (m15_double_credit_bug_finding.md Cause 1)."""
+
+    def test_scales_with_rvol_from_analysis_row(self):
+        assert _confirmation_score_raw({"rvol": 1.0}, {}) == 50.0
+
+    def test_clamps_above_100(self):
+        assert _confirmation_score_raw({"rvol": 3.0}, {}) == 100.0
+
+    def test_missing_rvol_falls_back_to_feature_rvol20(self):
+        assert _confirmation_score_raw({"rvol": None}, {"rvol20": 1.2}) == 60.0
+
+    def test_missing_both_is_zero(self):
+        assert _confirmation_score_raw({"rvol": None}, {}) == 0.0
+
+    def test_analysis_rvol_takes_priority_over_feature_rvol20(self):
+        assert _confirmation_score_raw({"rvol": 2.0}, {"rvol20": 0.1}) == 100.0
+
+
+class TestDoubleCreditRedistribution:
+    """P1.4 go/no-go integration check (m15_double_credit_bug_finding.md):
+    with the composite formula's confirmation_score normalized per
+    setup_type (Part A) and the composite score itself percentile-ranked
+    per setup_type before the global merge/sort (Part B), a setup_type
+    whose Step 4 hard gate structurally pre-filters for high RVOL
+    (breakout) should no longer dominate the final selected list purely
+    from that pre-filtering, when other setup types have comparable
+    setup_score. Acceptance bar per the 06-29 diagnostic memo: no single
+    setup_type should exceed roughly 50-60% of the final list absent
+    genuine quality dominance."""
+
+    def _seed_family(
+        self, db_role: str, setup_type: str, prefix: str, rvols: list[float],
+    ) -> None:
+        for idx, rvol in enumerate(rvols):
+            t = f"{prefix}{idx}"
+            # Unique sector/industry per ticker: isolates this test from the
+            # (already-fixed, out-of-scope-for-this-PR) diversification-cap
+            # mechanism entirely -- only the scoring fix is under test here.
+            _seed_ticker(db_role, t, sector=t, industry=t)
+            _seed_price(db_role, t, SIGNAL_DATE, 100.0, 100.0)
+            _seed_features(db_role, t, SIGNAL_DATE, close_adj=100.0, atr14=2.0,
+                           rvol20=rvol, next_resistance_level=115.0,
+                           support_level=95.0, base_high=103.0, base_low=96.0,
+                           swing_high=108.0, swing_low=94.0,
+                           range_tightness_score=70.0, range_duration=20,
+                           market_regime="bull")
+            _seed_step4(db_role, t, SIGNAL_DATE, setup_type=setup_type,
+                        setup_config_id=f"setup_{setup_type}_v1",
+                        setup_passed=True, setup_score=70.0,
+                        entry_price_raw=100.0, market_regime="bull",
+                        earnings_days=30, rvol=rvol)
+
+    def test_no_single_setup_type_dominates_final_list(self, tmp_db_paths):
+        db = dbm.DB_ROLE_PROD
+        # Breakout: RVOL clustered high, matching its own Step 4 hard gate
+        # (min_rvol_breakout=1.5, rvol_is_hard=True) -- every candidate here
+        # would already have failed to reach Step 5 at all with a lower RVOL.
+        self._seed_family(db, "breakout", "BRK", [1.6, 1.8, 2.0, 2.2, 2.4])
+        # Pullback / trend_continuation: RVOL soft-only (AD-22.23), no floor,
+        # deliberately lower to mirror the real diagnostic scenario where
+        # breakout's hard gate structurally guarantees a higher RVOL band.
+        self._seed_family(db, "pullback", "PLB", [0.4, 0.6, 0.8, 1.0, 1.2])
+        self._seed_family(db, "trend_continuation", "TCN", [0.5, 0.7, 0.9, 1.1, 1.3])
+
+        cfg = _minimal_risk_config(top_n=10, min_rr=1.0, max_sector=20, max_industry=20)
+        eng = _make_engine()
+        result = eng.propose(SIGNAL_DATE, risk_label_config=cfg,
+                             setup_configs=DEFAULT_SETUP_CONFIGS, db_role=db)
+        assert result.status == sr.STATUS_SUCCESS, result.errors
+
+        props = _read_proposals(db, SIGNAL_DATE)
+        selected = [p for p in props if p["selected_flag"]]
+        assert len(selected) > 0
+
+        from collections import Counter
+        counts = Counter(p["setup_type"] for p in selected)
+        max_share = max(counts.values()) / len(selected)
+        assert max_share <= 0.6, (
+            f"one setup_type took {max_share:.0%} of the final list "
+            f"({dict(counts)}) -- expected roughly even redistribution "
+            f"with setup_score held equal across families"
+        )
+        # All three families should be represented at all, not just capped.
+        assert len(counts) >= 2, (
+            f"expected multiple setup_types represented, got {dict(counts)}"
+        )
