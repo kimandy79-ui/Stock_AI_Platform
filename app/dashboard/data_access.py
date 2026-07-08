@@ -20,6 +20,14 @@ Architecture rules (Module 21)
   suite runnable without duckdb installed.
 - **No provider imports, no** ``print()``.  Library-style logging only.
 
+``SimDashboardDataLoader`` (Simulation Lab, below) is a deliberate exception
+to ``DashboardDataLoader``'s ``ALLOWED_DASHBOARD_ROLES`` restriction -- it is
+a separate class that only ever connects to ``simulation.duckdb``, read-only,
+for viewing already-written ``sim_runs`` / ``sim_config_comparisons`` /
+``sim_folds`` results. It never triggers a simulation run (that stays a CLI
+concern, outside the dashboard) and does not relax
+``DashboardDataLoader``'s role guard for any other tab.
+
 Source of truth: ``01b_SCHEMA_AND_DATA.md`` (table / view columns,
 ``selected_proposals_current``), ``01e_UI_AND_TESTING.md`` /
 ``UI/95_Dashboard_Tab_Specs.md`` (Daily Proposals diversified checkbox + column
@@ -33,6 +41,7 @@ standalone viewer), and the current stable
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from datetime import date
 from typing import Any, Final, Protocol
@@ -674,3 +683,137 @@ class DashboardDataLoader:
             params,
         )
         return [r["proposal_id"] for r in rows]
+
+
+# --------------------------------------------------------------------------- #
+# Simulation Lab — separate read-only loader.
+#
+# DashboardDataLoader (above) intentionally rejects db_role="simulation" (see
+# UnknownDashboardRoleError / ALLOWED_DASHBOARD_ROLES) -- that restriction is
+# load-bearing for every other tab and stays untouched. Simulation Lab reads
+# are scoped to this standalone class instead, connecting directly to
+# simulation.duckdb (no ATTACH; sim_runs/sim_config_comparisons/sim_folds are
+# self-contained tables already written by SimulationEngine). Same read-only /
+# closed-in-finally discipline as DashboardDataLoader.
+# --------------------------------------------------------------------------- #
+DB_ROLE_SIMULATION: Final[str] = "simulation"
+
+
+@dataclass
+class SimRunSummary:
+    """One ``sim_runs`` row, with ``config_ids`` parsed from JSON."""
+
+    sim_run_id: str
+    sim_name: str | None
+    mode: str = ""
+    start_date: date | None = None
+    end_date: date | None = None
+    created_at: Any = None
+    config_ids: list[str] = field(default_factory=list)
+    status: str = ""
+    notes: str | None = None
+
+
+class SimDashboardDataLoader:
+    """Read-only loader for the Simulation Lab page (``simulation.duckdb`` only).
+
+    Deliberately not a subclass of :class:`DashboardDataLoader` and not gated
+    by :data:`ALLOWED_DASHBOARD_ROLES` -- this is the one dashboard surface
+    that *is* allowed to read the simulation database, per
+    ``M21_STREAMLIT_DASHBOARD_SPEC.md``'s read-only carve-out for viewing
+    already-written simulation results (as opposed to triggering runs, which
+    stays outside the dashboard entirely -- see ``tools/run_simulation.py``
+    follow-up note).
+    """
+
+    def __init__(self, db_manager: _DbManagerLike | None = None) -> None:
+        if db_manager is not None:
+            self._db: _DbManagerLike = db_manager
+        else:
+            from app.database import duckdb_manager  # noqa: PLC0415
+
+            self._db = db_manager if db_manager is not None else duckdb_manager
+
+    def _fetch_dicts(self, sql: str, params: list[Any]) -> list[dict[str, Any]]:
+        conn = self._db.connect(DB_ROLE_SIMULATION, read_only=True)
+        try:
+            cursor = conn.execute(sql, params)
+            columns = [d[0] for d in cursor.description]
+            return [dict(zip(columns, row)) for row in cursor.fetchall()]
+        finally:
+            conn.close()
+
+    def list_sim_runs(self, limit: int = DEFAULT_RUNS_LIMIT) -> list[SimRunSummary]:
+        """Recent ``sim_runs`` rows, newest first."""
+        rows = self._fetch_dicts(
+            "SELECT sim_run_id, sim_name, mode, start_date, end_date, "
+            "created_at, config_ids, status, notes "
+            "FROM sim_runs ORDER BY created_at DESC LIMIT ?",
+            [int(limit)],
+        )
+        summaries: list[SimRunSummary] = []
+        for r in rows:
+            config_ids = r.get("config_ids")
+            if isinstance(config_ids, str):
+                try:
+                    config_ids = json.loads(config_ids)
+                except (ValueError, TypeError):
+                    config_ids = []
+            summaries.append(
+                SimRunSummary(
+                    sim_run_id=r["sim_run_id"],
+                    sim_name=r.get("sim_name"),
+                    mode=r.get("mode") or "",
+                    start_date=r.get("start_date"),
+                    end_date=r.get("end_date"),
+                    created_at=r.get("created_at"),
+                    config_ids=list(config_ids or []),
+                    status=r.get("status") or "",
+                    notes=r.get("notes"),
+                )
+            )
+        return summaries
+
+    def load_sim_config_comparisons(
+        self,
+        sim_run_id: str,
+        setup_type: str | None = None,
+        risk_label: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """``sim_config_comparisons`` rows for one run, optionally filtered.
+
+        Columns per ``01e_UI_AND_TESTING.md``'s Simulation Lab spec:
+        config_id, setup_type, risk_label, expectancy, win_rate,
+        profit_factor, stop_hit_rate, target_hit_rate, max_drawdown_pct,
+        resolved_outcomes_pct. Note: ``stop_hit_rate``/``target_hit_rate``
+        are declared in the schema but not currently populated by
+        ``SimulationEngine``'s insert (pre-existing gap, out of scope here)
+        -- they will read back as ``NULL`` until that's fixed.
+        """
+        params: list[Any] = [sim_run_id]
+        clauses = ""
+        if setup_type is not None:
+            clauses += "AND setup_type = ? "
+            params.append(setup_type)
+        if risk_label is not None:
+            clauses += "AND risk_label = ? "
+            params.append(risk_label)
+        return self._fetch_dicts(
+            "SELECT config_id, setup_type, risk_label, horizon_bd, list_type, "
+            "expectancy, win_rate, avg_win, avg_loss, profit_factor, "
+            "stop_hit_rate, target_hit_rate, max_drawdown_pct, "
+            "resolved_outcomes_pct "
+            "FROM sim_config_comparisons WHERE sim_run_id = ? "
+            f"{clauses}"
+            "ORDER BY setup_type ASC, risk_label ASC NULLS LAST, config_id ASC",
+            params,
+        )
+
+    def load_sim_folds(self, sim_run_id: str) -> list[dict[str, Any]]:
+        """Walk-forward fold boundaries for one run, ordered by fold_number."""
+        return self._fetch_dicts(
+            "SELECT fold_id, fold_number, train_start, train_end, "
+            "test_start, test_end, selected_config_id "
+            "FROM sim_folds WHERE sim_run_id = ? ORDER BY fold_number ASC",
+            [sim_run_id],
+        )

@@ -116,6 +116,35 @@ sector_relative_strength    = ticker_20d_return_adj - sector_etf_20d_return_adj
 ```
 If sector is unmapped, `sector_relative_strength` = NULL; no sector bonus/penalty applied.
 
+### Cross-sectional RS percentile (features_v03, P1.1)
+```
+roc126             = close_adj / close_adj[126 trading days ago] - 1
+rs_percentile_126d = percentile_rank(roc126, within: all active tickers
+                      processed for this signal_date with a valid roc126)
+```
+Distinct mechanism from `relative_strength_vs_spy`/`sector_relative_strength`
+above — those are time-series spreads against one benchmark; this is a
+same-day cross-sectional rank (0-100) against the active universe. Flat
+126-trading-day window, no sub-period weighting, no skip-most-recent-month
+adjustment for V1 — a skip-month variant was considered and deliberately
+deferred pending outcome data (consistent with the platform's
+no-pre-diagnostic-tuning principle), not a gap.
+
+`NULL` when the ticker has <126 bars of history. A ticker with a valid
+`roc126` but no other active ticker that day also has one ranks at `100.0`
+(not `NULL`) — percentile rank degrades gracefully for a lone population
+member rather than being undefined, unlike a z-score.
+
+Percentile granularity (`100 / (n-1)` points per rank) and statistical
+stability both scale with `n` (the day's active universe size) — coarse and
+less stable at small `n` (e.g. a 50-ticker dev/test universe), fine-grained
+and stable at full production scale (hundreds to low-thousands of tickers).
+This is a property of whichever universe size is active that day, not
+something the formula itself corrects for.
+
+Scoring input only (per-setup-type scoring-weight wiring is a separate,
+future decision — not part of this addition). No hard gate.
+
 ---
 
 ## FILE: `FORMULAS/61_Step3_Universal_Eligibility.md`

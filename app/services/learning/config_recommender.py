@@ -170,6 +170,15 @@ _SELECT_PENDING: Final[str] = (
     "FROM config_recommendations WHERE status = 'pending'"
 )
 
+_UPDATE_STATUS_FROM_PENDING: Final[str] = (
+    "UPDATE config_recommendations SET status = ? "
+    "WHERE recommendation_id = ? AND status = 'pending'"
+)
+
+# Terminal statuses a pending recommendation may transition to via
+# set_recommendation_status (never back to 'pending' from the UI).
+_SETTABLE_STATUSES: Final[tuple[str, ...]] = (STATUS_APPROVED, STATUS_REJECTED)
+
 _PENDING_COLS: Final[tuple[str, ...]] = (
     "recommendation_id", "run_id", "setup_type", "regime", "incumbent_config_id",
     "candidate_config_id", "proposal_json", "evidence_json", "status", "created_at",
@@ -515,6 +524,73 @@ class ConfigRecommenderService:
             run_id=run_id,
             rows_processed=len(results),
             metadata={"db_role": db_role, "setup_type": setup_type, "recommendations": results},
+        )
+
+    def set_recommendation_status(
+        self,
+        recommendation_id: str,
+        status: str,
+        db_role: str = DB_ROLE_PROD,
+    ) -> ServiceResult:
+        """Transition a pending recommendation to ``'approved'`` or ``'rejected'``.
+
+        Status-only bookkeeping on ``config_recommendations`` -- this never
+        activates a config itself (that stays the caller's job, e.g. via
+        ``ConfigService.activate_setup_config`` from the dashboard action
+        layer). Only a row currently ``status='pending'`` is affected; the
+        ``WHERE ... AND status = 'pending'`` guard makes a double-click or a
+        stale-UI resubmit a no-op (``rows_processed=0`` with a warning)
+        instead of silently re-writing an already-decided recommendation.
+        """
+        run_id = str(uuid.uuid4())
+        if db_role not in ALLOWED_DB_ROLES:
+            msg = f"Unsupported db_role {db_role!r}. Recommendations exist only in {list(ALLOWED_DB_ROLES)}."
+            return self._failed(run_id, msg, {"db_role": db_role})
+        if status not in _SETTABLE_STATUSES:
+            msg = f"status must be one of {list(_SETTABLE_STATUSES)}, got {status!r}."
+            return self._failed(run_id, msg, {"db_role": db_role})
+        if not recommendation_id:
+            return self._failed(run_id, "recommendation_id must not be empty", {"db_role": db_role})
+
+        connection = self._db.connect(db_role)
+        try:
+            connection.execute(_UPDATE_STATUS_FROM_PENDING, [status, recommendation_id])
+        finally:
+            connection.close()
+
+        # DuckDB's cursor doesn't expose a portable rowcount here across the
+        # fakes this module is tested against; re-read to confirm the write
+        # actually landed rather than trusting a silent no-op.
+        verify_conn = self._db.connect(db_role, read_only=True)
+        try:
+            row = verify_conn.execute(
+                "SELECT status FROM config_recommendations WHERE recommendation_id = ?",
+                [recommendation_id],
+            ).fetchone()
+        finally:
+            verify_conn.close()
+
+        if row is None:
+            return self._failed(
+                run_id, f"recommendation_id {recommendation_id!r} not found", {"db_role": db_role}
+            )
+        if row[0] != status:
+            return ServiceResult(
+                status=sr.STATUS_SUCCESS_WITH_WARNINGS,
+                run_id=run_id,
+                rows_processed=0,
+                warnings=[
+                    f"recommendation {recommendation_id!r} was already {row[0]!r}; "
+                    f"not overwritten with {status!r}"
+                ],
+                metadata={"db_role": db_role, "recommendation_id": recommendation_id, "status": row[0]},
+            )
+
+        return ServiceResult(
+            status=sr.STATUS_SUCCESS,
+            run_id=run_id,
+            rows_processed=1,
+            metadata={"db_role": db_role, "recommendation_id": recommendation_id, "status": status},
         )
 
     # ------------------------------------------------------------------ #

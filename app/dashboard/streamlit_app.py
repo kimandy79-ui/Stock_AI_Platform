@@ -30,7 +30,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from app.dashboard import data_access
 from app.dashboard.action_service import DashboardActionService
-from app.dashboard.data_access import DashboardDataLoader
+from app.dashboard.data_access import DashboardDataLoader, SimDashboardDataLoader
 
 # ------------------------------------------------------------------ #
 # CSS — sidebar nav fix + card/pill tokens.
@@ -491,6 +491,16 @@ def _render_sidebar() -> None:
         unsafe_allow_html=True,
     )
 
+    from app.config import env as _env
+    _env.load_environment()  # lazy .env load (call time only), mirrors edgar_provider
+    if not (_env.get_str("SEC_USER_AGENT") or "").strip():
+        st.sidebar.warning(
+            "SEC_USER_AGENT is not set. fundamentals_refresh will use "
+            "yfinance_fallback only (reduced coverage) until it's configured "
+            "in .env.",
+            icon="⚠️",
+        )
+
 
 # ------------------------------------------------------------------ #
 # Feedback helper.
@@ -553,7 +563,7 @@ def _render_daily_proposals() -> None:  # noqa: C901
         }.get(status_raw, status_raw)
         chip_label = f"Pipeline run: {latest.get('run_date','?')} · {status_short}"
 
-    col_title, col_chip, col_btn = st.columns([2, 5, 2])
+    col_title, col_chip, col_csv, col_btn = st.columns([2, 4, 2, 2])
     with col_title:
         st.markdown('<div class="da-title">Daily Proposals</div>', unsafe_allow_html=True)
     with col_chip:
@@ -562,6 +572,18 @@ def _render_daily_proposals() -> None:  # noqa: C901
             f'width:fit-content;max-width:100%;white-space:nowrap;overflow:hidden;'
             f'text-overflow:ellipsis;margin-top:4px">{chip_label}</div>',
             unsafe_allow_html=True,
+        )
+    with col_csv:
+        st.markdown('<div style="height:8px"></div>', unsafe_allow_html=True)
+        read_from_csv = st.checkbox(
+            "Read tickers from CSV",
+            value=True,
+            key="dp_read_tickers_from_csv",
+            help=(
+                "Checked: use data/input/backfill_tickers_common_only.csv. "
+                "Unchecked: use the active ticker list from the database "
+                "(ticker_master)."
+            ),
         )
     with col_btn:
         run_clicked = st.button("▶  Run Pipeline", key="dp_run", type="primary", use_container_width=True)
@@ -612,7 +634,7 @@ def _render_daily_proposals() -> None:  # noqa: C901
     setup_config_id = None if cfg_choice == "(all)" else cfg_choice
 
     if run_clicked:
-        _do_run_pipeline(role, signal_date)
+        _do_run_pipeline(role, signal_date, ticker_source="csv" if read_from_csv else "db")
 
     view = loader.load_daily_proposals(
         signal_date=signal_date,
@@ -885,13 +907,20 @@ def _list_membership_label(row: dict) -> str:
     return "—"
 
 
-def _do_run_pipeline(role: str, run_date: date | None = None) -> None:
+def _do_run_pipeline(
+    role: str, run_date: date | None = None, ticker_source: str = "db"
+) -> None:
     """Run the pipeline in a background thread; progress tracked in-memory only.
 
     DB polling during execution is intentionally removed — opening a read-only
     connection while the pipeline holds write connections causes
     ConnectionException on Windows DuckDB (different configuration error).
     Progress is tracked via a shared list updated by the pipeline thread.
+
+    ``ticker_source``: ``"csv"`` reads
+    ``data/input/backfill_tickers_common_only.csv`` (via
+    ``DashboardActionService.run_pipeline``); ``"db"`` (default) reads active
+    tickers from ``ticker_master``, the pre-existing behavior.
     """
     import threading
     import time as _time
@@ -902,6 +931,7 @@ def _do_run_pipeline(role: str, run_date: date | None = None) -> None:
         "benchmark_etf_ingestion":       "📥 Ingesting benchmark / ETF prices",
         "universe_ingestion":            "🌐 Building universe snapshot",
         "earnings_calendar_refresh":     "📅 Refreshing earnings calendar",
+        "fundamentals_refresh":          "📊 Refreshing fundamentals data",
         "price_ingestion":               "📥 Ingesting stock prices",
         "validation":                    "✅ Validating price data",
         "mutation_detection":            "🔍 Detecting price mutations",
@@ -928,6 +958,7 @@ def _do_run_pipeline(role: str, run_date: date | None = None) -> None:
                 run_date=effective_date,
                 run_type="manual",
                 force_rerun=True,
+                ticker_source=ticker_source,
             )
             # Populate progress from result after completion
             result = result_holder.get("result")
@@ -983,12 +1014,31 @@ def _do_run_pipeline(role: str, run_date: date | None = None) -> None:
         result = result_holder.get("result")
         if result is None:
             st.session_state[_K_PIPE_MSG] = ("error", "Pipeline returned no result.")
-        elif result.status == "success":
-            st.session_state[_K_PIPE_MSG] = ("success", f"Pipeline completed for {effective_date}. run_id={result.run_id}")
-        elif result.status == "success_with_warnings":
-            st.session_state[_K_PIPE_MSG] = ("warning", f"Completed {effective_date} with warnings: " + "; ".join(result.warnings or []))
         else:
-            st.session_state[_K_PIPE_MSG] = ("error", f"Pipeline failed for {effective_date}: " + "; ".join(result.errors or ["unknown error"]))
+            run_meta = getattr(result, "metadata", {}) or {}
+            src = run_meta.get("ticker_source", ticker_source)
+            n_tickers = run_meta.get("ticker_count")
+            source_note = (
+                f" · loaded {n_tickers} tickers from {src}"
+                if n_tickers is not None else f" · ticker source: {src}"
+            )
+            if result.status == "success":
+                st.session_state[_K_PIPE_MSG] = (
+                    "success",
+                    f"Pipeline completed for {effective_date}{source_note}. run_id={result.run_id}",
+                )
+            elif result.status == "success_with_warnings":
+                st.session_state[_K_PIPE_MSG] = (
+                    "warning",
+                    f"Completed {effective_date}{source_note} with warnings: "
+                    + "; ".join(result.warnings or []),
+                )
+            else:
+                st.session_state[_K_PIPE_MSG] = (
+                    "error",
+                    f"Pipeline failed for {effective_date}{source_note}: "
+                    + "; ".join(result.errors or ["unknown error"]),
+                )
     st.rerun()
 
 
@@ -1277,14 +1327,158 @@ def _do_save_clone(role: str, source_meta: dict, new_name: str) -> None:
 # Other tabs.
 # ------------------------------------------------------------------ #
 def _render_simulation() -> None:
-    st.markdown('<div class="da-title">Simulation / Backtest</div>', unsafe_allow_html=True)
-    st.info(
-        "🔬 **Simulation module is on HOLD** — functionality will be added in a future release.\n\n"
-        "This section will provide:\n"
-        "- Historical backtest runs against sim.duckdb\n"
-        "- Strategy performance comparison\n"
-        "- Simulation parameter configuration"
+    st.markdown('<div class="da-title">Simulation Lab</div>', unsafe_allow_html=True)
+
+    sim_loader = SimDashboardDataLoader()
+    try:
+        runs = sim_loader.list_sim_runs()
+    except Exception as exc:  # noqa: BLE001
+        st.error(f"Could not load simulation runs: {exc}")
+        runs = []
+
+    if not runs:
+        st.info(
+            "No simulation runs yet.\n\n"
+            "Simulation runs are triggered outside the dashboard, the same way "
+            "the daily pipeline is triggered via `tools/run_prod_pipeline.py` — "
+            "the dashboard never runs a simulation in-process (read-only "
+            "boundary, M21 spec §6).\n\n"
+            "**Note:** a CLI entry point for launching simulation runs "
+            "(e.g. `tools/run_simulation.py`) does not exist yet in this "
+            "codebase — that's a separate follow-up task, not part of this page."
+        )
+    else:
+        def _run_label(r: Any) -> str:
+            name = r.sim_name or r.sim_run_id[:8]
+            return f"{name} — {r.mode} — {r.start_date}→{r.end_date} ({r.status})"
+
+        labels = [_run_label(r) for r in runs]
+        run_by_label = dict(zip(labels, runs))
+        sel_label: str = st.selectbox("Select simulation run", options=labels, key="sim_run_sel")  # type: ignore[assignment]
+        sel_run = run_by_label[sel_label]
+        st.caption(f"config_ids evaluated: {', '.join(sel_run.config_ids) or '—'}")
+
+        try:
+            comparisons = sim_loader.load_sim_config_comparisons(sel_run.sim_run_id)
+        except Exception as exc:  # noqa: BLE001
+            st.error(f"Could not load config comparisons: {exc}")
+            comparisons = []
+
+        setup_types = sorted({c["setup_type"] for c in comparisons if c.get("setup_type")})
+        risk_labels = sorted({c["risk_label"] for c in comparisons if c.get("risk_label")})
+
+        fc1, fc2 = st.columns(2)
+        setup_filter: str = fc1.selectbox("Setup type", ["All"] + setup_types, key="sim_setup_filter")  # type: ignore[assignment]
+        risk_filter: str = fc2.selectbox("Risk label", ["All"] + risk_labels, key="sim_risk_filter")  # type: ignore[assignment]
+
+        filtered = comparisons
+        if setup_filter != "All":
+            filtered = [c for c in filtered if c.get("setup_type") == setup_filter]
+        if risk_filter != "All":
+            filtered = [c for c in filtered if c.get("risk_label") == risk_filter]
+
+        st.subheader("Config comparisons")
+        if filtered:
+            st.dataframe(pd.DataFrame(filtered), use_container_width=True, hide_index=True)
+        else:
+            st.info("No config comparisons match the selected filters.")
+
+        try:
+            folds = sim_loader.load_sim_folds(sel_run.sim_run_id)
+        except Exception as exc:  # noqa: BLE001
+            st.error(f"Could not load walk-forward folds: {exc}")
+            folds = []
+        if folds:
+            with st.expander(f"Walk-forward folds ({len(folds)})"):
+                st.dataframe(pd.DataFrame(folds), use_container_width=True, hide_index=True)
+
+    st.divider()
+    _render_config_recommendations()
+
+
+def _render_config_recommendations() -> None:
+    st.markdown(
+        '<div class="da-title" style="font-size:18px">Pending Config Recommendations</div>',
+        unsafe_allow_html=True,
     )
+    role = _db_role()
+    if role != "prod":
+        st.info(
+            "Config recommendations are prod-only — Module 23 "
+            "(`ConfigRecommenderService`) reads prod + simulation but writes "
+            "`config_recommendations` to prod only. Switch to **prod** to "
+            "review pending recommendations."
+        )
+        return
+
+    try:
+        from app.services.learning.config_recommender import ConfigRecommenderService
+        result = ConfigRecommenderService().get_pending_recommendations(db_role="prod")
+    except Exception as exc:  # noqa: BLE001
+        st.error(f"Could not load config recommendations: {exc}")
+        return
+
+    if result.status == "failed":
+        st.error("Could not load config recommendations: " + "; ".join(result.errors or []))
+        return
+
+    recommendations: list[dict] = result.metadata.get("recommendations", [])
+    if not recommendations:
+        st.info("No pending config recommendations.")
+        return
+
+    for rec in recommendations:
+        rec_id = rec["recommendation_id"]
+        st.markdown(
+            f"**{rec['setup_type']}** · regime={rec.get('regime') or '—'} — "
+            f"candidate `{rec['candidate_config_id']}` vs incumbent `{rec['incumbent_config_id']}`"
+        )
+        diff_rows = rec.get("proposal_json") or []
+        if diff_rows:
+            st.dataframe(pd.DataFrame(diff_rows), use_container_width=True, hide_index=True)
+        else:
+            st.caption("No parameter differences recorded.")
+
+        evidence = rec.get("evidence_json") or {}
+        candidate_evidence = next(
+            (c for c in evidence.get("candidates", []) if c.get("config_id") == rec["candidate_config_id"]),
+            {},
+        )
+        ec1, ec2, ec3 = st.columns(3)
+        ec1.metric("Candidate expectancy", _fmt(candidate_evidence.get("candidate_expectancy")))
+        ec2.metric("Incumbent expectancy", _fmt(candidate_evidence.get("incumbent_expectancy")))
+        ec3.metric("Margin achieved", _fmt(candidate_evidence.get("margin_achieved")))
+
+        confirmed = st.checkbox(
+            "I've reviewed the evidence above", key=f"rec_confirm_{rec_id}"
+        )
+        bc1, bc2 = st.columns(2)
+        approve_clicked = bc1.button(
+            "✅ Approve", key=f"rec_approve_{rec_id}", disabled=not confirmed, type="primary"
+        )
+        reject_clicked = bc2.button(
+            "❌ Reject", key=f"rec_reject_{rec_id}", disabled=not confirmed
+        )
+
+        if approve_clicked:
+            action_result = _svc().approve_config_recommendation(
+                recommendation_id=rec_id,
+                candidate_config_id=rec["candidate_config_id"],
+                setup_type=rec["setup_type"],
+                db_role=role,
+            )
+            _show_result(
+                action_result,
+                f"Recommendation approved; '{rec['candidate_config_id']}' is now active.",
+            )
+            if action_result.status in ("success", "success_with_warnings"):
+                st.rerun()
+        if reject_clicked:
+            action_result = _svc().reject_config_recommendation(recommendation_id=rec_id, db_role=role)
+            _show_result(action_result, "Recommendation rejected.")
+            if action_result.status in ("success", "success_with_warnings"):
+                st.rerun()
+        st.divider()
 
 
 def _render_outcome_tracking() -> None:

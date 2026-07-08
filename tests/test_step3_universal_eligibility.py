@@ -265,7 +265,8 @@ class TestContractCompatibility:
         assert result.status == sr_mod.STATUS_SUCCESS
 
     def test_constants_feature_schema_version(self):
-        assert constants.FEATURE_SCHEMA_VERSION == "features_v02"
+        # P1.1 (2026-07-08): bumped to features_v03 (adds rs_percentile_126d).
+        assert constants.FEATURE_SCHEMA_VERSION == "features_v03"
 
     def test_allowed_setup_types_from_constants(self):
         for cfg in ALL_SETUP_CONFIGS:

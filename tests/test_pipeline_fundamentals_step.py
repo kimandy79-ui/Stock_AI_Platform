@@ -58,7 +58,7 @@ class _FakeDb:
         return _FakeConnection(self)
 
 
-def _snapshot(ticker: str) -> FundamentalSnapshot:
+def _snapshot(ticker: str, source_provider: str = "sec_edgar") -> FundamentalSnapshot:
     return FundamentalSnapshot(
         ticker=ticker,
         as_of_date=RUN_DATE,
@@ -69,15 +69,16 @@ def _snapshot(ticker: str) -> FundamentalSnapshot:
         altman_z_score=2.5,
         insider_trade_flag=None,
         institutional_ownership_delta=None,
-        source_provider="sec_edgar",
+        source_provider=source_provider,
     )
 
 
 class _FakeFundamentalsProvider:
-    def __init__(self, snapshots=None, fail_tickers=(), raise_tickers=()):
+    def __init__(self, snapshots=None, fail_tickers=(), raise_tickers=(), sources=None):
         self._snapshots = snapshots or {}
         self._fail_tickers = set(fail_tickers)
         self._raise_tickers = set(raise_tickers)
+        self._sources = sources or {}
         self.calls: list[str] = []
 
     def get_fundamentals(self, ticker: str, as_of_date: date) -> ServiceResult:
@@ -88,7 +89,9 @@ class _FakeFundamentalsProvider:
             return ServiceResult(
                 status=service_result.STATUS_FAILED, run_id="p", errors=["boom"]
             )
-        snapshot = self._snapshots.get(ticker) or _snapshot(ticker)
+        snapshot = self._snapshots.get(ticker) or _snapshot(
+            ticker, self._sources.get(ticker, "sec_edgar")
+        )
         return ServiceResult(
             status=service_result.STATUS_SUCCESS,
             run_id="p",
@@ -180,6 +183,48 @@ class TestStepFundamentals:
         fundamentals_idx = STEP_NAMES.index("fundamentals_refresh")
         price_idx = STEP_NAMES.index("price_ingestion")
         assert earnings_idx < fundamentals_idx < price_idx
+
+
+class TestStepFundamentalsSourceSummary:
+    """Source-lineage summary: which of sec_edgar / yfinance_fallback /
+    unavailable actually produced each ticker's fundamentals."""
+
+    def test_all_from_sec_edgar(self) -> None:
+        db = _FakeDb(tickers=["AAPL", "MSFT"])
+        provider = _FakeFundamentalsProvider()
+        orch = _build(db, provider)
+        result = orch._step_fundamentals(RUN_DATE, "prod", "r1", _NullLog())
+        assert result.metadata["source_counts"] == {"sec_edgar": 2}
+        assert result.metadata["source_summary"] == "Fundamentals: 2/2 from sec_edgar"
+
+    def test_mixed_sources_and_unavailable(self) -> None:
+        db = _FakeDb(tickers=["AAPL", "MSFT", "GOOG", "BADTICKER"])
+        provider = _FakeFundamentalsProvider(
+            sources={"AAPL": "sec_edgar", "MSFT": "yfinance_fallback", "GOOG": "yfinance_fallback"},
+            fail_tickers=["BADTICKER"],
+        )
+        orch = _build(db, provider)
+        result = orch._step_fundamentals(RUN_DATE, "prod", "r1", _NullLog())
+        assert result.metadata["source_counts"] == {"sec_edgar": 1, "yfinance_fallback": 2}
+        assert result.metadata["source_summary"] == (
+            "Fundamentals: 1/4 from sec_edgar, 2/4 from yfinance_fallback, 1/4 unavailable"
+        )
+
+    def test_raised_exception_counts_as_unavailable(self) -> None:
+        db = _FakeDb(tickers=["AAPL", "EXPLODES"])
+        provider = _FakeFundamentalsProvider(raise_tickers=["EXPLODES"])
+        orch = _build(db, provider)
+        result = orch._step_fundamentals(RUN_DATE, "prod", "r1", _NullLog())
+        assert result.metadata["source_counts"] == {"sec_edgar": 1}
+        assert "1/2 unavailable" in result.metadata["source_summary"]
+
+    def test_summary_present_even_when_all_unavailable(self) -> None:
+        db = _FakeDb(tickers=["BADTICKER"])
+        provider = _FakeFundamentalsProvider(fail_tickers=["BADTICKER"])
+        orch = _build(db, provider)
+        result = orch._step_fundamentals(RUN_DATE, "prod", "r1", _NullLog())
+        assert result.metadata["source_counts"] == {}
+        assert result.metadata["source_summary"] == "Fundamentals: 1/1 unavailable"
 
 
 class _NullLog:

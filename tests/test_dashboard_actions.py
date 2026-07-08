@@ -105,8 +105,22 @@ class FakeConfig:
         self._get_result = get_result or _ok(config={"config_id": "cfg1", "setup_name": "Normal", "version": "v1", "active_flag": True, "config_hash": "abc", "created_at": "2026-01-01", "created_by": None, "notes": None})
         self._list_result = list_result or _ok(versions=[])
 
-    def activate_setup_config(self, config_id: str, db_role: str, activated_by: Any = None, reason: Any = None) -> ServiceResult:
-        self.activate_calls.append({"config_id": config_id, "db_role": db_role, "activated_by": activated_by, "reason": reason})
+    def activate_setup_config(
+        self,
+        config_id: str,
+        db_role: str,
+        activated_by: Any = None,
+        reason: Any = None,
+        setup_type: Any = None,
+    ) -> ServiceResult:
+        # setup_type is accepted here (but not by the old activated_by/reason
+        # tests below) because it mirrors ConfigService's *real* signature --
+        # approve_config_recommendation calls it that way. See action_service.py's
+        # comment on the pre-existing activated_by/reason drift.
+        self.activate_calls.append({
+            "config_id": config_id, "db_role": db_role,
+            "activated_by": activated_by, "reason": reason, "setup_type": setup_type,
+        })
         return self._activate_result
 
     def create_setup_config_version(self, **kwargs: Any) -> ServiceResult:
@@ -119,6 +133,16 @@ class FakeConfig:
 
     def list_setup_configs(self, db_role: str, setup_name: Any = None) -> ServiceResult:
         return self._list_result
+
+
+class FakeConfigRecommender:
+    def __init__(self, status_result: ServiceResult | None = None) -> None:
+        self.status_calls: list[dict] = []
+        self._status_result = status_result or _ok(recommendation_id="rec1", status="approved")
+
+    def set_recommendation_status(self, recommendation_id: str, status: str, db_role: str) -> ServiceResult:
+        self.status_calls.append({"recommendation_id": recommendation_id, "status": status, "db_role": db_role})
+        return self._status_result
 
 
 class FakeDbConn:
@@ -195,6 +219,78 @@ class TestRunPipeline:
         result = svc.run_pipeline(db_role="prod")
         assert result.run_id  # non-empty
         assert len(result.run_id) == 36  # uuid4 string
+
+    def test_invalid_ticker_source_rejected(self) -> None:
+        fake = FakePipeline()
+        svc = _svc(pipeline_orchestrator=fake)
+        result = svc.run_pipeline(db_role="prod", ticker_source="ftp")
+        assert result.status == sr_mod.STATUS_FAILED
+        assert len(fake.called) == 0  # rejected before ever touching the pipeline
+
+    def test_injected_pipeline_bypasses_ticker_loading_entirely(self) -> None:
+        """When a fake orchestrator is injected (the existing test pattern),
+        ticker_source is accepted but never exercises the real csv/db
+        loading branch -- ticker_count is simply None."""
+        fake = FakePipeline()
+        svc = _svc(pipeline_orchestrator=fake)
+        result = svc.run_pipeline(db_role="prod", ticker_source="csv")
+        assert result.status == sr_mod.STATUS_SUCCESS
+        assert result.metadata["ticker_source"] == "csv"
+        assert result.metadata["ticker_count"] is None
+
+
+# ------------------------------------------------------------------ #
+# run_pipeline ticker_source — real _get_pipeline branching (no injected
+# fake orchestrator, so the csv/db loading logic actually runs).
+# ------------------------------------------------------------------ #
+
+class TestGetPipelineTickerSource:
+    def test_csv_source_loads_real_file(self, tmp_path) -> None:
+        csv_path = tmp_path / "tickers.csv"
+        csv_path.write_text("ticker\nAAPL\nMSFT\nGOOGL\n", encoding="utf-8")
+        svc = _svc()
+        pipeline, ticker_count = svc._get_pipeline("csv", csv_path)
+        assert ticker_count == 3
+        assert pipeline is not None
+
+    def test_csv_source_missing_file_raises_value_error(self, tmp_path) -> None:
+        svc = _svc()
+        missing = tmp_path / "does_not_exist.csv"
+        with pytest.raises(ValueError, match="cannot read"):
+            svc._get_pipeline("csv", missing)
+
+    def test_csv_source_empty_file_raises_value_error(self, tmp_path) -> None:
+        csv_path = tmp_path / "empty.csv"
+        csv_path.write_text("", encoding="utf-8")
+        svc = _svc()
+        with pytest.raises(ValueError, match="empty"):
+            svc._get_pipeline("csv", csv_path)
+
+    def test_csv_source_default_path_is_project_csv(self) -> None:
+        """No explicit tickers_csv_path -> falls back to
+        data/input/backfill_tickers_common_only.csv, which exists in this repo."""
+        svc = _svc()
+        pipeline, ticker_count = svc._get_pipeline("csv", None)
+        assert ticker_count is not None and ticker_count > 0
+
+    def test_db_source_loads_from_ticker_master(self) -> None:
+        rows = [
+            ("AAPL", "AAPL", "Apple Inc.", "NASDAQ", "Technology", "Hardware", "common_stock", "stock"),
+            ("MSFT", "MSFT", "Microsoft Corp.", "NASDAQ", "Technology", "Software", "common_stock", "stock"),
+        ]
+        columns = ["ticker", "yahoo_symbol", "company_name", "exchange",
+                   "sector", "industry", "security_type", "symbol_type"]
+        svc = _svc(db_manager=FakeDbManager(rows=rows, columns=columns))
+        pipeline, ticker_count = svc._get_pipeline("db", None)
+        assert ticker_count == 2
+
+    def test_db_source_is_the_default_when_unspecified(self) -> None:
+        rows = [("AAPL", "AAPL", "Apple Inc.", "NASDAQ", "Technology", "Hardware", "common_stock", "stock")]
+        columns = ["ticker", "yahoo_symbol", "company_name", "exchange",
+                   "sector", "industry", "security_type", "symbol_type"]
+        svc = _svc(db_manager=FakeDbManager(rows=rows, columns=columns))
+        pipeline, ticker_count = svc._get_pipeline()
+        assert ticker_count == 1
 
 
 # ------------------------------------------------------------------ #
@@ -330,6 +426,111 @@ class TestActivateStrategyConfig:
         svc.activate_setup_config(config_id="cfg1", db_role="debug", activated_by="alice", reason="test reason")
         assert fake.activate_calls[0]["activated_by"] == "alice"
         assert fake.activate_calls[0]["reason"] == "test reason"
+
+
+# ------------------------------------------------------------------ #
+# approve_config_recommendation.
+# ------------------------------------------------------------------ #
+
+class TestApproveConfigRecommendation:
+    def test_success_activates_then_marks_approved(self) -> None:
+        config = FakeConfig()
+        recommender = FakeConfigRecommender()
+        svc = _svc(config_service=config, config_recommender=recommender)
+        result = svc.approve_config_recommendation(
+            recommendation_id="rec1", candidate_config_id="cfg1",
+            setup_type="breakout", db_role="prod",
+        )
+        assert result.status == sr_mod.STATUS_SUCCESS
+        assert len(config.activate_calls) == 1
+        assert config.activate_calls[0]["config_id"] == "cfg1"
+        assert config.activate_calls[0]["setup_type"] == "breakout"
+        assert len(recommender.status_calls) == 1
+        assert recommender.status_calls[0] == {
+            "recommendation_id": "rec1", "status": "approved", "db_role": "prod",
+        }
+
+    def test_invalid_role_rejected_before_any_call(self) -> None:
+        config = FakeConfig()
+        recommender = FakeConfigRecommender()
+        svc = _svc(config_service=config, config_recommender=recommender)
+        result = svc.approve_config_recommendation(
+            recommendation_id="rec1", candidate_config_id="cfg1",
+            setup_type="breakout", db_role="simulation",
+        )
+        assert result.status == sr_mod.STATUS_FAILED
+        assert not config.activate_calls
+        assert not recommender.status_calls
+
+    def test_empty_recommendation_id_rejected(self) -> None:
+        svc = _svc(config_service=FakeConfig(), config_recommender=FakeConfigRecommender())
+        result = svc.approve_config_recommendation(
+            recommendation_id="", candidate_config_id="cfg1", setup_type="breakout", db_role="prod",
+        )
+        assert result.status == sr_mod.STATUS_FAILED
+
+    def test_empty_candidate_config_id_rejected(self) -> None:
+        svc = _svc(config_service=FakeConfig(), config_recommender=FakeConfigRecommender())
+        result = svc.approve_config_recommendation(
+            recommendation_id="rec1", candidate_config_id="", setup_type="breakout", db_role="prod",
+        )
+        assert result.status == sr_mod.STATUS_FAILED
+
+    def test_activation_failure_short_circuits_before_marking_approved(self) -> None:
+        config = FakeConfig(activate_result=_fail(error="activation boom"))
+        recommender = FakeConfigRecommender()
+        svc = _svc(config_service=config, config_recommender=recommender)
+        result = svc.approve_config_recommendation(
+            recommendation_id="rec1", candidate_config_id="cfg1",
+            setup_type="breakout", db_role="prod",
+        )
+        assert result.status == sr_mod.STATUS_FAILED
+        assert len(config.activate_calls) == 1
+        assert not recommender.status_calls  # never marked approved after a failed activation
+
+    def test_recommendation_status_failure_degrades_to_warning_not_failure(self) -> None:
+        config = FakeConfig()
+        recommender = FakeConfigRecommender(status_result=_fail(error="status update boom"))
+        svc = _svc(config_service=config, config_recommender=recommender)
+        result = svc.approve_config_recommendation(
+            recommendation_id="rec1", candidate_config_id="cfg1",
+            setup_type="breakout", db_role="prod",
+        )
+        # Config is already active -- degrade to warnings, not a hard failure.
+        assert result.status == sr_mod.STATUS_SUCCESS_WITH_WARNINGS
+        assert any("approved" in w for w in result.warnings)
+
+
+# ------------------------------------------------------------------ #
+# reject_config_recommendation.
+# ------------------------------------------------------------------ #
+
+class TestRejectConfigRecommendation:
+    def test_success(self) -> None:
+        recommender = FakeConfigRecommender(status_result=_ok(recommendation_id="rec1", status="rejected"))
+        svc = _svc(config_recommender=recommender)
+        result = svc.reject_config_recommendation(recommendation_id="rec1", db_role="prod")
+        assert result.status == sr_mod.STATUS_SUCCESS
+        assert recommender.status_calls == [{"recommendation_id": "rec1", "status": "rejected", "db_role": "prod"}]
+
+    def test_invalid_role_rejected(self) -> None:
+        recommender = FakeConfigRecommender()
+        svc = _svc(config_recommender=recommender)
+        result = svc.reject_config_recommendation(recommendation_id="rec1", db_role="simulation")
+        assert result.status == sr_mod.STATUS_FAILED
+        assert not recommender.status_calls
+
+    def test_empty_recommendation_id_rejected(self) -> None:
+        svc = _svc(config_recommender=FakeConfigRecommender())
+        result = svc.reject_config_recommendation(recommendation_id="", db_role="prod")
+        assert result.status == sr_mod.STATUS_FAILED
+
+    def test_does_not_touch_config_service(self) -> None:
+        config = FakeConfig()
+        recommender = FakeConfigRecommender()
+        svc = _svc(config_service=config, config_recommender=recommender)
+        svc.reject_config_recommendation(recommendation_id="rec1", db_role="prod")
+        assert not config.activate_calls
 
 
 # ------------------------------------------------------------------ #

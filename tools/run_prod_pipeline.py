@@ -147,6 +147,10 @@ def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 
+    ensure_repo_root_on_path()
+    from app.config import env
+    env.load_environment()
+
     print(
         f"Starting prod pipeline: run_date={args.run_date} run_type={args.run_type} "
         f"force_rerun={args.force_rerun} resume_from={args.resume_from} db_role=prod"

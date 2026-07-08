@@ -1,6 +1,6 @@
-"""Module 11 — Feature Engine (features_v02).
+"""Module 11 — Feature Engine (features_v03).
 
-Computes ``daily_features`` rows (schema version ``features_v02``) from already-
+Computes ``daily_features`` rows (schema version ``features_v03``) from already-
 ingested, validated, and mutation-checked ``daily_prices`` data.  Runs after
 Module 10 (Mutation Detector) and before Module 12 (Market Regime Engine).
 
@@ -23,6 +23,20 @@ now computed.  New columns added over the ``features_v01`` baseline:
     volume_dry_up_score, volume_expansion_score
     relative_strength_vs_spy
 
+P1.1 (2026-07-08): ``features_v03`` adds one column over the ``features_v02``
+baseline — ``rs_percentile_126d``, a same-day cross-sectional percentile
+rank (0-100) of each ticker's 126-trading-day ROC against every other
+*active, currently-processed* ticker with a valid 126d ROC that day.
+Distinct in kind from ``relative_strength_vs_spy``/``sector_relative_strength``
+(both single-benchmark time-series spreads, unaffected by this addition) —
+this is a same-day rank against the universe, not a spread against SPY or a
+sector/industry ETF. Scoring input only; no hard gate wired to it. NULL
+whenever the ticker has <126 bars of history, or is the only ticker that day
+with a valid 126d ROC (a lone value ranks at 100.0, not NULL — see
+``_percentile_rank``). ``features_v02`` rows are retained as historical,
+frozen, and do not get this field retroactively (same policy as the
+``v01``->``v02`` bump).
+
 Scope
 -----
 - Reads ``daily_prices`` (``data_quality_status = 'ok'``) plus warmup history.
@@ -41,6 +55,7 @@ uses ``ATTACH`` / DDL / schema changes, never writes any table other than
 
 from __future__ import annotations
 
+import bisect
 import math
 import uuid
 from datetime import date, timedelta
@@ -148,6 +163,9 @@ OPTIONAL_FEATURE_COLUMNS: Final[tuple[str, ...]] = (
     "volume_dry_up_score",
     "volume_expansion_score",
     "relative_strength_vs_spy",
+    # v03 new (optional — NULL when <126 bars of history, or no other active
+    # ticker that day has a valid 126d ROC to rank against)
+    "rs_percentile_126d",
 )
 
 # --------------------------------------------------------------------------- #
@@ -213,6 +231,8 @@ _FEATURE_PARAM_COLUMNS: Final[tuple[str, ...]] = (
     "volume_dry_up_score",
     "volume_expansion_score",
     "relative_strength_vs_spy",
+    # v03 cross-sectional
+    "rs_percentile_126d",
     # context / open-gap columns
     "sector_relative_strength",
     "market_regime",
@@ -303,6 +323,25 @@ def _sanitize(value: Any) -> Any:
     if isinstance(value, float) and (math.isnan(value) or math.isinf(value)):
         return None
     return value
+
+
+def _percentile_rank(sorted_values: list[float], value: float) -> float:
+    """0-100 percentile rank of ``value`` within ``sorted_values`` (ascending).
+
+    ``n<=1`` -> 100.0: a lone ticker (or a ticker whose family has no other
+    members with a valid 126d ROC that day) has no peers to rank against, so
+    it ranks at the top of its own single-member population rather than
+    producing an undefined/NaN result.
+
+    Note (rs_percentile_126d design note, P1.1): granularity is `100/(n-1)`
+    points per rank and small-`n` percentiles are less statistically stable
+    (usual floor `n>=30`) -- both are properties of whichever universe size
+    is active on a given signal_date, not something this function solves for.
+    """
+    n = len(sorted_values)
+    if n <= 1:
+        return 100.0
+    return 100.0 * bisect.bisect_left(sorted_values, value) / (n - 1)
 
 
 # --------------------------------------------------------------------------- #
@@ -948,6 +987,7 @@ class FeatureEngine:
             "pullback_depth_pct",
             "volume_dry_up_score",
             "volume_expansion_score",
+            "roc126",
             "_high20",
             "_high252",
         ]
@@ -1046,6 +1086,7 @@ class FeatureEngine:
                     rec=rec,
                     sector_rs=sector_rs,
                     rs_vs_spy=rs_vs_spy,
+                    roc126=_sanitize(rec["roc126"]),
                     swing_high=swing_high_val,
                     swing_low=swing_low_val,
                     support=support,
@@ -1069,6 +1110,25 @@ class FeatureEngine:
                     ticker, cutoff, type(exc).__name__, exc,
                 )
 
+        # P1.1 (features_v03): rs_percentile_126d -- cross-sectional percentile
+        # rank of roc126 within the active universe *per cutoff date* (grouped
+        # by feature_date, not assumed single-date, since a batch run can span
+        # multiple signal_dates' worth of cutoffs). Tickers with <126 bars of
+        # history have roc126=None and get rs_percentile_126d=None -- excluded
+        # from the ranking population, not ranked at 0.
+        by_cutoff: dict[date, list[float]] = {}
+        for r in rows:
+            v = r["roc126"]
+            if v is not None:
+                by_cutoff.setdefault(r["feature_date"], []).append(v)
+        for values in by_cutoff.values():
+            values.sort()
+        for r in rows:
+            v = r.pop("roc126")
+            r["rs_percentile_126d"] = (
+                _percentile_rank(by_cutoff[r["feature_date"]], v) if v is not None else None
+            )
+
         rows.sort(key=lambda r: r["ticker"])
         return rows
 
@@ -1079,6 +1139,7 @@ class FeatureEngine:
         rec: dict[str, Any],
         sector_rs: float | None,
         rs_vs_spy: float | None,
+        roc126: float | None,
         swing_high: float | None,
         swing_low: float | None,
         support: float | None,
@@ -1127,6 +1188,11 @@ class FeatureEngine:
             "range_duration": range_duration,
             "range_tightness_score": _sanitize(range_tightness_score),
             "relative_strength_vs_spy": _sanitize(rs_vs_spy),
+            # v03: raw 126d ROC (transient -- not in _FEATURE_PARAM_COLUMNS,
+            # consumed and popped by the cross-sectional percentile pass in
+            # _build_feature_rows) and its placeholder percentile output.
+            "roc126": roc126,
+            "rs_percentile_126d": None,
             # context
             "sector_relative_strength": _sanitize(sector_rs),
             # market_regime: open gap G-REGIME (owned by Module 12)
@@ -1269,6 +1335,8 @@ def _compute_features(prices: pl.DataFrame) -> pl.DataFrame:
         pl.col("close_adj").shift(1).over("ticker").alias("_prev_close_adj"),
         pl.col("close_adj").diff().over("ticker").alias("_delta"),
         pl.col("close_adj").shift(20).over("ticker").alias("_close_adj_lag20"),
+        # v03: 126-trading-day (~6mo) lag for rs_percentile_126d's raw ROC input.
+        pl.col("close_adj").shift(126).over("ticker").alias("_close_adj_lag126"),
         (pl.col("close_raw") * pl.col("volume_raw")).alias("_dollar"),
         (pl.col("high_adj") - pl.col("low_adj")).alias("_range_hl"),
     )
@@ -1338,6 +1406,11 @@ def _compute_features(prices: pl.DataFrame) -> pl.DataFrame:
         .otherwise(None)
         .alias("rsi14"),
         (pl.col("close_adj") / pl.col("_close_adj_lag20") - 1.0).alias("roc20"),
+        # v03: raw input for rs_percentile_126d (cross-sectional rank, computed
+        # per-cutoff-date over the active universe in _build_feature_rows --
+        # null here whenever <126 bars of history exist, same null-on-insufficient-
+        # history convention as every other lagged indicator in this module).
+        (pl.col("close_adj") / pl.col("_close_adj_lag126") - 1.0).alias("roc126"),
         (pl.col("volume_raw") / pl.col("avg_volume_20d")).alias("rvol20"),
         (pl.col("close_adj") / pl.col("_high252") - 1.0).alias("distance_from_52w_high_pct"),
         (pl.col("close_adj") / pl.col("_high20") - 1.0).alias("pullback_from_recent_high_pct"),

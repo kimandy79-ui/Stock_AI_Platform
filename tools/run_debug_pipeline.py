@@ -148,6 +148,10 @@ def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 
+    ensure_repo_root_on_path()
+    from app.config import env
+    env.load_environment()
+
     print(
         f"Starting debug pipeline: preset={args.preset} run_date={args.run_date} "
         f"sample_count={args.sample_count} setups={args.setups} db_role=debug"

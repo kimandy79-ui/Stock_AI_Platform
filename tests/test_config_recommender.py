@@ -471,3 +471,119 @@ def test_get_pending_recommendations_returns_written_rows(tmp_db_paths) -> None:
 
     filtered = svc.get_pending_recommendations(db_role="prod", setup_type="pullback")
     assert filtered.metadata["recommendations"] == []
+
+
+# --------------------------------------------------------------------------- #
+# set_recommendation_status
+# --------------------------------------------------------------------------- #
+def test_set_recommendation_status_rejects_non_prod_db_role() -> None:
+    res = ConfigRecommenderService().set_recommendation_status(
+        recommendation_id="rec1", status="approved", db_role="debug"
+    )
+    assert res.status == service_result.STATUS_FAILED
+    assert "prod" in res.errors[0].lower()
+
+
+def test_set_recommendation_status_rejects_invalid_status() -> None:
+    class Boom:
+        def connect(self, *a, **k):
+            raise AssertionError("DB accessed before validation")
+
+    res = ConfigRecommenderService(Boom()).set_recommendation_status(
+        recommendation_id="rec1", status="pending", db_role="prod"
+    )
+    assert res.status == service_result.STATUS_FAILED
+    assert "status must be one of" in res.errors[0]
+
+
+def test_set_recommendation_status_rejects_empty_recommendation_id() -> None:
+    class Boom:
+        def connect(self, *a, **k):
+            raise AssertionError("DB accessed before validation")
+
+    res = ConfigRecommenderService(Boom()).set_recommendation_status(
+        recommendation_id="", status="approved", db_role="prod"
+    )
+    assert res.status == service_result.STATUS_FAILED
+
+
+def _seed_recommendation(conn, *, recommendation_id: str, setup_type: str = "breakout") -> None:
+    conn.execute(
+        "INSERT INTO config_recommendations "
+        "(recommendation_id, run_id, setup_type, regime, incumbent_config_id, "
+        " candidate_config_id, proposal_json, evidence_json, status, created_at) "
+        "VALUES (?, 'run1', ?, 'bull', 'incumbent1', 'candidate1', '[]', '{}', "
+        " 'pending', CAST(now() AS TIMESTAMP))",
+        [recommendation_id, setup_type],
+    )
+
+
+def test_set_recommendation_status_approves_pending_row(tmp_db_paths) -> None:
+    prod = _conn(tmp_db_paths["prod"])
+    try:
+        _seed_recommendation(prod, recommendation_id="rec1")
+    finally:
+        prod.close()
+
+    svc = ConfigRecommenderService()
+    res = svc.set_recommendation_status(recommendation_id="rec1", status="approved", db_role="prod")
+    assert res.status == service_result.STATUS_SUCCESS
+    assert res.rows_processed == 1
+
+    pending = svc.get_pending_recommendations(db_role="prod")
+    assert pending.metadata["recommendations"] == []  # no longer pending
+
+
+def test_set_recommendation_status_rejects_pending_row(tmp_db_paths) -> None:
+    prod = _conn(tmp_db_paths["prod"])
+    try:
+        _seed_recommendation(prod, recommendation_id="rec2")
+    finally:
+        prod.close()
+
+    svc = ConfigRecommenderService()
+    res = svc.set_recommendation_status(recommendation_id="rec2", status="rejected", db_role="prod")
+    assert res.status == service_result.STATUS_SUCCESS
+
+    conn = _conn(tmp_db_paths["prod"])
+    try:
+        row = conn.execute(
+            "SELECT status FROM config_recommendations WHERE recommendation_id = ?", ["rec2"]
+        ).fetchone()
+    finally:
+        conn.close()
+    assert row[0] == "rejected"
+
+
+def test_set_recommendation_status_unknown_id_fails(tmp_db_paths) -> None:
+    svc = ConfigRecommenderService()
+    res = svc.set_recommendation_status(recommendation_id="nope", status="approved", db_role="prod")
+    assert res.status == service_result.STATUS_FAILED
+    assert "not found" in res.errors[0]
+
+
+def test_set_recommendation_status_double_apply_is_noop_with_warning(tmp_db_paths) -> None:
+    prod = _conn(tmp_db_paths["prod"])
+    try:
+        _seed_recommendation(prod, recommendation_id="rec3")
+    finally:
+        prod.close()
+
+    svc = ConfigRecommenderService()
+    first = svc.set_recommendation_status(recommendation_id="rec3", status="approved", db_role="prod")
+    assert first.status == service_result.STATUS_SUCCESS
+
+    second = svc.set_recommendation_status(recommendation_id="rec3", status="rejected", db_role="prod")
+    assert second.status == service_result.STATUS_SUCCESS_WITH_WARNINGS
+    assert second.rows_processed == 0
+    assert "already" in second.warnings[0]
+
+    # Status must remain 'approved', not silently overwritten by the second call.
+    conn = _conn(tmp_db_paths["prod"])
+    try:
+        row = conn.execute(
+            "SELECT status FROM config_recommendations WHERE recommendation_id = ?", ["rec3"]
+        ).fetchone()
+    finally:
+        conn.close()
+    assert row[0] == "approved"

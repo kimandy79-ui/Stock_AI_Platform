@@ -52,7 +52,7 @@ from app.dashboard.data_access import (
     rank_column_for,
     validate_role,
 )
-from app.dashboard.data_access import DashboardDataLoader
+from app.dashboard.data_access import DashboardDataLoader, SimDashboardDataLoader
 
 # ── streamlit_app helpers (imported with streamlit mocked) ───────────────────
 import sys as _sys, types as _types
@@ -149,6 +149,95 @@ def test_validate_role_rejects_simulation_and_unknown() -> None:
 def test_loader_rejects_disallowed_role() -> None:
     with pytest.raises(UnknownDashboardRoleError):
         DashboardDataLoader(db_manager=FakeDbManager([]), db_role="simulation")
+
+
+# --------------------------------------------------------------------------- #
+# SimDashboardDataLoader (Simulation Lab) -- separate read-only loader scoped
+# to simulation.duckdb; unlike DashboardDataLoader, it does not validate
+# against ALLOWED_DASHBOARD_ROLES (it only ever connects to "simulation").
+# --------------------------------------------------------------------------- #
+_SIM_RUN_COLS = [
+    "sim_run_id", "sim_name", "mode", "start_date", "end_date",
+    "created_at", "config_ids", "status", "notes",
+]
+
+_SIM_COMPARISON_COLS = [
+    "config_id", "setup_type", "risk_label", "horizon_bd", "list_type",
+    "expectancy", "win_rate", "avg_win", "avg_loss", "profit_factor",
+    "stop_hit_rate", "target_hit_rate", "max_drawdown_pct", "resolved_outcomes_pct",
+]
+
+_SIM_FOLD_COLS = [
+    "fold_id", "fold_number", "train_start", "train_end",
+    "test_start", "test_end", "selected_config_id",
+]
+
+
+def test_sim_loader_list_runs_parses_config_ids_json() -> None:
+    db = FakeDbManager([
+        (_SIM_RUN_COLS, [
+            ("run1", "Test Run", "full_backtest", date(2024, 1, 1), date(2024, 6, 1),
+             "2024-06-02", '["cfg1", "cfg2"]', "success", None),
+        ]),
+    ])
+    loader = SimDashboardDataLoader(db_manager=db)
+    runs = loader.list_sim_runs()
+    assert len(runs) == 1
+    assert runs[0].sim_run_id == "run1"
+    assert runs[0].config_ids == ["cfg1", "cfg2"]
+    assert db.roles == ["simulation"]
+    assert db.read_only_flags == [True]
+    assert db.connections[0].closed is True
+
+
+def test_sim_loader_list_runs_handles_unparseable_config_ids() -> None:
+    db = FakeDbManager([
+        (_SIM_RUN_COLS, [
+            ("run1", None, "full_backtest", date(2024, 1, 1), date(2024, 6, 1),
+             "2024-06-02", "not-json", "success", None),
+        ]),
+    ])
+    loader = SimDashboardDataLoader(db_manager=db)
+    runs = loader.list_sim_runs()
+    assert runs[0].config_ids == []
+
+
+def test_sim_loader_load_config_comparisons_no_filters() -> None:
+    db = FakeDbManager([
+        (_SIM_COMPARISON_COLS, [
+            ("cfg1", "breakout", "medium", 20, "diversified",
+             0.5, 0.6, 1.2, -0.8, 1.5, None, None, 10.0, 0.9),
+        ]),
+    ])
+    loader = SimDashboardDataLoader(db_manager=db)
+    rows = loader.load_sim_config_comparisons("run1")
+    assert len(rows) == 1
+    assert rows[0]["config_id"] == "cfg1"
+    sql, params = db.connections[0].executed[0]
+    assert params == ["run1"]
+
+
+def test_sim_loader_load_config_comparisons_applies_setup_and_risk_filters() -> None:
+    db = FakeDbManager([(_SIM_COMPARISON_COLS, [])])
+    loader = SimDashboardDataLoader(db_manager=db)
+    loader.load_sim_config_comparisons("run1", setup_type="breakout", risk_label="medium")
+    sql, params = db.connections[0].executed[0]
+    assert params == ["run1", "breakout", "medium"]
+    assert "setup_type = ?" in sql
+    assert "risk_label = ?" in sql
+
+
+def test_sim_loader_load_folds() -> None:
+    db = FakeDbManager([
+        (_SIM_FOLD_COLS, [
+            ("f1", 1, date(2024, 1, 1), date(2024, 3, 1), date(2024, 3, 2), date(2024, 4, 1), "cfg1"),
+        ]),
+    ])
+    loader = SimDashboardDataLoader(db_manager=db)
+    folds = loader.load_sim_folds("run1")
+    assert folds[0]["fold_id"] == "f1"
+    assert db.roles == ["simulation"]
+    assert db.read_only_flags == [True]
 
 
 # --------------------------------------------------------------------------- #

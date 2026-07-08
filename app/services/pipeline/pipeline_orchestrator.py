@@ -454,6 +454,18 @@ class PipelineOrchestrator:
         failed_step: str | None = None
         error: str | None = None
         status = service_result.STATUS_SUCCESS
+
+        # SEC_USER_AGENT pre-run check (Phase 4 delta): fundamentals_refresh
+        # silently degrades to yfinance_fallback for every ticker when this is
+        # unset, one per-ticker warning at a time inside _step_fundamentals.
+        # Surfacing it once here, before any step runs, makes a misconfigured
+        # environment obvious instead of buried in per-ticker log lines.
+        sec_warning = self._check_sec_user_agent()
+        if sec_warning is not None:
+            log.warning(sec_warning)
+            warnings.append(sec_warning)
+            status = service_result.STATUS_SUCCESS_WITH_WARNINGS
+
         try:
             # Already-run guard.
             try:
@@ -641,6 +653,25 @@ class PipelineOrchestrator:
             )
         finally:
             self._release_lock(db_role, log)
+
+    # ------------------------------------------------------------------ #
+    # SEC EDGAR fair-access pre-run check.
+    # ------------------------------------------------------------------ #
+    @staticmethod
+    def _check_sec_user_agent() -> str | None:
+        """Return a warning string if ``SEC_USER_AGENT`` is unconfigured, else ``None``."""
+        from app.providers.edgar_provider import SEC_USER_AGENT_ENV_VAR, resolve_sec_user_agent
+
+        try:
+            resolve_sec_user_agent()
+        except RuntimeError:
+            return (
+                f"{SEC_USER_AGENT_ENV_VAR} is not set; fundamentals_refresh will use "
+                "yfinance_fallback for every ticker this run (reduced coverage: no "
+                "piotroski_f_score/altman_z_score). Set SEC_USER_AGENT to enable the "
+                "sec_edgar primary source."
+            )
+        return None
 
     # ------------------------------------------------------------------ #
     # Validation.
@@ -1064,21 +1095,33 @@ class PipelineOrchestrator:
 
         upsert_rows: list[tuple] = []
         fetch_warnings: list[str] = []
+        # Per-source counts (e.g. "sec_edgar", "yfinance_fallback") plus a
+        # running count of tickers unavailable from every source, for the
+        # end-of-step summary (data lineage: which source actually produced
+        # each ticker's fundamentals, not silently blended).
+        source_counts: dict[str, int] = {}
+        unavailable_count = 0
         for ticker in tickers:
             try:
                 result = self._fundamentals_provider.get_fundamentals(ticker, run_date)
             except Exception as exc:  # noqa: BLE001
                 fetch_warnings.append(f"get_fundamentals({ticker}) raised: {exc}")
+                unavailable_count += 1
                 continue
             if getattr(result, "status", None) == service_result.STATUS_FAILED:
                 fetch_warnings.append(
                     f"get_fundamentals({ticker}) failed: "
                     f"{(result.errors or ['unknown'])[0]}"
                 )
+                unavailable_count += 1
                 continue
             snapshot = (result.metadata or {}).get("fundamentals")
             if snapshot is None:
+                unavailable_count += 1
                 continue
+            source_counts[snapshot.source_provider] = (
+                source_counts.get(snapshot.source_provider, 0) + 1
+            )
             upsert_rows.append((
                 snapshot.ticker,
                 snapshot.as_of_date,
@@ -1092,6 +1135,15 @@ class PipelineOrchestrator:
                 snapshot.source_provider,
             ))
 
+        total = len(tickers)
+        summary_parts = [
+            f"{count}/{total} from {source}" for source, count in sorted(source_counts.items())
+        ]
+        if unavailable_count:
+            summary_parts.append(f"{unavailable_count}/{total} unavailable")
+        source_summary = "Fundamentals: " + ", ".join(summary_parts)
+        log.info(source_summary)
+
         if not upsert_rows:
             msg = f"fundamentals_refresh: 0 snapshots fetched for {len(tickers)} tickers"
             log.warning(msg)
@@ -1099,6 +1151,7 @@ class PipelineOrchestrator:
                 status=service_result.STATUS_SUCCESS_WITH_WARNINGS,
                 run_id=run_id, rows_processed=0,
                 warnings=[msg] + fetch_warnings,
+                metadata={"source_counts": source_counts, "source_summary": source_summary},
             )
 
         gc.collect()  # release Windows mmap regions from read connections
@@ -1132,6 +1185,7 @@ class PipelineOrchestrator:
             run_id=run_id,
             rows_processed=len(upsert_rows),
             warnings=all_warnings,
+            metadata={"source_counts": source_counts, "source_summary": source_summary},
         )
 
     def _step_price(self, run_date: date, db_role: str, run_id: str, log: Any):

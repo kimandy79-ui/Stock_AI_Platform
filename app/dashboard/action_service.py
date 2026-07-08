@@ -17,8 +17,9 @@ Contracts
 
 Actions
 -------
-run_pipeline(db_role, run_date, run_type) -> ServiceResult
-    Delegates to ``PipelineOrchestrator.run()``.
+run_pipeline(db_role, run_date, run_type, ticker_source, tickers_csv_path) -> ServiceResult
+    Delegates to ``PipelineOrchestrator.run()``. ``ticker_source`` selects
+    "db" (ticker_master, default) or "csv" (a static ticker list file).
 
 export_ticker_review(db_role, signal_date, setup_config_id, proposal_ids)
     Delegates to ``ExportPackageEngine.export_ticker_review()``.
@@ -32,6 +33,13 @@ record_human_action(db_role, ai_review_id, human_action) -> ServiceResult
 
 activate_setup_config(db_role, config_id, activated_by, reason)
     Delegates to ``ConfigService.activate_setup_config()``.
+
+approve_config_recommendation(recommendation_id, candidate_config_id, setup_type, db_role)
+    Activates the candidate config (real ``ConfigService.activate_setup_config``
+    signature) then marks the ``config_recommendations`` row ``'approved'``.
+
+reject_config_recommendation(recommendation_id, db_role)
+    Marks a pending ``config_recommendations`` row ``'rejected'``. No config touched.
 
 clone_setup_config(db_role, setup_name, config_json, version, ...)
     Delegates to ``ConfigService.create_setup_config_version()``.
@@ -49,6 +57,7 @@ import csv
 import io
 import uuid
 from datetime import date
+from pathlib import Path
 from typing import Any, Protocol
 
 from app.utils import logging_config, service_result
@@ -58,6 +67,11 @@ _LOG = logging_config.get_logger(__name__)
 
 # Allowed roles for write actions.
 _WRITE_ROLES = frozenset({"prod", "debug"})
+
+# run_pipeline ticker sources: "db" reads active tickers from ticker_master
+# (pre-existing default); "csv" reads a static ticker list file instead.
+_TICKER_SOURCES = frozenset({"db", "csv"})
+_DEFAULT_TICKERS_CSV_NAME = "backfill_tickers_common_only.csv"
 
 # ------------------------------------------------------------------ #
 # Protocol stubs for test injection.
@@ -113,6 +127,13 @@ class _ConfigServiceLike(Protocol):
         activated_by: str | None,
         reason: str | None,
     ) -> ServiceResult: ...
+    # NOTE: the *real* ConfigService.activate_setup_config takes
+    # (config_id, db_role, setup_type) -- no activated_by/reason -- so the
+    # pre-existing activate_setup_config() action below (used by the Settings
+    # tab) actually raises TypeError against the real class today. That's a
+    # pre-existing bug, out of scope here; approve_config_recommendation()
+    # below calls the *real* signature directly instead of going through this
+    # (already-drifted) Protocol shape.
 
     def create_setup_config_version(
         self,
@@ -132,6 +153,12 @@ class _ConfigServiceLike(Protocol):
 
     def list_setup_configs(
         self, db_role: str, setup_name: str | None
+    ) -> ServiceResult: ...
+
+
+class _ConfigRecommenderServiceLike(Protocol):
+    def set_recommendation_status(
+        self, recommendation_id: str, status: str, db_role: str
     ) -> ServiceResult: ...
 
 
@@ -225,24 +252,53 @@ class DashboardActionService:
         export_engine: _ExportEngineLike | None = None,
         ai_review_engine: _AiReviewEngineLike | None = None,
         config_service: _ConfigServiceLike | None = None,
+        config_recommender: _ConfigRecommenderServiceLike | None = None,
     ) -> None:
         self._db = db_manager  # may remain None; used only for proposals CSV
         self._pipeline = pipeline_orchestrator
         self._export = export_engine
         self._ai_review = ai_review_engine
         self._config = config_service
+        self._config_recommender = config_recommender
 
     # ------------------------------------------------------------------ #
     # Lazy service constructors (production path only).
     # ------------------------------------------------------------------ #
 
-    def _get_pipeline(self) -> _PipelineOrchestratorLike:
-        if self._pipeline is None:
-            from app.services.pipeline.pipeline_orchestrator import PipelineOrchestrator
-            from app.providers.yahoo_provider import YahooProvider
-            from app.providers.provider_interface import TickerInfo
+    def _get_pipeline(
+        self,
+        ticker_source: str = "db",
+        tickers_csv_path: str | Path | None = None,
+    ) -> tuple[_PipelineOrchestratorLike, int | None]:
+        """Return the pipeline orchestrator and the ticker count loaded for it.
 
-            symbol_source: list[TickerInfo] = []
+        ``ticker_count`` is ``None`` when a fake orchestrator was injected
+        (tests) or when the ``db``-source query fails and is silently
+        skipped (pre-existing behavior — an empty universe with a warning,
+        not a hard failure). A ``csv``-source load failure is *not*
+        swallowed the same way: :func:`load_tickers_from_file` raises
+        ``ValueError`` on a missing/empty file, which propagates to the
+        caller so ``run_pipeline`` can report it clearly instead of quietly
+        running an empty universe.
+        """
+        if self._pipeline is not None:
+            return self._pipeline, None
+
+        from app.services.pipeline.pipeline_orchestrator import PipelineOrchestrator
+        from app.providers.yahoo_provider import YahooProvider
+        from app.providers.provider_interface import TickerInfo
+
+        symbol_source: list[TickerInfo] = []
+        if ticker_source == "csv":
+            from app.config import settings
+            from app.services.universe.ticker_file_loader import load_tickers_from_file
+
+            path = Path(tickers_csv_path) if tickers_csv_path else (
+                settings.DATA_DIR / "input" / _DEFAULT_TICKERS_CSV_NAME
+            )
+            symbol_source = load_tickers_from_file(path)  # raises ValueError, not swallowed
+            _LOG.info("symbol_source loaded: %d tickers from csv=%s", len(symbol_source), path)
+        else:
             try:
                 db = self._get_db()
                 conn = db.connect("prod", read_only=True)
@@ -267,13 +323,13 @@ class DashboardActionService:
                     )
                     for r in rows
                 ]
-                _LOG.info("symbol_source loaded: %d tickers", len(symbol_source))
+                _LOG.info("symbol_source loaded: %d tickers from db", len(symbol_source))
             except Exception as exc:  # noqa: BLE001
-                _LOG.warning("could not load symbol_source: %s", exc)
+                _LOG.warning("could not load symbol_source from db: %s", exc)
 
-            provider = YahooProvider(symbol_source=symbol_source if symbol_source else None)
-            self._pipeline = PipelineOrchestrator(provider=provider)
-        return self._pipeline
+        provider = YahooProvider(symbol_source=symbol_source if symbol_source else None)
+        self._pipeline = PipelineOrchestrator(provider=provider)
+        return self._pipeline, len(symbol_source)
 
     def _get_export(self) -> _ExportEngineLike:
         if self._export is None:
@@ -297,6 +353,13 @@ class DashboardActionService:
 
             self._config = ConfigService(db_manager=None)
         return self._config
+
+    def _get_config_recommender(self) -> _ConfigRecommenderServiceLike:
+        if self._config_recommender is None:
+            from app.services.learning.config_recommender import ConfigRecommenderService
+
+            self._config_recommender = ConfigRecommenderService(db_manager=None)
+        return self._config_recommender
 
     def _get_db(self) -> Any:
         if self._db is None:
@@ -337,22 +400,50 @@ class DashboardActionService:
         force_rerun: bool = False,
         setup_configs: dict | None = None,
         run_id: str | None = None,
+        ticker_source: str = "db",
+        tickers_csv_path: str | Path | None = None,
     ) -> ServiceResult:
         """Trigger a pipeline run.
 
         Delegates to :class:`~app.services.pipeline.pipeline_orchestrator.PipelineOrchestrator`.
-        Returns its ``ServiceResult`` verbatim so the caller sees step-level
+        Returns its ``ServiceResult`` verbatim (with ``ticker_source`` /
+        ``ticker_count`` added to ``metadata``) so the caller sees step-level
         error detail.
+
+        ``ticker_source``: ``"db"`` (default) reads active tickers from
+        ``ticker_master`` — pre-existing behavior, unchanged. ``"csv"`` reads
+        ``tickers_csv_path`` (default
+        ``data/input/backfill_tickers_common_only.csv``) instead. A missing
+        or empty CSV fails this call outright (``status="failed"``) rather
+        than silently running the pipeline against an empty universe.
         """
         rid = run_id or str(uuid.uuid4())
         role_err = self._validate_write_role(db_role, rid)
         if role_err:
             return self._failed(rid, role_err, {"db_role": db_role, "action": "run_pipeline"})
 
+        if ticker_source not in _TICKER_SOURCES:
+            return self._failed(
+                rid,
+                f"ticker_source must be one of {sorted(_TICKER_SOURCES)}, got {ticker_source!r}",
+                {"db_role": db_role, "action": "run_pipeline"},
+            )
+
         effective_date = run_date or date.today()
-        _LOG.info("dashboard action: run_pipeline date=%s role=%s rid=%s", effective_date, db_role, rid)
+        _LOG.info(
+            "dashboard action: run_pipeline date=%s role=%s rid=%s ticker_source=%s",
+            effective_date, db_role, rid, ticker_source,
+        )
         try:
-            result = self._get_pipeline().run(
+            pipeline, ticker_count = self._get_pipeline(ticker_source, tickers_csv_path)
+        except ValueError as exc:
+            return self._failed(
+                rid,
+                f"could not load tickers from {ticker_source!r} source: {exc}",
+                {"db_role": db_role, "action": "run_pipeline", "ticker_source": ticker_source},
+            )
+        try:
+            result = pipeline.run(
                 run_date=effective_date,
                 run_type=run_type,
                 db_role=db_role,
@@ -361,6 +452,8 @@ class DashboardActionService:
             )
         except Exception as exc:  # noqa: BLE001
             return self._failed(rid, f"{type(exc).__name__}: {exc}", {"db_role": db_role, "action": "run_pipeline"})
+        result.metadata.setdefault("ticker_source", ticker_source)
+        result.metadata.setdefault("ticker_count", ticker_count)
         return result
 
     def export_ticker_review(
@@ -489,6 +582,102 @@ class DashboardActionService:
             )
         except Exception as exc:  # noqa: BLE001
             return self._failed(rid, f"{type(exc).__name__}: {exc}", {"db_role": db_role, "action": "activate_setup_config"})
+        return result
+
+    def approve_config_recommendation(
+        self,
+        recommendation_id: str,
+        candidate_config_id: str,
+        setup_type: str,
+        db_role: str,
+        run_id: str | None = None,
+    ) -> ServiceResult:
+        """Activate a recommendation's candidate config, then mark it approved.
+
+        Calls ``ConfigService.activate_setup_config`` with its *real* current
+        signature (``config_id``, ``db_role``, ``setup_type``) -- unlike the
+        pre-existing :meth:`activate_setup_config` action above, which still
+        passes ``activated_by``/``reason`` and raises ``TypeError`` against
+        the real class (a pre-existing bug, out of scope here).
+
+        The activation result is authoritative for this call's status: if it
+        fails, the recommendation is left ``pending`` (nothing to undo) and
+        the failure is returned as-is. Only on a successful activation is the
+        recommendation additionally marked ``'approved'``; if that follow-up
+        write itself fails, the config is already active, so this degrades to
+        ``success_with_warnings`` rather than reporting a hard failure for an
+        action that mostly succeeded.
+        """
+        rid = run_id or str(uuid.uuid4())
+        role_err = self._validate_write_role(db_role, rid)
+        if role_err:
+            return self._failed(rid, role_err, {"db_role": db_role, "action": "approve_config_recommendation"})
+        if not recommendation_id:
+            return self._failed(rid, "recommendation_id must not be empty", {"db_role": db_role, "action": "approve_config_recommendation"})
+        if not candidate_config_id:
+            return self._failed(rid, "candidate_config_id must not be empty", {"db_role": db_role, "action": "approve_config_recommendation"})
+
+        _LOG.info(
+            "dashboard action: approve_config_recommendation id=%s config=%s role=%s rid=%s",
+            recommendation_id, candidate_config_id, db_role, rid,
+        )
+        try:
+            activation = self._get_config().activate_setup_config(  # type: ignore[call-arg]
+                config_id=candidate_config_id,
+                db_role=db_role,
+                setup_type=setup_type,
+            )
+        except Exception as exc:  # noqa: BLE001
+            return self._failed(rid, f"{type(exc).__name__}: {exc}", {"db_role": db_role, "action": "approve_config_recommendation"})
+        if activation.status == service_result.STATUS_FAILED:
+            return activation
+
+        try:
+            status_result = self._get_config_recommender().set_recommendation_status(
+                recommendation_id=recommendation_id, status="approved", db_role=db_role,
+            )
+        except Exception as exc:  # noqa: BLE001
+            activation.metadata.setdefault("recommendation_status_warning", f"{type(exc).__name__}: {exc}")
+            activation.warnings = list(activation.warnings or []) + [
+                f"config activated, but marking recommendation approved failed: {exc}"
+            ]
+            return ServiceResult(
+                status=service_result.STATUS_SUCCESS_WITH_WARNINGS,
+                run_id=activation.run_id, rows_processed=activation.rows_processed,
+                warnings=activation.warnings, metadata=activation.metadata,
+            )
+        if status_result.status == service_result.STATUS_FAILED:
+            activation.warnings = list(activation.warnings or []) + [
+                f"config activated, but marking recommendation approved failed: {(status_result.errors or ['unknown'])[0]}"
+            ]
+            return ServiceResult(
+                status=service_result.STATUS_SUCCESS_WITH_WARNINGS,
+                run_id=activation.run_id, rows_processed=activation.rows_processed,
+                warnings=activation.warnings, metadata=activation.metadata,
+            )
+        return activation
+
+    def reject_config_recommendation(
+        self,
+        recommendation_id: str,
+        db_role: str,
+        run_id: str | None = None,
+    ) -> ServiceResult:
+        """Mark a pending config recommendation ``'rejected'``. No config is touched."""
+        rid = run_id or str(uuid.uuid4())
+        role_err = self._validate_write_role(db_role, rid)
+        if role_err:
+            return self._failed(rid, role_err, {"db_role": db_role, "action": "reject_config_recommendation"})
+        if not recommendation_id:
+            return self._failed(rid, "recommendation_id must not be empty", {"db_role": db_role, "action": "reject_config_recommendation"})
+
+        _LOG.info("dashboard action: reject_config_recommendation id=%s role=%s rid=%s", recommendation_id, db_role, rid)
+        try:
+            result = self._get_config_recommender().set_recommendation_status(
+                recommendation_id=recommendation_id, status="rejected", db_role=db_role,
+            )
+        except Exception as exc:  # noqa: BLE001
+            return self._failed(rid, f"{type(exc).__name__}: {exc}", {"db_role": db_role, "action": "reject_config_recommendation"})
         return result
 
     def clone_setup_config(

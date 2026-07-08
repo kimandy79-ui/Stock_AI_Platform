@@ -5,6 +5,10 @@ features_v02. ALLOWED_SETUP_TYPES now carries the four active setup-mode
 values. Legacy six-value setup vocabulary is retired; legacy strategy names
 (aggressive/normal/conservative) appear only as deprecated notes.
 
+P1.1 (2026-07-08): FEATURE_SCHEMA_VERSION bumped again to features_v03 —
+adds rs_percentile_126d (cross-sectional RS percentile). features_v02 rows
+are retained as historical/frozen, same policy as v01->v02.
+
 Module 01 scope: definitions only. No database, provider, or trading logic.
 """
 
@@ -13,10 +17,10 @@ from __future__ import annotations
 from typing import Final
 
 # --------------------------------------------------------------------------- #
-# Feature schema version (AD-22.8; bumped AD-22.19)
+# Feature schema version (AD-22.8; bumped AD-22.19; bumped again for P1.1)
 # Zero-padded per DECISIONS_LOG.md to avoid lexicographic MAX bugs.
 # --------------------------------------------------------------------------- #
-FEATURE_SCHEMA_VERSION: Final[str] = "features_v02"
+FEATURE_SCHEMA_VERSION: Final[str] = "features_v03"
 
 # --------------------------------------------------------------------------- #
 # Database file names

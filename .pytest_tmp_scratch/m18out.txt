@@ -1,0 +1,26 @@
+sssss...sssss.ssss..ssssssssss..                                         [100%]
+=========================== short test summary info ===========================
+SKIPPED [1] tests\test_export_package_engine.py:261: PENDING Phase 5 (M18) migration: references setup_config_id / legacy columns removed in setup-mode schema (AD-22.21).
+SKIPPED [1] tests\test_export_package_engine.py:318: PENDING Phase 5 (M18) migration: references setup_config_id / legacy columns removed in setup-mode schema (AD-22.21).
+SKIPPED [1] tests\test_export_package_engine.py:332: PENDING Phase 5 (M18) migration: references setup_config_id / legacy columns removed in setup-mode schema (AD-22.21).
+SKIPPED [1] tests\test_export_package_engine.py:348: PENDING Phase 5 (M18) migration: references setup_config_id / legacy columns removed in setup-mode schema (AD-22.21).
+SKIPPED [1] tests\test_export_package_engine.py:393: PENDING Phase 5 (M18) migration: references setup_config_id / legacy columns removed in setup-mode schema (AD-22.21).
+SKIPPED [1] tests\test_export_package_engine.py:453: PENDING Phase 5 (M18) migration: references setup_config_id / legacy columns removed in setup-mode schema (AD-22.21).
+SKIPPED [1] tests\test_export_package_engine.py:479: PENDING Phase 5 (M18) migration: references setup_config_id / legacy columns removed in setup-mode schema (AD-22.21).
+SKIPPED [1] tests\test_export_package_engine.py:504: PENDING Phase 5 (M18) migration: references setup_config_id / legacy columns removed in setup-mode schema (AD-22.21).
+SKIPPED [1] tests\test_export_package_engine.py:524: PENDING Phase 5 (M18) migration: references setup_config_id / legacy columns removed in setup-mode schema (AD-22.21).
+SKIPPED [1] tests\test_export_package_engine.py:547: PENDING Phase 5 (M18) migration: references setup_config_id / legacy columns removed in setup-mode schema (AD-22.21).
+SKIPPED [1] tests\test_export_package_engine.py:582: PENDING Phase 5 (M18) migration: references setup_config_id / legacy columns removed in setup-mode schema (AD-22.21).
+SKIPPED [1] tests\test_export_package_engine.py:601: PENDING Phase 5 (M18) migration: references setup_config_id / legacy columns removed in setup-mode schema (AD-22.21).
+SKIPPED [1] tests\test_export_package_engine.py:645: PENDING Phase 5 (M18) migration: references setup_config_id / legacy columns removed in setup-mode schema (AD-22.21).
+SKIPPED [1] tests\test_export_package_engine.py:656: PENDING Phase 5 (M18) migration: references setup_config_id / legacy columns removed in setup-mode schema (AD-22.21).
+SKIPPED [1] tests\test_export_package_engine.py:691: PENDING Phase 5 (M18) migration: references setup_config_id / legacy columns removed in setup-mode schema (AD-22.21).
+SKIPPED [1] tests\test_export_package_engine.py:739: PENDING Phase 5 (M18) migration: references setup_config_id / legacy columns removed in setup-mode schema (AD-22.21).
+SKIPPED [1] tests\test_export_package_engine.py:792: PENDING Phase 5 (M18) migration: references setup_config_id / legacy columns removed in setup-mode schema (AD-22.21).
+SKIPPED [1] tests\test_export_package_engine.py:844: PENDING Phase 5 (M18) migration: references setup_config_id / legacy columns removed in setup-mode schema (AD-22.21).
+SKIPPED [1] tests\test_export_package_engine.py:869: PENDING Phase 5 (M18) migration: references setup_config_id / legacy columns removed in setup-mode schema (AD-22.21).
+SKIPPED [1] tests\test_export_package_engine.py:886: PENDING Phase 5 (M18) migration: references setup_config_id / legacy columns removed in setup-mode schema (AD-22.21).
+SKIPPED [1] tests\test_export_package_engine.py:907: PENDING Phase 5 (M18) migration: references setup_config_id / legacy columns removed in setup-mode schema (AD-22.21).
+SKIPPED [1] tests\test_export_package_engine.py:920: PENDING Phase 5 (M18) migration: references setup_config_id / legacy columns removed in setup-mode schema (AD-22.21).
+SKIPPED [1] tests\test_export_package_engine.py:933: PENDING Phase 5 (M18) migration: references setup_config_id / legacy columns removed in setup-mode schema (AD-22.21).
+SKIPPED [1] tests\test_export_package_engine.py:947: PENDING Phase 5 (M18) migration: references setup_config_id / legacy columns removed in setup-mode schema (AD-22.21).

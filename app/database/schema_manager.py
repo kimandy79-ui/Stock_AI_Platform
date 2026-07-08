@@ -16,7 +16,8 @@ Does NOT:
 
 Two distinct versions (never confused):
 - DATABASE_SCHEMA_VERSION = "schema_v02" — seeded into schema_versions.
-- FEATURE_SCHEMA_VERSION = "features_v02" — written into daily_features rows by M11.
+- FEATURE_SCHEMA_VERSION = "features_v03" — written into daily_features rows by M11
+  (P1.1, 2026-07-08: adds rs_percentile_126d; bumped from features_v02).
 """
 
 from __future__ import annotations
@@ -190,6 +191,7 @@ _PROD_TABLE_DDL: Final[tuple[str, ...]] = (
         volume_dry_up_score DOUBLE,
         volume_expansion_score DOUBLE,
         relative_strength_vs_spy DOUBLE,
+        rs_percentile_126d DOUBLE,
         sector_relative_strength DOUBLE,
         market_regime VARCHAR,
         days_to_earnings_bd INTEGER,

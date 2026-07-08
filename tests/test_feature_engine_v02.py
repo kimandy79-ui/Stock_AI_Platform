@@ -417,14 +417,15 @@ class TestComputeBase:
 # --------------------------------------------------------------------------- #
 
 class TestSchemaCompatibility:
-    def test_feature_schema_version_is_v02(self, tmp_db_paths: dict) -> None:
+    def test_feature_schema_version_is_v03(self, tmp_db_paths: dict) -> None:
+        # P1.1 (2026-07-08): bumped from features_v02 to features_v03.
         prod = tmp_db_paths[dbm.DB_ROLE_PROD]
         days = _trading_days(date(2022, 1, 3), 300)
         _seed_prices(prod, "AAA", days, [50.0 + i * 0.1 for i in range(len(days))])
         _seed_ticker_master(prod, "AAA")
         FeatureEngine().calculate(days[-1], days[-1])
         row = _fetch_feature(prod, "AAA")
-        assert row["feature_schema_version"] == "features_v02"
+        assert row["feature_schema_version"] == "features_v03"
 
     def test_v02_columns_present_in_schema(self, tmp_db_paths: dict) -> None:
         prod = tmp_db_paths[dbm.DB_ROLE_PROD]

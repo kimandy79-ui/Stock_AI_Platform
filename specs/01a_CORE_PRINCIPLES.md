@@ -98,12 +98,23 @@ driver. They may appear only in historical notes.
 Use zero-padded version strings:
 
 ```text
-FEATURE_SCHEMA_VERSION = "features_v02"
+FEATURE_SCHEMA_VERSION = "features_v03"
 ```
 
 Setup mode requires structural-level features (support / resistance /
 next_resistance / base / ATR compression / EMA slopes / RS). These are added in
 `features_v02`. `features_v01` is retained only for historical rows.
+
+`features_v03` (P1.1, 2026-07-08) adds `rs_percentile_126d`: a same-day
+cross-sectional percentile rank (0-100) of each ticker's 126-trading-day ROC
+against every other active, currently-processed ticker with a valid 126d ROC
+that day. Distinct in kind from `relative_strength_vs_spy` /
+`sector_relative_strength` (both single-benchmark time-series spreads,
+unaffected by this addition) — this is a rank against the universe, not a
+spread against a benchmark. Scoring input only; no hard gate. NULL when the
+ticker has <126 bars of history. `features_v02` rows are retained as
+historical/frozen and do not get this field retroactively, same policy as
+the `v01`->`v02` bump.
 
 ### Avg dollar volume
 

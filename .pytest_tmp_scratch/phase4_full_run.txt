@@ -1,0 +1,214 @@
+........................................................................ [  3%]
+........................................................................ [  6%]
+........................................................................ [ 10%]
+........................................................................ [ 13%]
+........................................................................ [ 17%]
+....................................s................................... [ 20%]
+.......................................................F................ [ 24%]
+........................................................................ [ 27%]
+...........................................sssss...sssss.ssss..sssssssss [ 31%]
+s....................................................................... [ 34%]
+........................................................................ [ 38%]
+........................................................................ [ 41%]
+........................................................................ [ 45%]
+........................................................................ [ 48%]
+.....................................................F........sssssssss. [ 52%]
+..sssss....sssssssssssssssss............................................ [ 55%]
+........................................................................ [ 59%]
+........................................................................ [ 62%]
+...........................................................s.....s.s.... [ 66%]
+........................................................................ [ 69%]
+........................................................................ [ 73%]
+......................................................s..ssss.s......... [ 76%]
+...s............sssssssssssssssssssssssssssssssssssssss.sssss.sss....... [ 80%]
+........................................................................ [ 83%]
+.....................s.s..................................sssssss.s.s... [ 87%]
+.............s...sssssssss.s....ssssssss................................ [ 90%]
+........................................................................ [ 94%]
+........................................................................ [ 97%]
+...........................................                              [100%]
+================================== FAILURES ===================================
+_________________ test_spec_documents_open_gaps_not_invented __________________
+
+    def test_spec_documents_open_gaps_not_invented() -> None:
+        """Assert that the module spec explicitly documents every ambiguous/missing
+        rule as an open gap or N/A, and does not invent behavior for it.
+    
+        This test reads M09_DATA_VALIDATOR_SPEC.md and checks that the known
+        open gaps are present by keyword, confirming they are documented rather
+        than silently omitted or incorrectly implemented.
+        """
+        import pathlib
+        import conftest  # conftest.ROOT is the project root; always correct regardless
+                         # of where the zip is extracted or pytest is invoked from.
+    
+        spec_path = pathlib.Path(conftest.ROOT) / "M09_DATA_VALIDATOR_SPEC.md"
+>       assert spec_path.exists(), (
+            f"M09_DATA_VALIDATOR_SPEC.md not found at project root {spec_path}. "
+            "Ensure the spec file is placed alongside conftest.py."
+        )
+E       AssertionError: M09_DATA_VALIDATOR_SPEC.md not found at project root D:\Python\Stock_AI_Platform\M09_DATA_VALIDATOR_SPEC.md. Ensure the spec file is placed alongside conftest.py.
+E       assert False
+E        +  where False = exists()
+E        +    where exists = WindowsPath('D:/Python/Stock_AI_Platform/M09_DATA_VALIDATOR_SPEC.md').exists
+
+tests\test_data_validator.py:729: AssertionError
+_______________________ test_spec_documents_open_gap_g1 _______________________
+
+    def test_spec_documents_open_gap_g1() -> None:
+        spec = Path(__file__).resolve().parents[1] / "M10_MUTATION_DETECTOR_SPEC.md"
+>       text = spec.read_text(encoding="utf-8")
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests\test_mutation_detector.py:707: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+C:\Python314\Lib\pathlib\__init__.py:787: in read_text
+    with self.open(mode='r', encoding=encoding, errors=errors, newline=newline) as f:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+self = WindowsPath('D:/Python/Stock_AI_Platform/M10_MUTATION_DETECTOR_SPEC.md')
+mode = 'r', buffering = -1, encoding = 'utf-8', errors = None, newline = None
+
+    def open(self, mode='r', buffering=-1, encoding=None,
+             errors=None, newline=None):
+        """
+        Open the file pointed to by this path and return a file object, as
+        the built-in open() function does.
+        """
+        if "b" not in mode:
+            encoding = io.text_encoding(encoding)
+>       return io.open(self, mode, buffering, encoding, errors, newline)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       FileNotFoundError: [Errno 2] No such file or directory: 'D:\\Python\\Stock_AI_Platform\\M10_MUTATION_DETECTOR_SPEC.md'
+
+C:\Python314\Lib\pathlib\__init__.py:771: FileNotFoundError
+=========================== short test summary info ===========================
+SKIPPED [1] tests\test_dashboard.py:777: PENDING M21 migration (Phase 7 scope): queries strategy_config_id column removed in setup-mode schema (AD-22.21).
+SKIPPED [1] tests\test_export_package_engine.py:261: PENDING Phase 5 (M18) migration: references setup_config_id / legacy columns removed in setup-mode schema (AD-22.21).
+SKIPPED [1] tests\test_export_package_engine.py:318: PENDING Phase 5 (M18) migration: references setup_config_id / legacy columns removed in setup-mode schema (AD-22.21).
+SKIPPED [1] tests\test_export_package_engine.py:332: PENDING Phase 5 (M18) migration: references setup_config_id / legacy columns removed in setup-mode schema (AD-22.21).
+SKIPPED [1] tests\test_export_package_engine.py:348: PENDING Phase 5 (M18) migration: references setup_config_id / legacy columns removed in setup-mode schema (AD-22.21).
+SKIPPED [1] tests\test_export_package_engine.py:393: PENDING Phase 5 (M18) migration: references setup_config_id / legacy columns removed in setup-mode schema (AD-22.21).
+SKIPPED [1] tests\test_export_package_engine.py:453: PENDING Phase 5 (M18) migration: references setup_config_id / legacy columns removed in setup-mode schema (AD-22.21).
+SKIPPED [1] tests\test_export_package_engine.py:479: PENDING Phase 5 (M18) migration: references setup_config_id / legacy columns removed in setup-mode schema (AD-22.21).
+SKIPPED [1] tests\test_export_package_engine.py:504: PENDING Phase 5 (M18) migration: references setup_config_id / legacy columns removed in setup-mode schema (AD-22.21).
+SKIPPED [1] tests\test_export_package_engine.py:524: PENDING Phase 5 (M18) migration: references setup_config_id / legacy columns removed in setup-mode schema (AD-22.21).
+SKIPPED [1] tests\test_export_package_engine.py:547: PENDING Phase 5 (M18) migration: references setup_config_id / legacy columns removed in setup-mode schema (AD-22.21).
+SKIPPED [1] tests\test_export_package_engine.py:582: PENDING Phase 5 (M18) migration: references setup_config_id / legacy columns removed in setup-mode schema (AD-22.21).
+SKIPPED [1] tests\test_export_package_engine.py:601: PENDING Phase 5 (M18) migration: references setup_config_id / legacy columns removed in setup-mode schema (AD-22.21).
+SKIPPED [1] tests\test_export_package_engine.py:645: PENDING Phase 5 (M18) migration: references setup_config_id / legacy columns removed in setup-mode schema (AD-22.21).
+SKIPPED [1] tests\test_export_package_engine.py:656: PENDING Phase 5 (M18) migration: references setup_config_id / legacy columns removed in setup-mode schema (AD-22.21).
+SKIPPED [1] tests\test_export_package_engine.py:691: PENDING Phase 5 (M18) migration: references setup_config_id / legacy columns removed in setup-mode schema (AD-22.21).
+SKIPPED [1] tests\test_export_package_engine.py:739: PENDING Phase 5 (M18) migration: references setup_config_id / legacy columns removed in setup-mode schema (AD-22.21).
+SKIPPED [1] tests\test_export_package_engine.py:792: PENDING Phase 5 (M18) migration: references setup_config_id / legacy columns removed in setup-mode schema (AD-22.21).
+SKIPPED [1] tests\test_export_package_engine.py:844: PENDING Phase 5 (M18) migration: references setup_config_id / legacy columns removed in setup-mode schema (AD-22.21).
+SKIPPED [1] tests\test_export_package_engine.py:869: PENDING Phase 5 (M18) migration: references setup_config_id / legacy columns removed in setup-mode schema (AD-22.21).
+SKIPPED [1] tests\test_export_package_engine.py:886: PENDING Phase 5 (M18) migration: references setup_config_id / legacy columns removed in setup-mode schema (AD-22.21).
+SKIPPED [1] tests\test_export_package_engine.py:907: PENDING Phase 5 (M18) migration: references setup_config_id / legacy columns removed in setup-mode schema (AD-22.21).
+SKIPPED [1] tests\test_export_package_engine.py:920: PENDING Phase 5 (M18) migration: references setup_config_id / legacy columns removed in setup-mode schema (AD-22.21).
+SKIPPED [1] tests\test_export_package_engine.py:933: PENDING Phase 5 (M18) migration: references setup_config_id / legacy columns removed in setup-mode schema (AD-22.21).
+SKIPPED [1] tests\test_export_package_engine.py:947: PENDING Phase 5 (M18) migration: references setup_config_id / legacy columns removed in setup-mode schema (AD-22.21).
+SKIPPED [1] tests\test_orchestrator_config_loading.py:190: PENDING Phase 6 (M20) migration: references strategy_config_id / legacy columns removed in setup-mode schema (AD-22.21).
+SKIPPED [1] tests\test_orchestrator_config_loading.py:215: PENDING Phase 6 (M20) migration: references strategy_config_id / legacy columns removed in setup-mode schema (AD-22.21).
+SKIPPED [1] tests\test_orchestrator_config_loading.py:231: PENDING Phase 6 (M20) migration: references strategy_config_id / legacy columns removed in setup-mode schema (AD-22.21).
+SKIPPED [1] tests\test_orchestrator_config_loading.py:250: PENDING Phase 6 (M20) migration: references strategy_config_id / legacy columns removed in setup-mode schema (AD-22.21).
+SKIPPED [1] tests\test_orchestrator_config_loading.py:277: PENDING Phase 6 (M20) migration: references strategy_config_id / legacy columns removed in setup-mode schema (AD-22.21).
+SKIPPED [1] tests\test_orchestrator_config_loading.py:290: PENDING Phase 6 (M20) migration: references strategy_config_id / legacy columns removed in setup-mode schema (AD-22.21).
+SKIPPED [1] tests\test_orchestrator_config_loading.py:301: PENDING Phase 6 (M20) migration: references strategy_config_id / legacy columns removed in setup-mode schema (AD-22.21).
+SKIPPED [1] tests\test_outcome_queue.py:359: PENDING M16 integration test: requires full schema + DuckDB (see Phase 7 delivery).
+SKIPPED [1] tests\test_outcome_queue.py:372: PENDING M16 integration test: requires full schema + DuckDB (see Phase 7 delivery).
+SKIPPED [1] tests\test_outcome_queue.py:409: PENDING M16 integration test: requires full schema + DuckDB (see Phase 7 delivery).
+SKIPPED [1] tests\test_outcome_queue.py:424: PENDING M16 integration test: requires full schema + DuckDB (see Phase 7 delivery).
+SKIPPED [1] tests\test_outcome_queue.py:451: PENDING M16 integration test: requires full schema + DuckDB (see Phase 7 delivery).
+SKIPPED [1] tests\test_outcome_queue.py:474: PENDING M16 integration test: requires full schema + DuckDB (see Phase 7 delivery).
+SKIPPED [1] tests\test_outcome_queue.py:486: PENDING M16 integration test: requires full schema + DuckDB (see Phase 7 delivery).
+SKIPPED [1] tests\test_outcome_queue.py:553: PENDING M16 integration test: requires full schema + DuckDB (see Phase 7 delivery).
+SKIPPED [1] tests\test_outcome_queue.py:570: PENDING M16 integration test: requires full schema + DuckDB (see Phase 7 delivery).
+SKIPPED [1] tests\test_outcome_queue.py:591: PENDING M16 integration test: requires full schema + DuckDB (see Phase 7 delivery).
+SKIPPED [1] tests\test_outcome_queue.py:613: PENDING M16 integration test: requires full schema + DuckDB (see Phase 7 delivery).
+SKIPPED [1] tests\test_outcome_queue.py:638: PENDING M16 integration test: requires full schema + DuckDB (see Phase 7 delivery).
+SKIPPED [1] tests\test_outcome_queue.py:656: PENDING M16 integration test: requires full schema + DuckDB (see Phase 7 delivery).
+SKIPPED [1] tests\test_outcome_queue.py:675: PENDING M16 integration test: requires full schema + DuckDB (see Phase 7 delivery).
+SKIPPED [1] tests\test_outcome_queue.py:693: PENDING M16 integration test: requires full schema + DuckDB (see Phase 7 delivery).
+SKIPPED [1] tests\test_outcome_queue.py:708: PENDING M16 integration test: requires full schema + DuckDB (see Phase 7 delivery).
+SKIPPED [1] tests\test_outcome_queue.py:735: PENDING M16 integration test: requires full schema + DuckDB (see Phase 7 delivery).
+SKIPPED [1] tests\test_outcome_queue.py:747: PENDING M16 integration test: requires full schema + DuckDB (see Phase 7 delivery).
+SKIPPED [1] tests\test_outcome_queue.py:759: PENDING M16 integration test: requires full schema + DuckDB (see Phase 7 delivery).
+SKIPPED [1] tests\test_outcome_queue.py:773: PENDING M16 integration test: requires full schema + DuckDB (see Phase 7 delivery).
+SKIPPED [1] tests\test_outcome_queue.py:788: PENDING M16 integration test: requires full schema + DuckDB (see Phase 7 delivery).
+SKIPPED [1] tests\test_outcome_queue.py:811: PENDING M16 integration test: requires full schema + DuckDB (see Phase 7 delivery).
+SKIPPED [1] tests\test_outcome_queue.py:821: PENDING M16 integration test: requires full schema + DuckDB (see Phase 7 delivery).
+SKIPPED [1] tests\test_outcome_queue.py:855: PENDING M16 integration test: requires full schema + DuckDB (see Phase 7 delivery).
+SKIPPED [1] tests\test_project_skeleton.py:94: RETIRED (setup-mode AD-22.8/22.19): FEATURE_SCHEMA_VERSION bumped to 'features_v02'. Legacy 'features_v01' assertion no longer valid.
+SKIPPED [1] tests\test_project_skeleton.py:138: RETIRED (setup-mode AD-22.20): ALLOWED_SETUP_TYPES now carries exactly 4 active values. SETUP_UNKNOWN and legacy six-value vocab are retired.
+SKIPPED [1] tests\test_project_skeleton.py:151: RETIRED (setup-mode AD-22.20): SCREENING_BLOCK_WEIGHTS removed; step3 universal eligibility no longer uses a block-weights score model.
+SKIPPED [1] tests\test_simulation_engine.py:617: PENDING M17 setup-mode replay: _read_step4_inputs removed (legacy step4_analysis_engine guard, Phase 7).
+SKIPPED [1] tests\test_simulation_engine.py:841: PENDING M17 integration test: requires full schema + DuckDB (see Phase 7 delivery). DEFAULT_STRATEGY_CONFIGS removed in setup-mode (AD-22.19-22.24).
+SKIPPED [1] tests\test_simulation_engine.py:878: PENDING M17 integration test: requires full schema + DuckDB (see Phase 7 delivery). DEFAULT_STRATEGY_CONFIGS removed in setup-mode (AD-22.19-22.24).
+SKIPPED [1] tests\test_simulation_engine.py:903: PENDING M17 integration test: requires full schema + DuckDB (see Phase 7 delivery). DEFAULT_STRATEGY_CONFIGS removed in setup-mode (AD-22.19-22.24).
+SKIPPED [1] tests\test_simulation_engine.py:930: PENDING M17 integration test: requires full schema + DuckDB (see Phase 7 delivery). DEFAULT_STRATEGY_CONFIGS removed in setup-mode (AD-22.19-22.24).
+SKIPPED [1] tests\test_simulation_engine.py:1009: PENDING M17 integration test: requires full schema + DuckDB (see Phase 7 delivery). DEFAULT_STRATEGY_CONFIGS removed in setup-mode (AD-22.19-22.24).
+SKIPPED [1] tests\test_step3_screening.py:308: PENDING Phase 3 (M13) migration: references strategy_config_id / legacy columns removed in setup-mode schema (AD-22.21).
+SKIPPED [1] tests\test_step3_screening.py:383: PENDING Phase 3 (M13) migration: references strategy_config_id / legacy columns removed in setup-mode schema (AD-22.21).
+SKIPPED [1] tests\test_step3_screening.py:401: PENDING Phase 3 (M13) migration: references strategy_config_id / legacy columns removed in setup-mode schema (AD-22.21).
+SKIPPED [3] tests\test_step3_screening.py:418: PENDING Phase 3 (M13) migration: references strategy_config_id / legacy columns removed in setup-mode schema (AD-22.21).
+SKIPPED [1] tests\test_step3_screening.py:445: PENDING Phase 3 (M13) migration: references strategy_config_id / legacy columns removed in setup-mode schema (AD-22.21).
+SKIPPED [1] tests\test_step3_screening.py:460: PENDING Phase 3 (M13) migration: references strategy_config_id / legacy columns removed in setup-mode schema (AD-22.21).
+SKIPPED [1] tests\test_step3_screening.py:475: PENDING Phase 3 (M13) migration: references strategy_config_id / legacy columns removed in setup-mode schema (AD-22.21).
+SKIPPED [1] tests\test_step3_screening.py:492: PENDING Phase 3 (M13) migration: references strategy_config_id / legacy columns removed in setup-mode schema (AD-22.21).
+SKIPPED [1] tests\test_step3_screening.py:508: PENDING Phase 3 (M13) migration: references strategy_config_id / legacy columns removed in setup-mode schema (AD-22.21).
+SKIPPED [1] tests\test_step3_screening.py:524: PENDING Phase 3 (M13) migration: references strategy_config_id / legacy columns removed in setup-mode schema (AD-22.21).
+SKIPPED [1] tests\test_step3_screening.py:543: PENDING Phase 3 (M13) migration: references strategy_config_id / legacy columns removed in setup-mode schema (AD-22.21).
+SKIPPED [1] tests\test_step3_screening.py:557: PENDING Phase 3 (M13) migration: references strategy_config_id / legacy columns removed in setup-mode schema (AD-22.21).
+SKIPPED [1] tests\test_step3_screening.py:579: PENDING Phase 3 (M13) migration: references strategy_config_id / legacy columns removed in setup-mode schema (AD-22.21).
+SKIPPED [1] tests\test_step3_screening.py:598: PENDING Phase 3 (M13) migration: references strategy_config_id / legacy columns removed in setup-mode schema (AD-22.21).
+SKIPPED [1] tests\test_step3_screening.py:626: PENDING Phase 3 (M13) migration: references strategy_config_id / legacy columns removed in setup-mode schema (AD-22.21).
+SKIPPED [6] tests\test_step3_screening.py:650: PENDING Phase 3 (M13) migration: references strategy_config_id / legacy columns removed in setup-mode schema (AD-22.21).
+SKIPPED [7] tests\test_step3_screening.py:683: PENDING Phase 3 (M13) migration: references strategy_config_id / legacy columns removed in setup-mode schema (AD-22.21).
+SKIPPED [5] tests\test_step3_screening.py:713: PENDING Phase 3 (M13) migration: references strategy_config_id / legacy columns removed in setup-mode schema (AD-22.21).
+SKIPPED [1] tests\test_step3_screening.py:739: PENDING Phase 3 (M13) migration: references strategy_config_id / legacy columns removed in setup-mode schema (AD-22.21).
+SKIPPED [1] tests\test_step3_screening.py:755: PENDING Phase 3 (M13) migration: references strategy_config_id / legacy columns removed in setup-mode schema (AD-22.21).
+SKIPPED [1] tests\test_step3_screening.py:770: PENDING Phase 3 (M13) migration: references strategy_config_id / legacy columns removed in setup-mode schema (AD-22.21).
+SKIPPED [1] tests\test_step3_screening.py:788: PENDING Phase 3 (M13) migration: references strategy_config_id / legacy columns removed in setup-mode schema (AD-22.21).
+SKIPPED [1] tests\test_step3_screening.py:807: PENDING Phase 3 (M13) migration: references strategy_config_id / legacy columns removed in setup-mode schema (AD-22.21).
+SKIPPED [1] tests\test_step3_screening.py:843: PENDING Phase 3 (M13) migration: references strategy_config_id / legacy columns removed in setup-mode schema (AD-22.21).
+SKIPPED [1] tests\test_step3_screening.py:899: PENDING Phase 3 (M13) migration: references strategy_config_id / legacy columns removed in setup-mode schema (AD-22.21).
+SKIPPED [1] tests\test_step3_screening.py:917: PENDING Phase 3 (M13) migration: references strategy_config_id / legacy columns removed in setup-mode schema (AD-22.21).
+SKIPPED [1] tests\test_step3_screening.py:931: PENDING Phase 3 (M13) migration: references strategy_config_id / legacy columns removed in setup-mode schema (AD-22.21).
+SKIPPED [1] tests\test_step3_screening.py:960: PENDING Phase 3 (M13) migration: references strategy_config_id / legacy columns removed in setup-mode schema (AD-22.21).
+SKIPPED [1] tests\test_step3_screening.py:996: PENDING Phase 3 (M13) migration: references strategy_config_id / legacy columns removed in setup-mode schema (AD-22.21).
+SKIPPED [1] tests\test_step3_screening.py:1011: PENDING Phase 3 (M13) migration: references strategy_config_id / legacy columns removed in setup-mode schema (AD-22.21).
+SKIPPED [1] tests\test_step3_screening.py:1025: PENDING Phase 3 (M13) migration: references strategy_config_id / legacy columns removed in setup-mode schema (AD-22.21).
+SKIPPED [1] tests\test_step4_analysis.py:388: PENDING Phase 4 (M14) migration: references strategy_config_id / legacy columns removed in setup-mode schema (AD-22.21).
+SKIPPED [1] tests\test_step4_analysis.py:406: PENDING Phase 4 (M14) migration: references strategy_config_id / legacy columns removed in setup-mode schema (AD-22.21).
+SKIPPED [1] tests\test_step4_analysis.py:513: PENDING Phase 4 (M14) migration: references strategy_config_id / legacy columns removed in setup-mode schema (AD-22.21).
+SKIPPED [1] tests\test_step4_analysis.py:529: PENDING Phase 4 (M14) migration: references strategy_config_id / legacy columns removed in setup-mode schema (AD-22.21).
+SKIPPED [1] tests\test_step4_analysis.py:544: PENDING Phase 4 (M14) migration: references strategy_config_id / legacy columns removed in setup-mode schema (AD-22.21).
+SKIPPED [1] tests\test_step4_analysis.py:560: PENDING Phase 4 (M14) migration: references strategy_config_id / legacy columns removed in setup-mode schema (AD-22.21).
+SKIPPED [1] tests\test_step4_analysis.py:574: PENDING Phase 4 (M14) migration: references strategy_config_id / legacy columns removed in setup-mode schema (AD-22.21).
+SKIPPED [1] tests\test_step4_analysis.py:592: PENDING Phase 4 (M14) migration: references strategy_config_id / legacy columns removed in setup-mode schema (AD-22.21).
+SKIPPED [1] tests\test_step4_analysis.py:614: PENDING Phase 4 (M14) migration: references strategy_config_id / legacy columns removed in setup-mode schema (AD-22.21).
+SKIPPED [1] tests\test_step4_analysis.py:645: PENDING Phase 4 (M14) migration: references strategy_config_id / legacy columns removed in setup-mode schema (AD-22.21).
+SKIPPED [1] tests\test_step4_analysis.py:678: PENDING Phase 4 (M14) migration: references strategy_config_id / legacy columns removed in setup-mode schema (AD-22.21).
+SKIPPED [1] tests\test_step4_analysis.py:850: PENDING Phase 4 (M14) migration: references strategy_config_id / legacy columns removed in setup-mode schema (AD-22.21).
+SKIPPED [1] tests\test_step4_analysis.py:956: PENDING Phase 4 (M14) migration: references strategy_config_id / legacy columns removed in setup-mode schema (AD-22.21).
+SKIPPED [1] tests\test_step4_analysis.py:973: PENDING Phase 4 (M14) migration: references strategy_config_id / legacy columns removed in setup-mode schema (AD-22.21).
+SKIPPED [1] tests\test_step4_analysis.py:989: PENDING Phase 4 (M14) migration: references strategy_config_id / legacy columns removed in setup-mode schema (AD-22.21).
+SKIPPED [1] tests\test_step4_analysis.py:1049: PENDING Phase 4 (M14) migration: references strategy_config_id / legacy columns removed in setup-mode schema (AD-22.21).
+SKIPPED [1] tests\test_step4_analysis.py:1067: PENDING Phase 4 (M14) migration: references strategy_config_id / legacy columns removed in setup-mode schema (AD-22.21).
+SKIPPED [1] tests\test_step4_analysis.py:1081: PENDING Phase 4 (M14) migration: references strategy_config_id / legacy columns removed in setup-mode schema (AD-22.21).
+SKIPPED [1] tests\test_step4_analysis.py:1113: PENDING Phase 4 (M14) migration: references strategy_config_id / legacy columns removed in setup-mode schema (AD-22.21).
+SKIPPED [1] tests\test_step4_analysis.py:1129: PENDING Phase 4 (M14) migration: references strategy_config_id / legacy columns removed in setup-mode schema (AD-22.21).
+SKIPPED [1] tests\test_step4_analysis.py:1142: PENDING Phase 4 (M14) migration: references strategy_config_id / legacy columns removed in setup-mode schema (AD-22.21).
+SKIPPED [1] tests\test_step4_analysis.py:1177: PENDING Phase 4 (M14) migration: references strategy_config_id / legacy columns removed in setup-mode schema (AD-22.21).
+SKIPPED [1] tests\test_step4_analysis.py:1282: PENDING Phase 4 (M14) migration: references strategy_config_id / legacy columns removed in setup-mode schema (AD-22.21).
+SKIPPED [1] tests\test_step4_analysis.py:1308: PENDING Phase 4 (M14) migration: references strategy_config_id / legacy columns removed in setup-mode schema (AD-22.21).
+SKIPPED [1] tests\test_step4_analysis.py:1332: PENDING Phase 4 (M14) migration: references strategy_config_id / legacy columns removed in setup-mode schema (AD-22.21).
+SKIPPED [1] tests\test_step4_analysis.py:1348: PENDING Phase 4 (M14) migration: references strategy_config_id / legacy columns removed in setup-mode schema (AD-22.21).
+SKIPPED [1] tests\test_step4_analysis.py:1369: PENDING Phase 4 (M14) migration: references strategy_config_id / legacy columns removed in setup-mode schema (AD-22.21).
+SKIPPED [1] tests\test_step4_analysis.py:1394: PENDING Phase 4 (M14) migration: references strategy_config_id / legacy columns removed in setup-mode schema (AD-22.21).
+SKIPPED [1] tests\test_step4_analysis.py:1425: PENDING Phase 4 (M14) migration: references strategy_config_id / legacy columns removed in setup-mode schema (AD-22.21).
+SKIPPED [1] tests\test_step4_analysis.py:1447: PENDING Phase 4 (M14) migration: references strategy_config_id / legacy columns removed in setup-mode schema (AD-22.21).
+FAILED tests/test_data_validator.py::test_spec_documents_open_gaps_not_invented
+FAILED tests/test_mutation_detector.py::test_spec_documents_open_gap_g1 - Fil...

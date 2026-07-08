@@ -1,13 +1,12 @@
-"""Module 04 delta — SEC EDGAR fundamentals provider (Phase 4).
+"""Module 04 delta — SEC EDGAR fundamentals provider (Phase 4, hardened).
 
 Concrete :class:`MarketDataProvider` that overrides
 :meth:`get_fundamentals` (Phase 4's additive capability) using SEC EDGAR's
 free, keyless XBRL "companyfacts" API (``data.sec.gov``). This is the primary
-and only fundamentals source implemented here; it was chosen over Finnhub as
-the *primary* (reversing the coder note's stated preference order) because
-its data shape, availability, and free-tier semantics are fully documented
-and stable, whereas Finnhub's live free-tier limits could not be verified in
-this environment (flagged, not silently assumed).
+fundamentals source; a ``yfinance``-backed fallback (see
+:func:`compute_fundamentals_from_yfinance_info`) keeps the fundamentals step
+degrading gracefully instead of failing outright when SEC EDGAR is
+unreachable, rate-limited, or blocked.
 
 Field coverage (of the 7 :class:`FundamentalSnapshot` fields):
 
@@ -18,19 +17,16 @@ Field coverage (of the 7 :class:`FundamentalSnapshot` fields):
   injected (see :class:`EdgarFundamentalsProvider`); otherwise ``"unknown"``
   (a valid catalog value, not a failure) since EPS-to-price bucketing has no
   meaningful book-value-only substitute.
-- ``insider_trade_flag`` — always ``None`` from this provider. SEC EDGAR
-  Form 4s are filed under the *insider's* own CIK, not the issuer's; reliably
-  resolving "which Form 4 filings reference this issuer" needs EDGAR
-  full-text search with query semantics this implementation cannot verify
-  with confidence from documentation alone. Left as an ingestion-layer
-  enrichment (see ``docs/phase4_fundamentals_events_layer.md`` design note)
-  rather than guessed here.
-- ``institutional_ownership_delta`` — always ``None``. True institutional
-  ownership requires aggregating 13F filings across *all* institutional
-  filers for a given issuer, quarter over quarter — a substantial
-  data-engineering undertaking, not a single per-ticker API call. Flagged as
-  a blocking gap per the coder note's explicit instruction rather than
-  substituted with a proxy.
+- ``insider_trade_flag`` — always ``None`` from either source. SEC EDGAR
+  Form 4s are filed under the *insider's* own CIK, not the issuer's;
+  reliably resolving "which Form 4 filings reference this issuer" needs
+  EDGAR full-text search with query semantics this implementation cannot
+  verify with confidence from documentation alone.
+- ``institutional_ownership_delta`` — always ``None`` from either source.
+  True institutional ownership requires aggregating 13F filings across
+  *all* institutional filers for a given issuer, quarter over quarter — a
+  substantial data-engineering undertaking, not a single per-ticker API
+  call. Flagged as a blocking gap rather than substituted with a proxy.
 
 Altman Z-Score uses the **Z'-Score (private-firm) variant** — book value of
 equity in place of market value of equity — so the computation is entirely
@@ -38,47 +34,98 @@ self-contained (no price dependency, no cross-provider reach-in). This is a
 standard, well-documented alternate formulation of the same model, not an
 invented one; see module-level docstring on :func:`compute_altman_z_score`.
 
+SEC fair-access compliance (this module's hardening pass)
+-----------------------------------------------------------
+SEC EDGAR rejects (403 Forbidden) any request that doesn't send a
+compliant ``User-Agent: "<App Name> <contact-email>"`` header. This module:
+
+- Resolves the header from the ``SEC_USER_AGENT`` environment variable
+  (:func:`resolve_sec_user_agent`) and fails fast — *before* attempting any
+  network call — if it isn't configured, rather than hitting 403 on every
+  ticker.
+- Sets the header once on a shared ``requests.Session`` (see
+  :class:`_SecHttpClient`), never per-call, so it can't be accidentally
+  omitted.
+- Throttles to a safe rate under SEC's 10 req/s fair-access limit and
+  retries only transient failures (429 / 5xx) with exponential backoff.
+  A 403 is never retried — the identical request with the identical header
+  will never succeed on retry; it's surfaced as a clear, actionable error.
+- Caches ``company_tickers.json`` (a large, effectively-static file) on
+  disk with a 24h TTL so it is fetched at most once a day, not once per
+  ticker per run.
+- Falls back to ``yfinance`` (see :func:`compute_fundamentals_from_yfinance_info`)
+  when the SEC path fails for any reason, with the resulting snapshot's
+  ``source_provider`` explicitly labeled ``"yfinance_fallback"`` (never
+  silently blended with ``"sec_edgar"`` results). If the fallback also
+  fails, the ticker is reported as a normal ``failed`` :class:`ServiceResult`
+  (per-ticker, non-fatal to the pipeline — the ingestion step already
+  treats per-ticker failures as warnings, not hard stops).
+
 Two layers, deliberately separated for testability:
 
 - Pure functions (``compute_*``, ``extract_*``) operate on plain
-  ``dict``/``list`` structures mirroring SEC EDGAR's companyfacts JSON shape.
-  They do no I/O and are exercised directly with synthetic fixtures in
-  ``tests/test_edgar_provider.py`` — no live EDGAR calls in the suite.
-- :class:`EdgarFundamentalsProvider` is the thin HTTP-fetching wrapper
-  (``requests``, imported lazily inside ``__init__`` — mirroring Module 05's
-  lazy ``yfinance`` import so the module and its tests import cleanly without
-  the dependency installed, and so a fake fetch function can be injected for
-  fully offline tests).
+  ``dict``/``list`` structures mirroring SEC EDGAR's companyfacts JSON shape
+  (or, for the fallback, ``yfinance``'s ``Ticker.info`` dict shape). They do
+  no I/O and are exercised directly with synthetic fixtures — no live
+  EDGAR/Yahoo calls in the suite.
+- :class:`EdgarFundamentalsProvider` (and its :class:`_SecHttpClient`
+  transport helper) is the thin HTTP-fetching wrapper (``requests``,
+  imported lazily inside ``__init__`` — mirroring Module 05's lazy
+  ``yfinance`` import) so tests can inject fakes and run fully offline.
 """
 
 from __future__ import annotations
 
+import json
+import time
 import uuid
 from datetime import date
+from pathlib import Path
 from typing import Any, Callable, Final
 
+from app.config import env, settings
 from app.providers.provider_interface import (
     FundamentalSnapshot,
     MarketDataProvider,
     ProviderCapabilities,
     ProviderErrorDetail,
 )
+from app.services.universe.ticker_normalization import normalize_ticker
 from app.utils import logging_config, service_result
 from app.utils.service_result import ServiceResult
 
 _LOG = logging_config.get_logger(__name__)
 
 PROVIDER_NAME: Final[str] = "sec_edgar"
+FALLBACK_PROVIDER_NAME: Final[str] = "yfinance_fallback"
 
 _KEY_FUNDAMENTALS: Final[str] = "fundamentals"
 _KEY_ERROR_DETAIL: Final[str] = "error_detail"
 _KEY_PROVIDER_NAME: Final[str] = "provider_name"
+_KEY_SOURCE_PROVIDER: Final[str] = "source_provider"
 
 _SEC_TICKER_MAP_URL: Final[str] = "https://www.sec.gov/files/company_tickers.json"
 _SEC_COMPANYFACTS_URL: Final[str] = (
     "https://data.sec.gov/api/xbrl/companyfacts/CIK{cik:0>10}.json"
 )
-_SEC_USER_AGENT: Final[str] = "Stock_AI_Platform research (contact: local-only)"
+
+# --------------------------------------------------------------------------- #
+# SEC fair-access compliance constants.
+# --------------------------------------------------------------------------- #
+SEC_USER_AGENT_ENV_VAR: Final[str] = "SEC_USER_AGENT"
+# Target well under SEC's published 10 req/s fair-access limit.
+_TARGET_REQUESTS_PER_SEC: Final[float] = 6.0
+_MIN_REQUEST_INTERVAL_SEC: Final[float] = 1.0 / _TARGET_REQUESTS_PER_SEC
+_MAX_RETRIES: Final[int] = 3
+_RETRY_BACKOFF_BASE_SEC: Final[float] = 1.0
+# Retried with backoff: rate-limited / transient server errors. NEVER 403 --
+# a 403 means the header is wrong or the caller is blocked; the identical
+# retried request cannot succeed.
+_RETRYABLE_STATUS_CODES: Final[frozenset[int]] = frozenset({429, 500, 502, 503, 504})
+_FORBIDDEN_STATUS: Final[int] = 403
+
+_CACHE_TTL_SECONDS_DEFAULT: Final[int] = 24 * 3600
+_DEFAULT_CACHE_FILENAME: Final[str] = "sec_company_tickers.json"
 
 # us-gaap XBRL concept names. Several fields have known filer-to-filer tag
 # variance; aliases are tried in order and the first with usable annual data
@@ -113,6 +160,113 @@ _CONCEPT_LONG_TERM_DEBT: Final[tuple[str, ...]] = (
 )
 
 _ANNUAL_FORM: Final[str] = "10-K"
+
+
+# --------------------------------------------------------------------------- #
+# SEC fair-access: User-Agent resolution.
+# --------------------------------------------------------------------------- #
+def resolve_sec_user_agent(explicit: str | None = None) -> str:
+    """Resolve the SEC-compliant ``User-Agent`` header value.
+
+    Checks *explicit* first, then the ``SEC_USER_AGENT`` environment
+    variable. Raises ``RuntimeError`` with an actionable message if neither
+    is set. SEC EDGAR rejects (403) any request without a compliant header,
+    and retrying with the same missing/invalid header never helps -- this
+    must be fixed by configuration, not by retrying, which is why this
+    check happens *before* any network call is attempted.
+    """
+    value = explicit if explicit else env.get_str(SEC_USER_AGENT_ENV_VAR)
+    if not value or not value.strip():
+        raise RuntimeError(
+            f"{SEC_USER_AGENT_ENV_VAR} is not set. SEC EDGAR requires a "
+            "compliant User-Agent header on every request "
+            '(format: "<App Name> <contact-email>", e.g. '
+            '"StockAnalyzer you@example.com"). Set the SEC_USER_AGENT '
+            "environment variable before running fundamentals ingestion."
+        )
+    return value.strip()
+
+
+# --------------------------------------------------------------------------- #
+# Rate-limited, retrying HTTP client for SEC EDGAR endpoints.
+# --------------------------------------------------------------------------- #
+class _SecHttpClient:
+    """Encapsulates everything SEC EDGAR requires of a well-behaved caller.
+
+    - A compliant ``User-Agent`` set once on a shared session (never
+      per-call, so it can't be accidentally omitted).
+    - Throttling to stay under SEC's fair-access rate limit.
+    - A retry policy that only retries transient errors (429 / 5xx) with
+      exponential backoff -- never 403, which is surfaced immediately as a
+      clear, non-retryable error.
+    """
+
+    def __init__(
+        self,
+        user_agent: str | None = None,
+        requests_module: Any | None = None,
+        min_request_interval_sec: float | None = None,
+        max_retries: int | None = None,
+        sleep_fn: Callable[[float], None] | None = None,
+        time_fn: Callable[[], float] | None = None,
+    ) -> None:
+        self._explicit_user_agent = user_agent
+        self._requests_module = requests_module
+        self._session: Any | None = None
+        self._min_interval = (
+            min_request_interval_sec
+            if min_request_interval_sec is not None
+            else _MIN_REQUEST_INTERVAL_SEC
+        )
+        self._max_retries = max_retries if max_retries is not None else _MAX_RETRIES
+        self._sleep = sleep_fn or time.sleep
+        self._time = time_fn or time.time
+        self._last_request_ts: float | None = None
+
+    def _ensure_session(self) -> Any:
+        if self._session is not None:
+            return self._session
+        # Resolved (and may raise) before any session/network object is
+        # built -- a missing SEC_USER_AGENT never produces a wasted request.
+        user_agent = resolve_sec_user_agent(self._explicit_user_agent)
+        requests_module = self._requests_module
+        if requests_module is None:
+            import requests as requests_module  # noqa: PLC0415 - intentional lazy import
+        session = requests_module.Session()
+        session.headers.update({"User-Agent": user_agent})
+        self._session = session
+        return session
+
+    def _throttle(self) -> None:
+        if self._last_request_ts is None:
+            return
+        elapsed = self._time() - self._last_request_ts
+        remaining = self._min_interval - elapsed
+        if remaining > 0:
+            self._sleep(remaining)
+
+    def get_json(self, url: str) -> dict[str, Any]:
+        """GET *url* and return parsed JSON, honoring the retry/throttle policy."""
+        session = self._ensure_session()
+        attempt = 0
+        while True:
+            self._throttle()
+            self._last_request_ts = self._time()
+            response = session.get(url, timeout=30)
+            status = getattr(response, "status_code", 200)
+            if status == _FORBIDDEN_STATUS:
+                raise RuntimeError(
+                    f"SEC EDGAR returned 403 Forbidden for {url}. This means the "
+                    "User-Agent header is missing/non-compliant, or this caller "
+                    "has been rate-limited/blocked by SEC -- retrying will not "
+                    "help. Verify SEC_USER_AGENT is set to a compliant value."
+                )
+            if status in _RETRYABLE_STATUS_CODES and attempt < self._max_retries:
+                attempt += 1
+                self._sleep(_RETRY_BACKOFF_BASE_SEC * (2 ** (attempt - 1)))
+                continue
+            response.raise_for_status()
+            return response.json()
 
 
 # --------------------------------------------------------------------------- #
@@ -172,6 +326,20 @@ def _val(series: list[dict[str, Any]], index: int) -> float | None:
     return float(val) if val is not None else None
 
 
+def _bucket_pe_ratio(pe_ratio: float) -> str:
+    """Bucket a trailing P/E ratio into cheap / fair / expensive.
+
+    Shared by the EDGAR path (:func:`compute_valuation_band`) and the
+    yfinance fallback path (:func:`compute_fundamentals_from_yfinance_info`)
+    so both sources use the identical thresholds.
+    """
+    if pe_ratio < 15:
+        return "cheap"
+    if pe_ratio <= 25:
+        return "fair"
+    return "expensive"
+
+
 # --------------------------------------------------------------------------- #
 # Field computations (pure; each returns None when required inputs are absent
 # rather than fabricating a value)
@@ -212,12 +380,7 @@ def compute_valuation_band(
     eps = _val(eps_series, 0)
     if price is None or eps is None or eps <= 0:
         return "unknown"
-    pe_ratio = price / eps
-    if pe_ratio < 15:
-        return "cheap"
-    if pe_ratio <= 25:
-        return "fair"
-    return "expensive"
+    return _bucket_pe_ratio(price / eps)
 
 
 def compute_piotroski_f_score(
@@ -395,6 +558,52 @@ def compute_fundamentals_from_companyfacts(
 
 
 # --------------------------------------------------------------------------- #
+# yfinance fallback (used when the SEC EDGAR path fails for any reason).
+# --------------------------------------------------------------------------- #
+def compute_fundamentals_from_yfinance_info(
+    info: dict[str, Any], ticker: str, as_of_date: date
+) -> FundamentalSnapshot:
+    """Pure assembly of a fallback :class:`FundamentalSnapshot` from
+    ``yfinance``'s ``Ticker.info`` dict.
+
+    Coverage is intentionally reduced versus the EDGAR path:
+    ``piotroski_f_score`` / ``altman_z_score`` need full financial
+    statements across two periods, which ``.info`` does not provide, so
+    both stay ``None`` here rather than being approximated on partial data.
+    ``leverage_ratio`` uses a **different basis** than the EDGAR path:
+    yfinance's ``debtToEquity`` is debt relative to *equity* (as a
+    percentage), not debt relative to *assets* — documented here rather
+    than silently treated as equivalent to the EDGAR field of the same
+    name. ``source_provider`` is always ``"yfinance_fallback"``, never
+    blended with ``"sec_edgar"``.
+    """
+    eps_growth = info.get("earningsQuarterlyGrowth")
+    if eps_growth is None:
+        eps_growth = info.get("earningsGrowth")
+
+    debt_to_equity_pct = info.get("debtToEquity")
+    leverage_ratio = (
+        float(debt_to_equity_pct) / 100.0 if debt_to_equity_pct is not None else None
+    )
+
+    pe_ratio = info.get("trailingPE")
+    valuation_band = _bucket_pe_ratio(float(pe_ratio)) if pe_ratio else "unknown"
+
+    return FundamentalSnapshot(
+        ticker=ticker,
+        as_of_date=as_of_date,
+        eps_growth_trend=float(eps_growth) if eps_growth is not None else None,
+        leverage_ratio=leverage_ratio,
+        valuation_band=valuation_band,
+        piotroski_f_score=None,
+        altman_z_score=None,
+        insider_trade_flag=None,
+        institutional_ownership_delta=None,
+        source_provider=FALLBACK_PROVIDER_NAME,
+    )
+
+
+# --------------------------------------------------------------------------- #
 # HTTP-fetching wrapper
 # --------------------------------------------------------------------------- #
 class EdgarFundamentalsProvider(MarketDataProvider):
@@ -408,42 +617,95 @@ class EdgarFundamentalsProvider(MarketDataProvider):
     Parameters
     ----------
     fetch_json:
-        Injected ``Callable[[str, dict[str, str]], dict]`` performing one GET
-        returning parsed JSON: ``fetch_json(url, headers) -> dict``. When
-        ``None`` (production), a small wrapper around ``requests.get`` is
-        built lazily inside ``__init__`` (mirroring Module 05's lazy
-        ``yfinance`` import) so tests can inject a fake and run fully offline
-        with no network access and no ``requests`` dependency required.
+        Injected ``Callable[[str], dict]`` performing one GET returning
+        parsed JSON: ``fetch_json(url) -> dict``. When ``None`` (production),
+        a :class:`_SecHttpClient` is built lazily (rate-limited, retrying,
+        compliant ``User-Agent``) so tests can inject a fake and run fully
+        offline with no network access.
     ticker_to_cik:
         Injected ``Callable[[str], str | None]`` resolving a ticker to its
-        zero-padded SEC CIK. When ``None``, a default resolver fetches and
-        caches ``company_tickers.json`` via ``fetch_json``.
+        zero-padded SEC CIK. When ``None``, a default resolver reads the
+        on-disk ``company_tickers.json`` cache (TTL-bounded) or fetches and
+        caches it via ``fetch_json``.
     price_lookup:
         Optional ``Callable[[str, date], float | None]`` for ``valuation_band``
         only (see module docstring). Omitted in production by default;
         ``valuation_band`` then reports ``"unknown"`` rather than reaching
         into another provider.
+    sec_user_agent:
+        Explicit override for the ``SEC_USER_AGENT`` environment variable
+        (mainly for tests).
+    cache_path:
+        On-disk path for the ``company_tickers.json`` cache. Defaults to
+        ``settings.CACHE_DIR / "sec_company_tickers.json"``.
+    cache_ttl_seconds:
+        Cache freshness window. Defaults to 24 hours.
+    yfinance_fallback:
+        Injected ``Callable[[str, date], FundamentalSnapshot | None]`` used
+        when the SEC path fails for any reason. When ``None``, a default is
+        built from ``yf_module`` (or a lazily-imported real ``yfinance``).
+    yf_module:
+        Injected fake ``yfinance``-like module (mirrors
+        :class:`YahooProvider`'s ``yf_module`` hook) used to build the
+        default fallback. Ignored if ``yfinance_fallback`` is supplied.
+    min_request_interval_sec, max_retries, requests_module, sleep_fn:
+        Passed through to :class:`_SecHttpClient` (mainly for tests).
     """
 
     def __init__(
         self,
-        fetch_json: Callable[[str, dict[str, str]], dict[str, Any]] | None = None,
+        fetch_json: Callable[[str], dict[str, Any]] | None = None,
         ticker_to_cik: Callable[[str], str | None] | None = None,
         price_lookup: Callable[[str, date], float | None] | None = None,
+        sec_user_agent: str | None = None,
+        cache_path: Path | None = None,
+        cache_ttl_seconds: int | None = None,
+        yfinance_fallback: Callable[[str, date], FundamentalSnapshot | None] | None = None,
+        yf_module: Any | None = None,
+        min_request_interval_sec: float | None = None,
+        max_retries: int | None = None,
+        requests_module: Any | None = None,
+        sleep_fn: Callable[[float], None] | None = None,
     ) -> None:
         if fetch_json is None:
-            import requests  # noqa: PLC0415 - intentional lazy import
-
-            def _default_fetch(url: str, headers: dict[str, str]) -> dict[str, Any]:
-                response = requests.get(url, headers=headers, timeout=30)
-                response.raise_for_status()
-                return response.json()
-
-            fetch_json = _default_fetch
+            http_client = _SecHttpClient(
+                user_agent=sec_user_agent,
+                requests_module=requests_module,
+                min_request_interval_sec=min_request_interval_sec,
+                max_retries=max_retries,
+                sleep_fn=sleep_fn,
+            )
+            fetch_json = http_client.get_json
         self._fetch_json = fetch_json
         self._ticker_to_cik = ticker_to_cik or self._default_ticker_to_cik
         self._price_lookup = price_lookup
         self._cik_cache: dict[str, str] | None = None
+        self._cache_path = (
+            cache_path if cache_path is not None
+            else (settings.CACHE_DIR / _DEFAULT_CACHE_FILENAME)
+        )
+        self._cache_ttl_seconds = (
+            cache_ttl_seconds if cache_ttl_seconds is not None
+            else _CACHE_TTL_SECONDS_DEFAULT
+        )
+        self._yfinance_fallback = yfinance_fallback or self._build_default_yfinance_fallback(
+            yf_module
+        )
+
+    @staticmethod
+    def _build_default_yfinance_fallback(
+        yf_module: Any | None,
+    ) -> Callable[[str, date], FundamentalSnapshot | None]:
+        def _fallback(ticker: str, as_of_date: date) -> FundamentalSnapshot | None:
+            yf = yf_module
+            if yf is None:
+                import yfinance as yf  # noqa: PLC0415 - intentional lazy import
+            info = yf.Ticker(ticker).info
+            if not info:
+                return None
+            return compute_fundamentals_from_yfinance_info(info, ticker, as_of_date)
+
+        return _fallback
 
     # ------------------------------------------------------------------ #
     # Capabilities
@@ -474,71 +736,148 @@ class EdgarFundamentalsProvider(MarketDataProvider):
         return self._unsupported("get_earnings", ticker)
 
     # ------------------------------------------------------------------ #
-    # Fundamentals (Phase 4)
+    # Fundamentals (Phase 4), with yfinance fallback on any SEC-path failure.
     # ------------------------------------------------------------------ #
     def get_fundamentals(self, ticker: str, as_of_date: date) -> ServiceResult:
         run_id = self._new_run_id()
         log = logging_config.get_logger(__name__, run_id)
 
-        cik = self._ticker_to_cik(ticker)
-        if cik is None:
-            detail = ProviderErrorDetail(
-                kind="unsupported_symbol",
-                message=f"No SEC CIK mapping found for ticker {ticker!r}",
-                symbol=ticker,
-            )
-            log.info("no CIK mapping ticker=%s", ticker)
-            return self._failed(run_id, detail)
-
-        url = _SEC_COMPANYFACTS_URL.format(cik=cik)
-        try:
-            company_facts = self._fetch_json(url, {"User-Agent": _SEC_USER_AGENT})
-        except Exception as exc:  # noqa: BLE001 - mapped to a §9 ServiceResult
-            kind = "rate_limited" if "429" in str(exc) else "provider_unavailable"
-            detail = ProviderErrorDetail(
-                kind=kind,
-                message=f"SEC EDGAR companyfacts fetch failed for {ticker!r}: {exc}",
-                symbol=ticker,
-            )
-            log.error("companyfacts fetch failed ticker=%s: %s", ticker, exc)
-            return self._failed(run_id, detail)
+        # Normalize before any provider call (SEC CIK lookup, yfinance fallback):
+        # slash-notation share classes (BRK/A, BF/A, ...) 404 on both SEC EDGAR
+        # and yfinance, which expect hyphen notation (BRK-A, BF-A, ...).
+        ticker = normalize_ticker(ticker)
 
         try:
+            cik = self._ticker_to_cik(ticker)
+            if cik is None:
+                raise ValueError(f"No SEC CIK mapping found for ticker {ticker!r}")
+            url = _SEC_COMPANYFACTS_URL.format(cik=cik)
+            company_facts = self._fetch_json(url)
             price = self._price_lookup(ticker, as_of_date) if self._price_lookup else None
             snapshot = compute_fundamentals_from_companyfacts(
                 company_facts, ticker, as_of_date, price=price
             )
-        except Exception as exc:  # noqa: BLE001 - malformed payload -> §9
-            detail = ProviderErrorDetail(
-                kind="malformed_response",
-                message=f"Could not parse EDGAR companyfacts for {ticker!r}: {exc}",
-                symbol=ticker,
+        except Exception as sec_exc:  # noqa: BLE001 - any SEC-path failure triggers fallback
+            log.warning(
+                "sec_edgar fundamentals failed ticker=%s: %s; attempting yfinance fallback",
+                ticker, sec_exc,
             )
-            log.error("malformed companyfacts ticker=%s: %s", ticker, exc)
-            return self._failed(run_id, detail)
+            return self._fallback_or_fail(run_id, log, ticker, as_of_date, sec_exc)
 
-        log.info("computed fundamentals snapshot ticker=%s as_of=%s", ticker, as_of_date)
+        log.info(
+            "computed fundamentals snapshot ticker=%s as_of=%s source=%s",
+            ticker, as_of_date, PROVIDER_NAME,
+        )
         return ServiceResult(
             status=service_result.STATUS_SUCCESS,
             run_id=run_id,
             rows_processed=1,
-            metadata={_KEY_FUNDAMENTALS: snapshot, _KEY_PROVIDER_NAME: PROVIDER_NAME},
+            metadata={
+                _KEY_FUNDAMENTALS: snapshot,
+                _KEY_PROVIDER_NAME: PROVIDER_NAME,
+                _KEY_SOURCE_PROVIDER: snapshot.source_provider,
+            },
         )
 
+    def _fallback_or_fail(
+        self, run_id: str, log: Any, ticker: str, as_of_date: date, sec_exc: Exception
+    ) -> ServiceResult:
+        """Attempt the yfinance fallback; return a clean failure if it also fails.
+
+        Never raises: any yfinance-path exception is caught and folded into
+        the "both sources failed" branch, matching the same
+        never-crash-the-pipeline contract as the SEC path itself.
+        """
+        try:
+            snapshot = self._yfinance_fallback(ticker, as_of_date)
+            fallback_error: str | None = None if snapshot is not None else "yfinance returned no data"
+        except Exception as fb_exc:  # noqa: BLE001
+            snapshot = None
+            fallback_error = str(fb_exc)
+
+        if snapshot is not None:
+            log.warning(
+                "ticker=%s: sec_edgar failed (%s); used %s",
+                ticker, sec_exc, FALLBACK_PROVIDER_NAME,
+            )
+            return ServiceResult(
+                status=service_result.STATUS_SUCCESS_WITH_WARNINGS,
+                run_id=run_id,
+                rows_processed=1,
+                warnings=[f"sec_edgar failed ({sec_exc}); used {FALLBACK_PROVIDER_NAME}"],
+                metadata={
+                    _KEY_FUNDAMENTALS: snapshot,
+                    _KEY_PROVIDER_NAME: PROVIDER_NAME,
+                    _KEY_SOURCE_PROVIDER: snapshot.source_provider,
+                },
+            )
+
+        log.error(
+            "ticker=%s: both sec_edgar and %s failed: sec=%s yfinance=%s",
+            ticker, FALLBACK_PROVIDER_NAME, sec_exc, fallback_error,
+        )
+        detail = ProviderErrorDetail(
+            kind="provider_unavailable",
+            message=(
+                f"sec_edgar failed for {ticker!r} ({sec_exc}); "
+                f"{FALLBACK_PROVIDER_NAME} also failed ({fallback_error})"
+            ),
+            symbol=ticker,
+        )
+        return self._failed(run_id, detail)
+
     # ------------------------------------------------------------------ #
-    # Ticker -> CIK resolution
+    # Ticker -> CIK resolution, with an on-disk TTL cache for
+    # company_tickers.json (large, effectively-static; must not be
+    # re-fetched per ticker per run).
     # ------------------------------------------------------------------ #
     def _default_ticker_to_cik(self, ticker: str) -> str | None:
         if self._cik_cache is None:
-            payload = self._fetch_json(_SEC_TICKER_MAP_URL, {"User-Agent": _SEC_USER_AGENT})
-            cache: dict[str, str] = {}
-            for entry in payload.values():
-                sym = entry.get("ticker")
-                cik = entry.get("cik_str")
-                if sym and cik is not None:
-                    cache[sym.upper()] = str(cik).zfill(10)
-            self._cik_cache = cache
+            self._cik_cache = self._load_ticker_map()
         return self._cik_cache.get(ticker.upper())
+
+    def _load_ticker_map(self) -> dict[str, str]:
+        cached = self._read_disk_cache()
+        if cached is not None:
+            return cached
+        payload = self._fetch_json(_SEC_TICKER_MAP_URL)
+        cache_map = self._parse_ticker_map(payload)
+        self._write_disk_cache(payload)
+        return cache_map
+
+    def _read_disk_cache(self) -> dict[str, str] | None:
+        if self._cache_path is None:
+            return None
+        try:
+            mtime = self._cache_path.stat().st_mtime
+        except OSError:
+            return None
+        if (time.time() - mtime) >= self._cache_ttl_seconds:
+            return None  # stale -> caller refetches
+        try:
+            payload = json.loads(self._cache_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None  # unreadable/corrupt -> caller refetches
+        return self._parse_ticker_map(payload)
+
+    def _write_disk_cache(self, payload: dict[str, Any]) -> None:
+        if self._cache_path is None:
+            return
+        try:
+            self._cache_path.parent.mkdir(parents=True, exist_ok=True)
+            self._cache_path.write_text(json.dumps(payload), encoding="utf-8")
+        except OSError:
+            pass  # caching is best-effort, not required for correctness
+
+    @staticmethod
+    def _parse_ticker_map(payload: dict[str, Any]) -> dict[str, str]:
+        cache: dict[str, str] = {}
+        for entry in payload.values():
+            sym = entry.get("ticker")
+            cik = entry.get("cik_str")
+            if sym and cik is not None:
+                cache[sym.upper()] = str(cik).zfill(10)
+        return cache
 
     # ------------------------------------------------------------------ #
     # Shared helpers
@@ -569,6 +908,7 @@ class EdgarFundamentalsProvider(MarketDataProvider):
 __all__ = [
     "EdgarFundamentalsProvider",
     "compute_fundamentals_from_companyfacts",
+    "compute_fundamentals_from_yfinance_info",
     "compute_eps_growth_trend",
     "compute_leverage_ratio",
     "compute_valuation_band",
@@ -576,5 +916,8 @@ __all__ = [
     "compute_altman_z_score",
     "extract_annual_series",
     "extract_metric_series",
+    "resolve_sec_user_agent",
     "PROVIDER_NAME",
+    "FALLBACK_PROVIDER_NAME",
+    "SEC_USER_AGENT_ENV_VAR",
 ]

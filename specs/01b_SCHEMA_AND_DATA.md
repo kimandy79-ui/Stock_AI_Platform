@@ -152,6 +152,7 @@ CREATE TABLE IF NOT EXISTS daily_features (
     volume_dry_up_score DOUBLE,
     volume_expansion_score DOUBLE,
     relative_strength_vs_spy DOUBLE,
+    rs_percentile_126d DOUBLE,
     sector_relative_strength DOUBLE,
     market_regime VARCHAR,
     days_to_earnings_bd INTEGER,

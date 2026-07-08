@@ -1,0 +1,38 @@
+........................................................................ [ 15%]
+........................................................................ [ 30%]
+.........................s..ssss.s...................................... [ 45%]
+........................................................................ [ 60%]
+........................................................................ [ 76%]
+........................................................................ [ 91%]
+.....ss...sssss....sssssssssssssssss.....                                [100%]
+=========================== short test summary info ===========================
+SKIPPED [1] tests\test_simulation_engine.py:617: PENDING M17 setup-mode replay: _read_step4_inputs removed (legacy step4_analysis_engine guard, Phase 7).
+SKIPPED [1] tests\test_simulation_engine.py:841: PENDING M17 integration test: requires full schema + DuckDB (see Phase 7 delivery). DEFAULT_STRATEGY_CONFIGS removed in setup-mode (AD-22.19-22.24).
+SKIPPED [1] tests\test_simulation_engine.py:878: PENDING M17 integration test: requires full schema + DuckDB (see Phase 7 delivery). DEFAULT_STRATEGY_CONFIGS removed in setup-mode (AD-22.19-22.24).
+SKIPPED [1] tests\test_simulation_engine.py:903: PENDING M17 integration test: requires full schema + DuckDB (see Phase 7 delivery). DEFAULT_STRATEGY_CONFIGS removed in setup-mode (AD-22.19-22.24).
+SKIPPED [1] tests\test_simulation_engine.py:930: PENDING M17 integration test: requires full schema + DuckDB (see Phase 7 delivery). DEFAULT_STRATEGY_CONFIGS removed in setup-mode (AD-22.19-22.24).
+SKIPPED [1] tests\test_simulation_engine.py:1009: PENDING M17 integration test: requires full schema + DuckDB (see Phase 7 delivery). DEFAULT_STRATEGY_CONFIGS removed in setup-mode (AD-22.19-22.24).
+SKIPPED [1] tests\test_outcome_queue.py:359: PENDING M16 integration test: requires full schema + DuckDB (see Phase 7 delivery).
+SKIPPED [1] tests\test_outcome_queue.py:372: PENDING M16 integration test: requires full schema + DuckDB (see Phase 7 delivery).
+SKIPPED [1] tests\test_outcome_queue.py:409: PENDING M16 integration test: requires full schema + DuckDB (see Phase 7 delivery).
+SKIPPED [1] tests\test_outcome_queue.py:424: PENDING M16 integration test: requires full schema + DuckDB (see Phase 7 delivery).
+SKIPPED [1] tests\test_outcome_queue.py:451: PENDING M16 integration test: requires full schema + DuckDB (see Phase 7 delivery).
+SKIPPED [1] tests\test_outcome_queue.py:474: PENDING M16 integration test: requires full schema + DuckDB (see Phase 7 delivery).
+SKIPPED [1] tests\test_outcome_queue.py:486: PENDING M16 integration test: requires full schema + DuckDB (see Phase 7 delivery).
+SKIPPED [1] tests\test_outcome_queue.py:553: PENDING M16 integration test: requires full schema + DuckDB (see Phase 7 delivery).
+SKIPPED [1] tests\test_outcome_queue.py:570: PENDING M16 integration test: requires full schema + DuckDB (see Phase 7 delivery).
+SKIPPED [1] tests\test_outcome_queue.py:591: PENDING M16 integration test: requires full schema + DuckDB (see Phase 7 delivery).
+SKIPPED [1] tests\test_outcome_queue.py:613: PENDING M16 integration test: requires full schema + DuckDB (see Phase 7 delivery).
+SKIPPED [1] tests\test_outcome_queue.py:638: PENDING M16 integration test: requires full schema + DuckDB (see Phase 7 delivery).
+SKIPPED [1] tests\test_outcome_queue.py:656: PENDING M16 integration test: requires full schema + DuckDB (see Phase 7 delivery).
+SKIPPED [1] tests\test_outcome_queue.py:675: PENDING M16 integration test: requires full schema + DuckDB (see Phase 7 delivery).
+SKIPPED [1] tests\test_outcome_queue.py:693: PENDING M16 integration test: requires full schema + DuckDB (see Phase 7 delivery).
+SKIPPED [1] tests\test_outcome_queue.py:708: PENDING M16 integration test: requires full schema + DuckDB (see Phase 7 delivery).
+SKIPPED [1] tests\test_outcome_queue.py:735: PENDING M16 integration test: requires full schema + DuckDB (see Phase 7 delivery).
+SKIPPED [1] tests\test_outcome_queue.py:747: PENDING M16 integration test: requires full schema + DuckDB (see Phase 7 delivery).
+SKIPPED [1] tests\test_outcome_queue.py:759: PENDING M16 integration test: requires full schema + DuckDB (see Phase 7 delivery).
+SKIPPED [1] tests\test_outcome_queue.py:773: PENDING M16 integration test: requires full schema + DuckDB (see Phase 7 delivery).
+SKIPPED [1] tests\test_outcome_queue.py:788: PENDING M16 integration test: requires full schema + DuckDB (see Phase 7 delivery).
+SKIPPED [1] tests\test_outcome_queue.py:811: PENDING M16 integration test: requires full schema + DuckDB (see Phase 7 delivery).
+SKIPPED [1] tests\test_outcome_queue.py:821: PENDING M16 integration test: requires full schema + DuckDB (see Phase 7 delivery).
+SKIPPED [1] tests\test_outcome_queue.py:855: PENDING M16 integration test: requires full schema + DuckDB (see Phase 7 delivery).

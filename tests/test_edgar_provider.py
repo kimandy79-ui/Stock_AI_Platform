@@ -310,9 +310,13 @@ class TestComputeFundamentalsFromCompanyfacts:
 # EdgarFundamentalsProvider (HTTP-fetching wrapper, injected fake fetch_json)
 # --------------------------------------------------------------------------- #
 class TestEdgarFundamentalsProvider:
-    def _provider(self, companyfacts: dict | None = None, cik: str | None = "0000320193"):
-        def fake_fetch(url: str, headers: dict) -> dict:
-            assert "User-Agent" in headers
+    def _provider(
+        self,
+        companyfacts: dict | None = None,
+        cik: str | None = "0000320193",
+        yfinance_fallback=None,
+    ):
+        def fake_fetch(url: str) -> dict:
             if "companyfacts" in url:
                 if companyfacts is None:
                     raise RuntimeError("simulated transport failure")
@@ -322,6 +326,10 @@ class TestEdgarFundamentalsProvider:
         return ep.EdgarFundamentalsProvider(
             fetch_json=fake_fetch,
             ticker_to_cik=lambda ticker: cik,
+            # Default: fallback also unavailable, so these tests exercise the
+            # "both sources failed" path deterministically (no live yfinance
+            # network call, matching "no live calls in the suite").
+            yfinance_fallback=yfinance_fallback or (lambda ticker, as_of_date: None),
         )
 
     def test_get_fundamentals_happy_path(self) -> None:
@@ -332,24 +340,51 @@ class TestEdgarFundamentalsProvider:
         snapshot = result.metadata["fundamentals"]
         assert isinstance(snapshot, FundamentalSnapshot)
         assert result.metadata["provider_name"] == "sec_edgar"
+        assert result.metadata["source_provider"] == "sec_edgar"
 
-    def test_unknown_ticker_returns_unsupported_symbol(self) -> None:
+    def test_unknown_ticker_falls_back_then_fails_when_fallback_unavailable(self) -> None:
         provider = self._provider(_full_companyfacts(), cik=None)
         result = provider.get_fundamentals("NOPE", _AS_OF)
         assert result.status == service_result.STATUS_FAILED
-        assert result.metadata["error_detail"].kind == "unsupported_symbol"
+        assert result.metadata["error_detail"].kind == "provider_unavailable"
+        assert "sec_edgar failed" in result.metadata["error_detail"].message
+        assert "yfinance_fallback also failed" in result.metadata["error_detail"].message
 
-    def test_transport_failure_returns_provider_unavailable(self) -> None:
+    def test_transport_failure_falls_back_then_fails_when_fallback_unavailable(self) -> None:
         provider = self._provider(companyfacts=None)
         result = provider.get_fundamentals("TEST", _AS_OF)
         assert result.status == service_result.STATUS_FAILED
         assert result.metadata["error_detail"].kind == "provider_unavailable"
 
-    def test_malformed_payload_returns_malformed_response(self) -> None:
+    def test_malformed_payload_falls_back_then_fails_when_fallback_unavailable(self) -> None:
         provider = self._provider({"facts": {"us-gaap": {"Assets": {"units": "not-a-dict"}}}})
         result = provider.get_fundamentals("TEST", _AS_OF)
         assert result.status == service_result.STATUS_FAILED
-        assert result.metadata["error_detail"].kind == "malformed_response"
+        assert result.metadata["error_detail"].kind == "provider_unavailable"
+
+    def test_sec_failure_with_working_yfinance_fallback_succeeds_with_warning(self) -> None:
+        fallback_snapshot = FundamentalSnapshot(
+            ticker="TEST", as_of_date=_AS_OF, eps_growth_trend=0.1,
+            source_provider="yfinance_fallback",
+        )
+        provider = self._provider(
+            companyfacts=None,
+            yfinance_fallback=lambda ticker, as_of_date: fallback_snapshot,
+        )
+        result = provider.get_fundamentals("TEST", _AS_OF)
+        assert result.status == service_result.STATUS_SUCCESS_WITH_WARNINGS
+        assert result.metadata["fundamentals"] is fallback_snapshot
+        assert result.metadata["source_provider"] == "yfinance_fallback"
+        assert any("yfinance_fallback" in w for w in result.warnings)
+
+    def test_yfinance_fallback_exception_is_caught_not_raised(self) -> None:
+        def _raising_fallback(ticker: str, as_of_date):
+            raise RuntimeError("yfinance also down")
+
+        provider = self._provider(companyfacts=None, yfinance_fallback=_raising_fallback)
+        result = provider.get_fundamentals("TEST", _AS_OF)
+        assert result.status == service_result.STATUS_FAILED
+        assert "yfinance also down" in result.metadata["error_detail"].message
 
     def test_capabilities_report_fundamentals_only(self) -> None:
         provider = self._provider(_full_companyfacts())
@@ -376,17 +411,56 @@ class TestEdgarFundamentalsProvider:
             assert result.status == service_result.STATUS_FAILED
             assert result.metadata["error_detail"].kind == "unsupported_capability"
 
-    def test_default_ticker_to_cik_resolves_and_caches(self) -> None:
+    def test_slash_notation_ticker_normalized_before_cik_lookup(self) -> None:
+        """BRK/A must resolve as BRK-A before it ever reaches the SEC CIK
+        lookup -- SEC EDGAR 404s on slash notation."""
+        seen_tickers: list[str] = []
+
+        def ticker_to_cik(ticker: str) -> str | None:
+            seen_tickers.append(ticker)
+            return "0001067983"
+
+        provider = ep.EdgarFundamentalsProvider(
+            fetch_json=lambda url: _full_companyfacts(),
+            ticker_to_cik=ticker_to_cik,
+            yfinance_fallback=lambda ticker, as_of_date: None,
+        )
+        result = provider.get_fundamentals("BRK/A", _AS_OF)
+        assert seen_tickers == ["BRK-A"]
+        assert result.status == service_result.STATUS_SUCCESS
+        assert result.metadata["fundamentals"].ticker == "BRK-A"
+
+    def test_slash_notation_ticker_normalized_before_yfinance_fallback(self) -> None:
+        """BF/B must resolve as BF-B before the yfinance fallback call --
+        yfinance also 404s on slash notation. Exercises a known-good
+        class-share ticker succeeding end-to-end via the fallback path."""
+        seen_tickers: list[str] = []
+
+        def yfinance_fallback(ticker: str, as_of_date):
+            seen_tickers.append(ticker)
+            return FundamentalSnapshot(
+                ticker=ticker, as_of_date=as_of_date, source_provider="yfinance_fallback"
+            )
+
+        provider = self._provider(companyfacts=None, yfinance_fallback=yfinance_fallback)
+        result = provider.get_fundamentals("BF/B", _AS_OF)
+        assert seen_tickers == ["BF-B"]
+        assert result.status == service_result.STATUS_SUCCESS_WITH_WARNINGS
+        assert result.metadata["fundamentals"].ticker == "BF-B"
+
+    def test_default_ticker_to_cik_resolves_and_caches(self, tmp_path) -> None:
         calls: list[str] = []
 
-        def fake_fetch(url: str, headers: dict) -> dict:
+        def fake_fetch(url: str) -> dict:
             calls.append(url)
             if "company_tickers" in url:
                 return {"0": {"ticker": "TEST", "cik_str": 320193}}
             return _full_companyfacts()
 
-        provider = ep.EdgarFundamentalsProvider(fetch_json=fake_fetch)
+        provider = ep.EdgarFundamentalsProvider(
+            fetch_json=fake_fetch, cache_path=tmp_path / "cache.json"
+        )
         provider.get_fundamentals("TEST", _AS_OF)
         provider.get_fundamentals("TEST", _AS_OF)
         ticker_map_calls = [c for c in calls if "company_tickers" in c]
-        assert len(ticker_map_calls) == 1  # cached after first resolution
+        assert len(ticker_map_calls) == 1  # cached in-memory after first resolution

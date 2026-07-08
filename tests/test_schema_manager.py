@@ -8,7 +8,8 @@ Covers:
 - Production indexes and views exist; simulation has no prod views.
 - selected_proposals_current uses in_diversified_top_n = TRUE.
 - schema_versions seeded with correct (schema_name, version) key.
-- daily_features has features_v02 structural columns.
+- daily_features has features_v02 structural columns, plus the features_v03
+  rs_percentile_126d addition (P1.1, 2026-07-08).
 - Static source scan: no ALTER TABLE, no duckdb.connect(, no CREATE TYPE/ENUM.
 - ServiceResult metadata contract.
 
@@ -132,6 +133,11 @@ FEATURES_V02_COLUMNS: frozenset[str] = frozenset({
     "base_high", "base_low", "range_width_pct", "range_duration",
     "range_tightness_score", "volume_dry_up_score", "volume_expansion_score",
     "relative_strength_vs_spy",
+})
+
+# P1.1 (2026-07-08): features_v03 adds exactly one column over v02.
+FEATURES_V03_COLUMNS: frozenset[str] = frozenset({
+    "rs_percentile_126d",
 })
 
 
@@ -419,7 +425,17 @@ class TestFeaturesV02Columns:
         sm.apply_schema(role)
         assert "feature_schema_version" in _columns(role, "daily_features")
         assert isinstance(constants.FEATURE_SCHEMA_VERSION, str)
-        assert constants.FEATURE_SCHEMA_VERSION == "features_v02"
+        # P1.1 (2026-07-08): bumped from features_v02 to features_v03.
+        assert constants.FEATURE_SCHEMA_VERSION == "features_v03"
+
+    @pytest.mark.parametrize("role", ["prod", "debug"])
+    def test_features_v03_columns_exist(
+        self, role: str, tmp_db_paths: dict[str, Path]
+    ) -> None:
+        sm.apply_schema(role)
+        cols = set(_columns(role, "daily_features"))
+        missing = FEATURES_V03_COLUMNS - cols
+        assert missing == set(), f"Missing features_v03 columns: {missing}"
 
     def test_feature_value_fits_column(self, tmp_db_paths: dict[str, Path]) -> None:
         sm.apply_prod_schema()

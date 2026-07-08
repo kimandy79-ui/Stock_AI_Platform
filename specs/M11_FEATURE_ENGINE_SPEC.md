@@ -1,12 +1,13 @@
 # M11_FEATURE_ENGINE_SPEC
 
-Module 11 — Feature Engine. Contract spec. Phase 2 (features_v02).
+Module 11 — Feature Engine. Contract spec. Phase 2 (features_v02), extended
+by P1.1 (features_v03, 2026-07-08 — adds `rs_percentile_126d`).
 Derived from the frozen split Project Files; gaps are marked, not invented.
 
 ## 1. Purpose and non-scope
 
 Purpose: read eligible `daily_prices` rows, compute `daily_features`
-(schema version `features_v02`) strictly from the frozen formulas, and upsert
+(schema version `features_v03`) strictly from the frozen formulas, and upsert
 exactly one feature row per processed ticker (anchored on that ticker's
 `feature_cutoff_date`) into `daily_features`.
 
@@ -23,7 +24,7 @@ writes to any table other than `daily_features`; no direct `duckdb` import,
 - Pipeline position: `01d_MODULES_AND_PIPELINE.md` (Module 11/12).
 - Decisions: `02b_ARCHITECTURE_DECISIONS.md` 22.2, 22.6, 22.7, 22.8, 22.10,
   22.19–22.24.
-- Constants: `app/config/constants.py` (`FEATURE_SCHEMA_VERSION = "features_v02"`,
+- Constants: `app/config/constants.py` (`FEATURE_SCHEMA_VERSION = "features_v03"`,
   `SECTOR_ETF_MAP`, `BENCHMARK_SPY`, VIX thresholds, `MARKET_REGIME_PRIORITY`).
 
 ## 3. Public API (unchanged)
@@ -70,6 +71,21 @@ Step 4.
 `constants.BENCHMARK_SPY` ("SPY") is unconditionally added to the price-read
 load set to enable `relative_strength_vs_spy`.  If SPY has no eligible rows at
 the cutoff date, `relative_strength_vs_spy` is NULL.  No error is raised.
+
+## 6a. Cross-sectional RS percentile (features_v03, P1.1)
+
+`rs_percentile_126d` is computed in a second pass over `_build_feature_rows`'
+already-assembled rows, after every ticker's own `roc126` (126-trading-day
+ROC, `close_adj / close_adj.shift(126) - 1`) has been computed. Unlike every
+other column in this table, it is not purely per-ticker: it needs the full
+same-`feature_date` distribution of `roc126` across `process_tickers`
+(active universe, excludes benchmark/sector/industry ETFs) before any one
+ticker's percentile can be assigned. Rows are grouped by `feature_date`
+(not assumed single-date per run) before ranking. `NULL` when the ticker's
+own `roc126` is `NULL` (<126 bars of history); a ticker with a valid
+`roc126` and no ranking peers that day gets `100.0`, not `NULL`. No new
+provider/table — reuses the same `daily_prices` warmup history already
+loaded for `roc20`/EMA200/ATR. Scoring input only, no hard gate.
 
 ## 7. Upsert key
 
@@ -170,6 +186,7 @@ Requires ≥ 60 bars.  Returns all-None otherwise.
 | range_duration | < 60 bars or run < 2 | consolidation_base |
 | range_tightness_score | range_width_pct null | consolidation_base |
 | relative_strength_vs_spy | SPY roc20 missing | trend_continuation |
+| rs_percentile_126d | ticker's own roc126 null (<126 bars) | none yet (scoring input only, not wired to any setup validator by this addition) |
 
 ## 10. Readiness (unchanged)
 
@@ -178,7 +195,7 @@ ema200, ema_alignment_score, rsi14, roc20, atr14, atr_pct, rvol20,
 avg_volume_20d, avg_dollar_volume_20d, distance_from_52w_high_pct,
 pullback_from_recent_high_pct, breakout_proximity, consolidation_score`.
 
-All v02 columns are **optional** — never block `feature_ready`.
+All v02 and v03 columns are **optional** — never block `feature_ready`.
 
 ## 11. Write / rollback
 
@@ -223,3 +240,4 @@ Single `BEGIN / COMMIT` across all tickers per run.  Any exception triggers
 | volume_dry_up_score | consolidation_base, pullback | NULL if means missing; 0 if recent≥60d mean | test_consolidation_high_tightness |
 | volume_expansion_score | breakout | NULL if rvol20 null | test_volume_expansion_score_exact, test_volume_expansion_at_1x_is_zero |
 | relative_strength_vs_spy | trend_continuation | NULL if SPY data missing | test_relative_strength_vs_spy_exact, test_rs_vs_spy_null_when_spy_absent |
+| rs_percentile_126d | none yet (scoring input only) | NULL if <126 bars; 100.0 if lone valid value in its day's population | see `test_feature_engine_v03.py` |

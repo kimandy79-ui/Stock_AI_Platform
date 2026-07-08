@@ -52,6 +52,9 @@ DUCKDB_DIR: Final[Path] = DATA_DIR / "duckdb"
 LOGS_DIR: Final[Path] = DATA_DIR / "logs"
 EXPORTS_DIR: Final[Path] = DATA_DIR / "exports"
 BACKUPS_DIR: Final[Path] = DATA_DIR / "backups"
+# On-disk TTL caches for provider responses that are large/static-ish (e.g.
+# SEC EDGAR's company_tickers.json) — see app/providers/edgar_provider.py.
+CACHE_DIR: Final[Path] = DATA_DIR / "cache"
 
 # DuckDB file paths (computed only; no connections opened in Module 01).
 PROD_DB_PATH: Final[Path] = DUCKDB_DIR / constants.PROD_DB_FILENAME
@@ -65,6 +68,7 @@ REQUIRED_DIRECTORIES: Final[tuple[Path, ...]] = (
     LOGS_DIR,
     EXPORTS_DIR,
     BACKUPS_DIR,
+    CACHE_DIR,
 )
 
 

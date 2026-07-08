@@ -107,7 +107,7 @@ class SetupValidationResult:
     pass_fail_reasons: list[str]   human-readable reason labels
     setup_fail_reason: str | None  first hard-fail label (None if passed)
     evidence_json: dict  all intermediate values used in validation
-    feature_version: str  e.g. "features_v02"
+    feature_version: str  e.g. "features_v03"
     # Phase 5 placeholders (None in Phase 4)
     entry_price_raw: float | None
     support_level_raw: float | None

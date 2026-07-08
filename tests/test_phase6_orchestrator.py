@@ -619,6 +619,24 @@ def test_diagnostics_failure_is_non_blocking():
 
 
 # --------------------------------------------------------------------------- #
+# SEC_USER_AGENT pre-run check (Phase 4 delta)
+# --------------------------------------------------------------------------- #
+def test_missing_sec_user_agent_surfaces_as_warning_before_any_step(monkeypatch) -> None:
+    monkeypatch.delenv("SEC_USER_AGENT", raising=False)
+    db = FakeDb()
+    result = build_orchestrator(db).run(RUN_DATE)
+    assert result.status == service_result.STATUS_SUCCESS_WITH_WARNINGS
+    assert any("SEC_USER_AGENT is not set" in w for w in result.warnings)
+
+
+def test_configured_sec_user_agent_produces_no_warning(monkeypatch) -> None:
+    monkeypatch.setenv("SEC_USER_AGENT", "StockAnalyzer kimandy79tr@gmail.com")
+    db = FakeDb()
+    result = build_orchestrator(db).run(RUN_DATE)
+    assert not any("SEC_USER_AGENT" in w for w in result.warnings)
+
+
+# --------------------------------------------------------------------------- #
 # Warnings propagation
 # --------------------------------------------------------------------------- #
 def test_step_warnings_propagate_to_result():
