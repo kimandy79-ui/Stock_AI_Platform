@@ -458,10 +458,10 @@ DEFAULT_RISK_LABEL_CONFIG: Final[dict[str, Any]] = {
         # setup_config's own validation block, which is display-only.
         "max_stop_distance_pct": 0.10,
     },
-    "market_regime": {
-        "high_risk_vix": 25,
-        "extreme_risk_vix": 30,
-    },
+    # P2.5: removed shadow "market_regime" block (high_risk_vix/extreme_risk_vix).
+    # The regime engine (M12) reads constants.VIX_HIGH_RISK_THRESHOLD /
+    # VIX_EXTREME_RISK_THRESHOLD, never this config — the copies were dead and a
+    # drift trap (editing them did nothing). Single source of truth: constants.
     "ranking": {"top_n": 20},
     "diversification": {
         "hard_cap_enabled": True,
@@ -471,19 +471,10 @@ DEFAULT_RISK_LABEL_CONFIG: Final[dict[str, Any]] = {
         "industry_penalty_factor": 0.85,
         "penalty_applies_before_cap_only": True,
     },
-    "sector_etf_mapping": {
-        "Technology": "XLK",
-        "Financials": "XLF",
-        "Healthcare": "XLV",
-        "Consumer Discretionary": "XLY",
-        "Consumer Staples": "XLP",
-        "Communication Services": "XLC",
-        "Industrials": "XLI",
-        "Energy": "XLE",
-        "Materials": "XLB",
-        "Utilities": "XLU",
-        "Real Estate": "XLRE",
-    },
+    # P2.5: removed shadow "sector_etf_mapping" block. The live map is
+    # constants.SECTOR_ETF_MAP (seeded into the sector_etf_map table by
+    # benchmark_etf_loader; read by feature_engine). This copy was dead and a
+    # drift trap. Single source of truth: constants.SECTOR_ETF_MAP.
     "simulation": {
         "entry_rule": "next_trading_day_open_raw",
         "return_price_type": "adjusted_close",
