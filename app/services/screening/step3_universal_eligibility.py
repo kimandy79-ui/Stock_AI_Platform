@@ -316,15 +316,42 @@ def _check_eligibility(
 # ---------------------------------------------------------------------------
 # Eligibility score (diagnostics only — never gates)
 # ---------------------------------------------------------------------------
+# P2.1 [HC->CFG]: weights promoted to universe.eligibility_score_weights.
+# These module constants are the single source of default truth — config
+# overrides them, but absent config reproduces exactly this behavior.
+_DEFAULT_ELIGIBILITY_SCORE_WEIGHTS: Final[dict[str, float]] = {
+    "liquidity": 0.5,
+    "price": 0.3,
+    "history": 0.2,
+}
+
+
+def _resolve_eligibility_weights(universe_block: dict[str, Any]) -> dict[str, float]:
+    """Merge configured eligibility-score weights over the literal defaults.
+
+    Missing keys fall back to the exact current constants, so an absent or
+    partial ``eligibility_score_weights`` block is byte-identical to the
+    pre-promotion behavior.
+    """
+    cfg = universe_block.get("eligibility_score_weights") or {}
+    return {
+        "liquidity": float(cfg.get("liquidity", _DEFAULT_ELIGIBILITY_SCORE_WEIGHTS["liquidity"])),
+        "price": float(cfg.get("price", _DEFAULT_ELIGIBILITY_SCORE_WEIGHTS["price"])),
+        "history": float(cfg.get("history", _DEFAULT_ELIGIBILITY_SCORE_WEIGHTS["history"])),
+    }
+
+
 def _compute_eligibility_score(
     row: dict[str, Any],
     all_dvols: list[float],
     all_prices: list[float],
+    weights: dict[str, float] = _DEFAULT_ELIGIBILITY_SCORE_WEIGHTS,
 ) -> float | None:
     """
     Coarse tradability score 0-100 for diagnostics only.
-    Formula: 0.5 * liquidity_norm + 0.3 * price_norm + 0.2 * history_norm
-    Normalised min-max within day's eligible universe. Never rejects.
+    Formula: w_liq * liquidity_norm + w_price * price_norm + w_hist * history_norm
+    (default weights 0.5 / 0.3 / 0.2). Normalised min-max within day's eligible
+    universe. Never rejects.
     """
     adv = row["avg_dollar_volume_20d"]
     price = row["close_raw"]
@@ -335,19 +362,68 @@ def _compute_eligibility_score(
         lo, hi = min(vals), max(vals)
         return 50.0 if hi == lo else 100.0 * (val - lo) / (hi - lo)
 
-    return 0.5 * _norm(adv, all_dvols) + 0.3 * _norm(price, all_prices) + 0.2 * 100.0
+    return (
+        weights["liquidity"] * _norm(adv, all_dvols)
+        + weights["price"] * _norm(price, all_prices)
+        + weights["history"] * 100.0
+    )
 
 
 # ---------------------------------------------------------------------------
 # Routing predicates (01c FORMULAS/61 — coarse only; Step 4 does full validation)
 # ---------------------------------------------------------------------------
-def _route_breakout(row: dict[str, Any]) -> bool:
+# P2.1 [HC->CFG]: routing thresholds promoted to universe.routing (keyed by
+# setup_type). Only the numeric thresholds are configurable; the structural
+# boolean conditions (price>ema200, ema20>ema50, price>ema50) are inherent to
+# each setup's definition and stay in code. Module constants are the default
+# source of truth; absent/partial config reproduces exactly this behavior.
+_DEFAULT_ROUTING_THRESHOLDS: Final[dict[str, dict[str, float]]] = {
+    constants.SETUP_BREAKOUT: {
+        "breakout_proximity_min": -1.0,
+        "range_duration_min": 10,
+    },
+    constants.SETUP_PULLBACK: {
+        "pullback_depth_min": -0.20,
+        "pullback_depth_max": -0.02,
+    },
+    constants.SETUP_TREND_CONTINUATION: {
+        "ema_alignment_min": 50.0,
+        "ema50_slope_min": 0.0,
+    },
+    constants.SETUP_CONSOLIDATION_BASE: {
+        "range_tightness_min": 50.0,
+        "range_duration_min": 10,
+    },
+}
+
+
+def _resolve_routing_thresholds(universe_block: dict[str, Any]) -> dict[str, dict[str, float]]:
+    """Merge configured routing thresholds over the literal defaults per setup.
+
+    Missing setup blocks or missing keys fall back to the exact current
+    constants, so an absent or partial ``routing`` block is byte-identical to
+    the pre-promotion behavior.
+    """
+    cfg = universe_block.get("routing") or {}
+    resolved: dict[str, dict[str, float]] = {}
+    for setup_type, defaults in _DEFAULT_ROUTING_THRESHOLDS.items():
+        setup_cfg = cfg.get(setup_type) or {}
+        resolved[setup_type] = {
+            key: float(setup_cfg.get(key, default)) for key, default in defaults.items()
+        }
+    return resolved
+
+
+def _route_breakout(row: dict[str, Any], th: dict[str, float]) -> bool:
     bp = row["breakout_proximity"]
     rd = row["range_duration"]
-    return bp is not None and rd is not None and bp >= -1.0 and rd >= 10
+    return (
+        bp is not None and rd is not None
+        and bp >= th["breakout_proximity_min"] and rd >= th["range_duration_min"]
+    )
 
 
-def _route_pullback(row: dict[str, Any]) -> bool:
+def _route_pullback(row: dict[str, Any], th: dict[str, float]) -> bool:
     ca = row["close_adj"]
     e200 = row["ema200"]
     prh = row["pullback_from_recent_high_pct"]
@@ -355,23 +431,26 @@ def _route_pullback(row: dict[str, Any]) -> bool:
     e50 = row["ema50"]
     if any(v is None for v in (ca, e200, prh, e20, e50)):
         return False
-    return ca > e200 and -0.20 <= prh <= -0.02 and e20 > e50
+    return ca > e200 and th["pullback_depth_min"] <= prh <= th["pullback_depth_max"] and e20 > e50
 
 
-def _route_trend_continuation(row: dict[str, Any]) -> bool:
+def _route_trend_continuation(row: dict[str, Any], th: dict[str, float]) -> bool:
     eas = row["ema_alignment_score"]
     es = row["ema50_slope"]
     ca = row["close_adj"]
     e50 = row["ema50"]
     if any(v is None for v in (eas, es, ca, e50)):
         return False
-    return eas >= 50 and es > 0 and ca > e50
+    return eas >= th["ema_alignment_min"] and es > th["ema50_slope_min"] and ca > e50
 
 
-def _route_consolidation_base(row: dict[str, Any]) -> bool:
+def _route_consolidation_base(row: dict[str, Any], th: dict[str, float]) -> bool:
     rts = row["range_tightness_score"]
     rd = row["range_duration"]
-    return rts is not None and rd is not None and rts >= 50 and rd >= 10
+    return (
+        rts is not None and rd is not None
+        and rts >= th["range_tightness_min"] and rd >= th["range_duration_min"]
+    )
 
 
 _ROUTING_PREDICATES: Final[dict[str, Any]] = {
@@ -382,8 +461,14 @@ _ROUTING_PREDICATES: Final[dict[str, Any]] = {
 }
 
 
-def _evaluate_routing(row: dict[str, Any]) -> list[str]:
-    return [st for st, pred in _ROUTING_PREDICATES.items() if pred(row)]
+def _evaluate_routing(
+    row: dict[str, Any],
+    routing_thresholds: dict[str, dict[str, float]] = _DEFAULT_ROUTING_THRESHOLDS,
+) -> list[str]:
+    return [
+        st for st, pred in _ROUTING_PREDICATES.items()
+        if pred(row, routing_thresholds[st])
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -550,6 +635,11 @@ class Step3UniversalEligibilityEngine:
                 setup_configs = _load_active_setup_configs(self._db, db_role)
             universe_block = _assert_universe_parity(setup_configs)
             min_price, min_adv, allowed_symbol_types, merger_watch_list = _parse_universe_config(universe_block)
+            # P2.1 [HC->CFG]: routing thresholds + eligibility-score weights,
+            # resolved once per run from the shared universe block (defaults to
+            # the pre-promotion literals when absent).
+            routing_thresholds = _resolve_routing_thresholds(universe_block)
+            eligibility_weights = _resolve_eligibility_weights(universe_block)
         except (ConfigParityError, MissingConfigError) as exc:
             log.error("Step3 config error: %s", exc)
             return ServiceResult(
@@ -601,10 +691,12 @@ class Step3UniversalEligibilityEngine:
             passed = len(rejection_reasons) == 0
 
             if passed:
-                routed_setup_types = _evaluate_routing(row)
+                routed_setup_types = _evaluate_routing(row, routing_thresholds)
                 routing_status = ROUTING_ROUTED if routed_setup_types else ROUTING_NO_ROUTE
                 routing_fail_reason = None if routed_setup_types else ROUTING_FAIL_NO_ROUTE
-                eligibility_score = _compute_eligibility_score(row, eligible_dvols, eligible_prices)
+                eligibility_score = _compute_eligibility_score(
+                    row, eligible_dvols, eligible_prices, eligibility_weights
+                )
             else:
                 routed_setup_types = []
                 routing_status = ROUTING_INELIGIBLE

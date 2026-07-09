@@ -58,14 +58,21 @@ CONFIDENCE_LOW: Final[str] = "low"
 
 # Thresholds: setup_score >= HIGH_THRESHOLD → "high", >= MEDIUM_THRESHOLD → "medium", else "low"
 # These align with the scoring scale (0–100) and min_setup_score defaults (55).
+# P2.1 [HC->CFG]: promoted to risk_label_config.scoring.confidence. These
+# module constants are the single source of default truth — config overrides
+# them, but absent config reproduces exactly this behavior.
 _CONFIDENCE_HIGH_THRESHOLD: Final[float] = 75.0
 _CONFIDENCE_MEDIUM_THRESHOLD: Final[float] = 50.0
 
 
-def _derive_confidence(setup_score: float) -> str:
+def _derive_confidence(
+    setup_score: float,
+    high_threshold: float = _CONFIDENCE_HIGH_THRESHOLD,
+    medium_threshold: float = _CONFIDENCE_MEDIUM_THRESHOLD,
+) -> str:
     """Map setup_score (0–100) to a confidence label.
 
-    Thresholds:
+    Thresholds (defaults, overridable via risk_label_config.scoring.confidence):
         score >= 75  → "high"
         score >= 50  → "medium"
         score <  50  → "low"
@@ -74,11 +81,39 @@ def _derive_confidence(setup_score: float) -> str:
     setup always has confidence "medium" or "high". A failed setup may
     have confidence "low" or "medium" (useful for diagnostics).
     """
-    if setup_score >= _CONFIDENCE_HIGH_THRESHOLD:
+    if setup_score >= high_threshold:
         return CONFIDENCE_HIGH
-    if setup_score >= _CONFIDENCE_MEDIUM_THRESHOLD:
+    if setup_score >= medium_threshold:
         return CONFIDENCE_MEDIUM
     return CONFIDENCE_LOW
+
+
+def _resolve_confidence_thresholds(risk_cfg: dict[str, Any] | None) -> tuple[float, float]:
+    """(high, medium) confidence thresholds from risk_label_config.scoring.
+
+    Falls back to the exact module-level literals when the block or a key is
+    absent, so behavior is byte-identical without a seeded scoring block.
+    """
+    scoring = (risk_cfg or {}).get("scoring") or {}
+    conf = scoring.get("confidence") or {}
+    return (
+        float(conf.get("high_threshold", _CONFIDENCE_HIGH_THRESHOLD)),
+        float(conf.get("medium_threshold", _CONFIDENCE_MEDIUM_THRESHOLD)),
+    )
+
+
+def _resolve_valuation_band_quality(risk_cfg: dict[str, Any] | None) -> dict[str, float]:
+    """Valuation-band quality map from risk_label_config.scoring.
+
+    Falls back to the exact module-level ``_VALUATION_BAND_QUALITY`` when the
+    block is absent, so behavior is byte-identical without a seeded scoring
+    block.
+    """
+    scoring = (risk_cfg or {}).get("scoring") or {}
+    cfg_map = scoring.get("valuation_band_quality")
+    if not isinstance(cfg_map, dict) or not cfg_map:
+        return _VALUATION_BAND_QUALITY
+    return {str(k): float(v) for k, v in cfg_map.items()}
 
 
 # ---------------------------------------------------------------------------
@@ -254,7 +289,9 @@ _VALUATION_BAND_QUALITY: Final[dict[str, float]] = {
 
 
 def _compute_fundamentals_adjustment(
-    feat: dict[str, Any], fundamentals_cfg: dict[str, Any]
+    feat: dict[str, Any],
+    fundamentals_cfg: dict[str, Any],
+    valuation_band_quality: dict[str, float] = _VALUATION_BAND_QUALITY,
 ) -> tuple[float, dict[str, Any]]:
     """Optional, config-weighted soft score adjustment from Phase 4 fundamentals.
 
@@ -295,8 +332,8 @@ def _compute_fundamentals_adjustment(
             quality_scores.append(100.0 * (altman - _ALTMAN_DISTRESS_ZONE) / span)
 
     band = feat.get("valuation_band")
-    if band in _VALUATION_BAND_QUALITY:
-        quality_scores.append(_VALUATION_BAND_QUALITY[band])
+    if band in valuation_band_quality:
+        quality_scores.append(valuation_band_quality[band])
 
     eps_growth = feat.get("eps_growth_trend")
     if eps_growth is not None:
@@ -435,9 +472,13 @@ def validate_breakout(
 
     # Penalties
     earnings_cfg, macro_cfg = _resolve_earnings_macro_cfg(setup_config, risk_cfg)
+    # P2.1 [HC->CFG]: confidence thresholds + valuation-band map, resolved once
+    # from the shared risk_label_config.scoring block (literal defaults if absent).
+    conf_high, conf_medium = _resolve_confidence_thresholds(risk_cfg)
+    valuation_band_quality = _resolve_valuation_band_quality(risk_cfg)
     earnings_pen, macro_pen = _compute_penalties(feat, earnings_cfg, macro_cfg)
     fundamentals_adj, fundamentals_evidence = _compute_fundamentals_adjustment(
-        feat, setup_config.get("fundamentals", {})
+        feat, setup_config.get("fundamentals", {}), valuation_band_quality
     )
 
     # --- Hard checks ---
@@ -589,7 +630,7 @@ def validate_breakout(
         "penalized_score": penalized_score,
         "target_is_structural": target_is_structural,
         "resistance_blocks": resistance_blocks,
-        "confidence": _derive_confidence(penalized_score),
+        "confidence": _derive_confidence(penalized_score, conf_high, conf_medium),
     }
 
     return SetupValidationResult(
@@ -599,7 +640,7 @@ def validate_breakout(
         setup_config_id=cfg_id,
         setup_passed=setup_passed,
         setup_score=penalized_score,
-        confidence=_derive_confidence(penalized_score),
+        confidence=_derive_confidence(penalized_score, conf_high, conf_medium),
         pass_fail_reasons=reasons,
         setup_fail_reason=fail_reason,
         evidence_json=evidence,
@@ -704,9 +745,13 @@ def validate_pullback(
     entry_raw = close_raw
 
     earnings_cfg, macro_cfg = _resolve_earnings_macro_cfg(setup_config, risk_cfg)
+    # P2.1 [HC->CFG]: confidence thresholds + valuation-band map, resolved once
+    # from the shared risk_label_config.scoring block (literal defaults if absent).
+    conf_high, conf_medium = _resolve_confidence_thresholds(risk_cfg)
+    valuation_band_quality = _resolve_valuation_band_quality(risk_cfg)
     earnings_pen, macro_pen = _compute_penalties(feat, earnings_cfg, macro_cfg)
     fundamentals_adj, fundamentals_evidence = _compute_fundamentals_adjustment(
-        feat, setup_config.get("fundamentals", {})
+        feat, setup_config.get("fundamentals", {}), valuation_band_quality
     )
 
     # --- Hard checks ---
@@ -905,7 +950,7 @@ def validate_pullback(
         "penalized_score": penalized_score,
         "target_is_structural": target_is_structural,
         "resistance_blocks": resistance_blocks,
-        "confidence": _derive_confidence(penalized_score),
+        "confidence": _derive_confidence(penalized_score, conf_high, conf_medium),
     }
 
     return SetupValidationResult(
@@ -915,7 +960,7 @@ def validate_pullback(
         setup_config_id=cfg_id,
         setup_passed=setup_passed,
         setup_score=penalized_score,
-        confidence=_derive_confidence(penalized_score),
+        confidence=_derive_confidence(penalized_score, conf_high, conf_medium),
         pass_fail_reasons=reasons,
         setup_fail_reason=fail_reason,
         evidence_json=evidence,
@@ -1016,9 +1061,13 @@ def validate_trend_continuation(
     entry_raw = close_raw
 
     earnings_cfg, macro_cfg = _resolve_earnings_macro_cfg(setup_config, risk_cfg)
+    # P2.1 [HC->CFG]: confidence thresholds + valuation-band map, resolved once
+    # from the shared risk_label_config.scoring block (literal defaults if absent).
+    conf_high, conf_medium = _resolve_confidence_thresholds(risk_cfg)
+    valuation_band_quality = _resolve_valuation_band_quality(risk_cfg)
     earnings_pen, macro_pen = _compute_penalties(feat, earnings_cfg, macro_cfg)
     fundamentals_adj, fundamentals_evidence = _compute_fundamentals_adjustment(
-        feat, setup_config.get("fundamentals", {})
+        feat, setup_config.get("fundamentals", {}), valuation_band_quality
     )
 
     # --- Hard checks ---
@@ -1186,7 +1235,7 @@ def validate_trend_continuation(
         "penalized_score": penalized_score,
         "target_is_structural": target_is_structural,
         "resistance_blocks": resistance_blocks,
-        "confidence": _derive_confidence(penalized_score),
+        "confidence": _derive_confidence(penalized_score, conf_high, conf_medium),
     }
 
     return SetupValidationResult(
@@ -1196,7 +1245,7 @@ def validate_trend_continuation(
         setup_config_id=cfg_id,
         setup_passed=setup_passed,
         setup_score=penalized_score,
-        confidence=_derive_confidence(penalized_score),
+        confidence=_derive_confidence(penalized_score, conf_high, conf_medium),
         pass_fail_reasons=reasons,
         setup_fail_reason=fail_reason,
         evidence_json=evidence,
@@ -1301,9 +1350,13 @@ def validate_consolidation_base(
     entry_raw = close_raw
 
     earnings_cfg, macro_cfg = _resolve_earnings_macro_cfg(setup_config, risk_cfg)
+    # P2.1 [HC->CFG]: confidence thresholds + valuation-band map, resolved once
+    # from the shared risk_label_config.scoring block (literal defaults if absent).
+    conf_high, conf_medium = _resolve_confidence_thresholds(risk_cfg)
+    valuation_band_quality = _resolve_valuation_band_quality(risk_cfg)
     earnings_pen, macro_pen = _compute_penalties(feat, earnings_cfg, macro_cfg)
     fundamentals_adj, fundamentals_evidence = _compute_fundamentals_adjustment(
-        feat, setup_config.get("fundamentals", {})
+        feat, setup_config.get("fundamentals", {}), valuation_band_quality
     )
 
     # --- Hard checks ---
@@ -1484,7 +1537,7 @@ def validate_consolidation_base(
         "fundamentals_evidence": fundamentals_evidence,
         "penalized_score": penalized_score,
         "target_is_structural": target_is_structural,
-        "confidence": _derive_confidence(penalized_score),
+        "confidence": _derive_confidence(penalized_score, conf_high, conf_medium),
     }
 
     return SetupValidationResult(
@@ -1494,7 +1547,7 @@ def validate_consolidation_base(
         setup_config_id=cfg_id,
         setup_passed=setup_passed,
         setup_score=penalized_score,
-        confidence=_derive_confidence(penalized_score),
+        confidence=_derive_confidence(penalized_score, conf_high, conf_medium),
         pass_fail_reasons=reasons,
         setup_fail_reason=fail_reason,
         evidence_json=evidence,

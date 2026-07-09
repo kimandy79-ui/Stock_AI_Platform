@@ -27,6 +27,35 @@ _UNIVERSE_BLOCK: Final[dict[str, Any]] = {
     "min_price": 5,
     "min_avg_dollar_volume_20d": 10_000_000,
     "allowed_symbol_types": ["stock"],
+    # P2.1 [HC->CFG]: eligibility-score weights + coarse routing pre-filter
+    # thresholds promoted from step3_universal_eligibility.py. Values are
+    # byte-identical to that module's literal defaults; seeding them here just
+    # makes them tunable without a code change. Routing keys hold only the
+    # numeric thresholds — the structural boolean conditions (price>ema200,
+    # ema20>ema50, price>ema50) remain inherent to each setup and stay in code.
+    "eligibility_score_weights": {
+        "liquidity": 0.5,
+        "price": 0.3,
+        "history": 0.2,
+    },
+    "routing": {
+        "breakout": {
+            "breakout_proximity_min": -1.0,
+            "range_duration_min": 10,
+        },
+        "pullback": {
+            "pullback_depth_min": -0.20,
+            "pullback_depth_max": -0.02,
+        },
+        "trend_continuation": {
+            "ema_alignment_min": 50.0,
+            "ema50_slope_min": 0.0,
+        },
+        "consolidation_base": {
+            "range_tightness_min": 50.0,
+            "range_duration_min": 10,
+        },
+    },
 }
 
 _FEATURES_BLOCK: Final[dict[str, Any]] = {
@@ -401,6 +430,24 @@ DEFAULT_RISK_LABEL_CONFIG: Final[dict[str, Any]] = {
         "setup_confirmation": 0.10,
     },
     "thresholds": {"low_max": 33, "med_max": 66},
+    # P2.1 [HC->CFG]: cross-cutting scoring maps promoted from
+    # m14_setup_validators.py. Values are byte-identical to that module's
+    # literal defaults; the shared risk_label_config is their home because it
+    # is already threaded into every validator as risk_cfg. confidence maps
+    # setup_score -> label; valuation_band_quality maps a fundamentals
+    # valuation band -> a 0-100 quality contribution ("unknown" intentionally
+    # absent -> excluded from the average, never scored).
+    "scoring": {
+        "confidence": {
+            "high_threshold": 75.0,
+            "medium_threshold": 50.0,
+        },
+        "valuation_band_quality": {
+            "cheap": 100.0,
+            "fair": 60.0,
+            "expensive": 20.0,
+        },
+    },
     "buy_rules": {
         "min_rr_for_buy": 1.8,
         "allowed_buy_labels": ["low", "medium"],
