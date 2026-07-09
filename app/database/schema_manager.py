@@ -194,6 +194,7 @@ _PROD_TABLE_DDL: Final[tuple[str, ...]] = (
         rs_percentile_126d DOUBLE,
         sector_relative_strength DOUBLE,
         market_regime VARCHAR,
+        market_breadth_pct DOUBLE,
         days_to_earnings_bd INTEGER,
         earnings_confidence VARCHAR,
         macro_event_risk_flag BOOLEAN,

@@ -6,6 +6,14 @@ existing ``daily_features`` rows for the date / current feature schema version.
 It runs **after** Module 11 (Feature Engine) and **before** Module 13 (Step 3
 Screening).
 
+AD-22.25 (P2.2, 2026-07-09): also computes and writes an **additive, inert**
+``market_breadth_pct`` — the percentage of the feature-ready universe trading
+above its own EMA200 that date (from the already-computed
+``distance_to_ema200_pct``). It is stored only; no disposition/routing path
+reads it, and it never influences ``market_regime``. This is the sole M12
+carve-out from the frozen-module rule (02b §22.25); the regime classification
+logic (``_build_predicates``, priority order, enum) is unchanged.
+
 Contract source of truth: ``M12_MARKET_REGIME_ENGINE_SPEC.md`` (derived from the
 frozen split Project Files — ``01a_CORE_PRINCIPLES.md`` for the regime enum /
 guardrails, ``01b_SCHEMA_AND_DATA.md`` for the ``daily_prices`` /
@@ -166,12 +174,27 @@ _COUNT_FEATURE_ROWS_FOR_DATE: Final[str] = (
     "WHERE feature_date = ? AND feature_schema_version = ?"
 )
 
-# Required UPDATE shape: only market_regime + calculated_at change; no ticker
-# filter (regime is market-wide); current feature schema version only.
+# Required UPDATE shape: market_regime + market_breadth_pct + calculated_at
+# change; no ticker filter (both are market-wide); current feature schema only.
+# market_breadth_pct (AD-22.25, P2.2) is additive and inert — computed and
+# stored, read by no disposition/routing path. It never affects market_regime.
 _UPDATE_FEATURE_REGIME: Final[str] = (
     "UPDATE daily_features "
-    "SET market_regime = ?, calculated_at = CAST(now() AS TIMESTAMP) "
+    "SET market_regime = ?, market_breadth_pct = ?, "
+    "calculated_at = CAST(now() AS TIMESTAMP) "
     "WHERE feature_date = ? AND feature_schema_version = ?"
+)
+
+# Market breadth (AD-22.25, P2.2): percentage of the active feature-ready
+# universe trading above its own 200-day EMA on the date. Uses the already-
+# computed distance_to_ema200_pct (= close_adj/ema200 - 1), so "> 0" == above
+# EMA200 — single-table, no join. NULL when no qualifying rows exist.
+_BREADTH_FOR_DATE: Final[str] = (
+    "SELECT 100.0 * SUM(CASE WHEN distance_to_ema200_pct > 0 THEN 1 ELSE 0 END) "
+    "/ NULLIF(COUNT(distance_to_ema200_pct), 0) "
+    "FROM daily_features "
+    "WHERE feature_date = ? AND feature_schema_version = ? "
+    "AND feature_ready = TRUE AND distance_to_ema200_pct IS NOT NULL"
 )
 
 
@@ -608,9 +631,21 @@ class MarketRegimeEngine:
                         [feature_date, schema_version],
                     ).fetchone()
                     matched = int(count_row[0]) if count_row is not None else 0
+                    # AD-22.25 (P2.2): compute the inert breadth metric from the
+                    # already-written feature rows for this date. Additive only —
+                    # never influences `regime` above.
+                    breadth_row = connection.execute(
+                        _BREADTH_FOR_DATE,
+                        [feature_date, schema_version],
+                    ).fetchone()
+                    breadth = (
+                        float(breadth_row[0])
+                        if breadth_row is not None and breadth_row[0] is not None
+                        else None
+                    )
                     connection.execute(
                         _UPDATE_FEATURE_REGIME,
-                        [regime, feature_date, schema_version],
+                        [regime, breadth, feature_date, schema_version],
                     )
                     total_updated += matched
                 connection.execute("COMMIT")

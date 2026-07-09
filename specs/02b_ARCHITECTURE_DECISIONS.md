@@ -201,3 +201,41 @@ contracts. Each migration phase freezes its modules on acceptance with a
 `moduleNN_..._stable` commit.
 
 ---
+
+## 22.25 Narrow frozen-module carve-out: M12 market breadth field (P2.2)
+
+**Status: granted 2026-07-09.** AD-22.24 lists the regime engine (M12,
+`market_regime_engine.py`) among the modules that stay **frozen** and are NOT
+covered by the migration exemption. This AD grants a **single, strictly-scoped
+exception** to that freeze.
+
+**Exactly what is permitted:**
+- Add ONE additive, initially-**inert** market-breadth field to M12's output —
+  `market_breadth_pct` (and/or a `breadth_regime` label), computed as the
+  percentage of the active feature-ready universe trading above its own
+  `ema200` on the signal date, from data already materialized in
+  `daily_features`. No new provider, no new price fetch.
+- The corresponding additive schema column(s) on the regime write path.
+
+**Explicitly NOT permitted under this carve-out (each needs its own decision):**
+- No change to `_build_predicates`, the priority ordering, or the existing
+  `market_regime` enum / its taxonomy.
+- No change to any *consumption* of the regime signal — Step 3 routing stays
+  regime-independent; Step 5 gating logic is untouched. The new field is stored
+  and **not read by any disposition/routing path** in this change.
+- No penalty-gating and no regime-conditional routing on breadth. Those are
+  separate future decisions, not authorized here.
+
+**Proof obligation:** zero-behavior-change must be demonstrated with a genuine
+before/after golden diff (pre-change vs post-change output on a fixed dataset,
+identical — same standard as the P2.1 [HC->CFG] promotion), covering both the
+existing `market_regime` classification and all downstream Step-5 output. The
+field is purely additive; existing outputs must be byte-identical.
+
+**Rationale:** the change is narrow, additive, and inert — it lands the
+*measurement* only, mirroring the "seed inactive / scoring-only first" pattern
+used throughout this migration (fundamentals weight 0.0, rs_percentile_126d
+scoring-only, `enforce_compression_floor` default-False). The M12 freeze
+remains the default; this carve-out does not reopen M12 for any other change.
+
+---
