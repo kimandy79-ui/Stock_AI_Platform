@@ -111,6 +111,32 @@ def _loads(value: Any) -> Any:
     return value
 
 
+def _m14_fundamentals_active(setup_config: dict[str, Any]) -> bool:
+    """True when M14 would fold a fundamentals adjustment into setup_score.
+
+    Matches ``m14_setup_validators._compute_fundamentals_adjustment``'s own
+    activation test: ``enabled`` truthy *and* a non-zero ``weight``.
+    """
+    block = setup_config.get("fundamentals") or {}
+    if not block.get("enabled", False):
+        return False
+    try:
+        return float(block.get("weight", 0.0)) != 0.0
+    except (TypeError, ValueError):
+        return False
+
+
+def _step5_fundamentals_weight(risk_label_config: dict[str, Any] | None) -> float:
+    """Effective Step 5 fundamentals term weight; seeded default when unspecified."""
+    if risk_label_config is None:
+        risk_label_config = default_configs.DEFAULT_RISK_LABEL_CONFIG
+    block = risk_label_config.get("fundamentals") or {}
+    try:
+        return float(block.get("score_weight", 0.0))
+    except (TypeError, ValueError):
+        return 0.0
+
+
 class ConfigService:
     """Setup-mode versioned config store (setup_configs + risk_label_config)."""
 
@@ -608,8 +634,18 @@ class ConfigService:
     # ------------------------------------------------------------------ #
     # Validation helpers
     # ------------------------------------------------------------------ #
-    def validate_setup_config(self, config_json: dict[str, Any]) -> ServiceResult:
-        """Validate a setup config payload (structure checks)."""
+    def validate_setup_config(
+        self,
+        config_json: dict[str, Any],
+        risk_label_config: dict[str, Any] | None = None,
+    ) -> ServiceResult:
+        """Validate a setup config payload (structure checks).
+
+        ``risk_label_config`` supplies the counterpart config whose
+        ``fundamentals.score_weight`` decides whether Step 5's own fundamentals
+        term is active; when omitted the seeded default is assumed. It is only
+        read for the double-credit check below.
+        """
         run_id = str(uuid.uuid4())
         try:
             cfg = cv.validate_config_payload(config_json)
@@ -645,6 +681,24 @@ class ConfigService:
                     "pullback config sets rvol_is_hard=True, which violates "
                     "AD-22.23 (RVOL must never hard-reject for pullback)"
                 )
+
+        # Double-credit guard. M14 folds its fundamentals adjustment into
+        # setup_score; Step 5 weights setup_score at _W_SETUP *and* adds its own
+        # term keyed by the same five ticker_fundamentals fields. With both
+        # active the signal is counted twice (cf. m15_double_credit_bug_finding.md).
+        # step5_proposal_engine._m14_owns_fundamentals suppresses the Step 5 term
+        # at scoring time as a runtime backstop, but -- like the AD-22.23 check
+        # above -- silently correcting a config hides the authoring mistake, so
+        # reject it here where a human can still see it.
+        if _m14_fundamentals_active(cfg) and _step5_fundamentals_weight(risk_label_config) != 0.0:
+            errors.append(
+                "setup_config sets fundamentals.enabled=True with a non-zero weight "
+                "while risk_label_config.fundamentals.score_weight is non-zero; the "
+                "same ticker_fundamentals fields would be scored twice (M14 folds "
+                "them into setup_score, Step 5 adds its own term). Enable exactly "
+                "one: either clear fundamentals.enabled here, or set "
+                "risk_label_config.fundamentals.score_weight to 0.0"
+            )
 
         if errors:
             return self._failed(run_id, "; ".join(errors), {"errors": errors})

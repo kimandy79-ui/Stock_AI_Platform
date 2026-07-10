@@ -99,6 +99,11 @@ M23  app/services/learning/config_recommender.py
      app/services/config/default_configs.py
 ```
 
+### Fundamentals scoring (cross-cutting; shared by M14 + M15/M20)
+```
+     app/services/fundamentals/fundamentals_quality.py
+```
+
 ### Tools (CLI entry points)
 ```
      tools/init_prod_db.py
@@ -150,6 +155,7 @@ M23  app/services/learning/config_recommender.py
      tests/test_orchestrator_config_loading.py  config+M20
      tests/test_phase6_diagnostics.py        phase6
      tests/test_phase7_setup_mode.py         phase7 integration
+     tests/test_p2_5_orchestration_wiring.py  P2.5 M20 step5 wiring + fundamentals
      tests/test_tools_runners.py             tools
      tests/test_backfill_prod_history.py     tools
      tests/test_import_legacy_prices.py      tools
@@ -243,6 +249,15 @@ data/input/                    static CSVs (e.g. backfill_tickers_common_only.cs
 - Exactly one active risk_label_config in prod/debug
 - top_n controlled by risk_label_config.ranking.top_n only; setup configs must not control it
 - Config is immutable; clone and version, never edit in place
+- Fundamentals may be scored in exactly ONE place: either M14
+  (setup_config.fundamentals.enabled) or Step 5
+  (risk_label_config.fundamentals.score_weight), never both — Step 5 already
+  weights setup_score, so enabling both double-counts the same 5 fields
+- risk_label_config.fundamentals.score_weight is seeded 0.0 (inert). The Step 5
+  fundamentals term is two-sided and can promote a ticker into BUY; raising the
+  weight is a deliberate activation, not a default
+- pipeline.auto_invoke_ai_review must stay False — each pass is a paid
+  multi-vendor API call, and enabling it makes Step 5 run twice per signal_date
 
 ---
 

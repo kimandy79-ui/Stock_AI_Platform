@@ -460,6 +460,7 @@ base = 0.40 * setup_score
 proposal_score_raw = base
                    - contrarian_penalty_weight * contrarian_risk_score        (if present)
                    - audit_penalty_weight * (100 - audit_consistency_score)   (if present)
+                   + fundamentals_score_weight * (fundamentals_quality_score - 50)  (if present)
 ```
 
 **rr_score:**
@@ -495,6 +496,37 @@ audit_penalty_weight}`. A strong audit failure
 default 40) additionally forces `disposition = WATCHLIST_ONLY` outright
 (`rejection_reason = 'audit_consistency_below_threshold'`), independent of
 the score penalty above — this is a hard gate, not a soft weighting.
+
+**fundamentals_quality_score (Phase 4; 01c delta 2026-07-10, P2.5):** 0–100,
+the mean of whichever of the five `ticker_fundamentals` fields are present
+(Piotroski F, Altman Z', valuation band, EPS growth trend, leverage ratio).
+Computed by `app/services/fundamentals/fundamentals_quality.py`, the single
+source of truth shared with M14. Absent fields are excluded from the mean, never
+scored as zero; a ticker with no coverage gets no adjustment, never a downgrade.
+
+Unlike the two Phase 3 AI-review penalties, this term is **two-sided**: centered
+at a quality of 50, above-neutral fundamentals *add* score and below-neutral
+subtract. At a non-zero weight it therefore reorders `raw_rank`, changes
+`in_raw_top_n`, and can promote a ticker into `BUY`.
+
+`fundamentals_score_weight` is sourced from
+`risk_label_config.fundamentals.score_weight` and **defaults to 0.0 (inert)**.
+This is deliberate: M20 populates `fundamentals_quality_score` on every run
+(`pipeline.auto_invoke_fundamentals`, default `True`), and every
+`risk_label_config` active today predates Phase 4, carries no `fundamentals`
+block, and is immutable — a non-zero fallback would silently move live trade
+decisions. Activation is a deliberate clone-and-version raising the weight
+(0.10 gives ±5 points at quality 100/0). Never a hard gate (mirrors the RVOL
+precedent, AD-22.23): there is no disposition-forcing threshold here, unlike
+`audit_consistency_min_for_buy`.
+
+**Double-credit constraint.** M14 can fold its own fundamentals adjustment into
+`setup_score` (`setup_config.fundamentals.enabled`, off in every seeded config),
+and `base` already weights `setup_score` at 0.40. Enabling both paths would score
+the same five fields twice. Exactly one may contribute: Step 5 suppresses its
+term for any setup_type whose config sets `fundamentals.enabled=True` (M14 ran
+first and wins), and `ConfigService.validate_setup_config` rejects the
+combination at authoring time when `score_weight != 0`.
 
 Only `BUY` and `WATCHLIST_ONLY` dispositions are scored and ranked.
 `REJECTED` rows are stored for diagnostics, excluded from ranking.

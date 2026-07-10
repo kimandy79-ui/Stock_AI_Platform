@@ -34,6 +34,7 @@ from typing import Any, Final, Protocol
 
 from app.config import constants
 from app.database import duckdb_manager
+from app.services.fundamentals import fundamentals_quality as fq
 from app.services.screening.m14_setup_validators import (
     SetupValidationResult,
     validate_setup,
@@ -157,31 +158,11 @@ ORDER BY f.ticker
 """
 
 # Fundamentals/events layer (coder-note Phase 4 — not to be confused with the
-# migration-phase numbering in this module's own docstring). Point-in-time
-# correct: only rows with as_of_date <= signal_date are eligible, and the
-# most recent such row per ticker wins (mirrors daily_prices' asof-safe
-# "date <= end_date" pattern from the Phase 0 point-in-time audit).
-_SQL_READ_FUNDAMENTALS: Final[str] = """
-SELECT
-    ticker,
-    eps_growth_trend,
-    leverage_ratio,
-    valuation_band,
-    piotroski_f_score,
-    altman_z_score
-FROM ticker_fundamentals
-WHERE as_of_date <= ?
-QUALIFY ROW_NUMBER() OVER (PARTITION BY ticker ORDER BY as_of_date DESC) = 1
-"""
-
-_FUNDAMENTALS_COLS: Final[tuple[str, ...]] = (
-    "ticker",
-    "eps_growth_trend",
-    "leverage_ratio",
-    "valuation_band",
-    "piotroski_f_score",
-    "altman_z_score",
-)
+# migration-phase numbering in this module's own docstring). The query and its
+# point-in-time semantics now live in the shared fundamentals module (M20 issues
+# the same read); re-exported here under the original names.
+_SQL_READ_FUNDAMENTALS: Final[str] = fq.SQL_READ_FUNDAMENTALS
+_FUNDAMENTALS_COLS: Final[tuple[str, ...]] = fq.FUNDAMENTALS_COLS
 
 # Write one analysis row
 _SQL_INSERT: Final[str] = """
@@ -368,18 +349,11 @@ def _read_fundamentals(
     all for it yet) is not an error: validators treat missing fundamentals
     fields as "no adjustment" (see m14_setup_validators._compute_fundamentals_adjustment),
     exactly like a routed candidate with no earnings-calendar row.
+
+    Delegates to the shared reader so Step 4 and M20 apply identical
+    point-in-time semantics to the same table.
     """
-    sig_iso = signal_date.isoformat()
-    conn = db_mgr.connect(db_role)
-    try:
-        rows = conn.execute(_SQL_READ_FUNDAMENTALS, [sig_iso]).fetchall()
-    finally:
-        conn.close()
-    result: dict[str, dict[str, Any]] = {}
-    for row in rows:
-        d = dict(zip(_FUNDAMENTALS_COLS, row))
-        result[d["ticker"]] = d
-    return result
+    return fq.read_fundamentals_map(db_mgr, db_role, signal_date)
 
 
 def _build_feat_dict(

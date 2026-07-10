@@ -48,6 +48,7 @@ from typing import Any, Final
 
 from app.config import constants
 from app.database import duckdb_manager
+from app.services.fundamentals import fundamentals_quality as fq
 from app.utils import logging_config
 from app.utils import service_result
 from app.utils.service_result import ServiceResult
@@ -317,8 +318,16 @@ class PipelineOrchestrator:
         outcome_processor: Any | None = None,
         config_service: Any | None = None,
         diagnostics_service: Any | None = None,
+        ai_review_scores_provider: Any | None = None,
     ) -> None:
         self._db = db_manager if db_manager is not None else duckdb_manager
+
+        # Seam for the (default-off) AI review feedback loop. A callable
+        # (signal_date, db_role, run_id, log) -> dict[ticker, dict[str, float]].
+        # Left None until auto_invoke_ai_review is enabled, so the default
+        # pipeline never constructs an M18/M19 engine, never writes a review ZIP
+        # and never makes a paid API call.
+        self._ai_review_scores_provider = ai_review_scores_provider
 
         if config_service is None:
             from app.services.config.config_service import ConfigService
@@ -1249,13 +1258,159 @@ class PipelineOrchestrator:
             run_id=run_id,
         )
 
+    def _pipeline_flags(self, db_role: str, log: Any) -> dict[str, bool]:
+        """Read the two step5 orchestration flags from the ``pipeline`` runtime config.
+
+        Falls back to the safe defaults (fundamentals on, AI review off) if the
+        config can't be read, so a config problem can never silently enable paid
+        AI review calls.
+        """
+        defaults = {"auto_invoke_fundamentals": True, "auto_invoke_ai_review": False}
+        try:
+            result = self._config_service.get_active_runtime_config(db_role, "pipeline")
+            cfg = (result.metadata or {}).get("config_json") or {}
+        except Exception as exc:  # noqa: BLE001
+            log.warning("step5: could not read pipeline runtime config: %s", exc)
+            return defaults
+        return {
+            "auto_invoke_fundamentals": bool(
+                cfg.get("auto_invoke_fundamentals", defaults["auto_invoke_fundamentals"])
+            ),
+            "auto_invoke_ai_review": bool(
+                cfg.get("auto_invoke_ai_review", defaults["auto_invoke_ai_review"])
+            ),
+        }
+
+    def _valuation_band_quality(self, db_role: str, log: Any) -> dict[str, float]:
+        """Active risk_label_config's valuation-band map, or the shared default."""
+        try:
+            result = self._config_service.get_active_risk_label_config(db_role)
+            cfg = (result.metadata or {}).get("config_json") or {}
+            mapping = (cfg.get("scoring") or {}).get("valuation_band_quality")
+        except Exception as exc:  # noqa: BLE001
+            log.warning("step5: could not read risk_label_config: %s", exc)
+            return fq.VALUATION_BAND_QUALITY
+        if not isinstance(mapping, dict) or not mapping:
+            return fq.VALUATION_BAND_QUALITY
+        return {str(k): float(v) for k, v in mapping.items()}
+
+    def _build_fundamentals_scores(
+        self, run_date: date, db_role: str, log: Any
+    ) -> dict[str, float] | None:
+        """ticker -> 0-100 fundamentals quality, read point-in-time as of run_date.
+
+        Returns ``None`` (not ``{}``) on any read failure so Step 5 reproduces its
+        pre-Phase-4 path exactly rather than scoring against a partial map. A
+        missing/empty ``ticker_fundamentals`` is not a failure — it yields ``{}``,
+        which Step 5 already treats as "no coverage, no adjustment".
+        """
+        try:
+            fundamentals = fq.read_fundamentals_map(self._db, db_role, run_date)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("step5: fundamentals read failed, scoring without it: %s", exc)
+            return None
+        scores = fq.build_fundamentals_scores(
+            fundamentals, self._valuation_band_quality(db_role, log)
+        )
+        log.info("step5: fundamentals scored for %d ticker(s)", len(scores))
+        return scores
+
     def _step_step5(self, run_date: date, db_role: str, run_id: str, log: Any):
-        """Step 5 — M15 risk labeling + proposals (once per signal_date)."""
+        """Step 5 — M15 risk labeling + proposals (once per signal_date).
+
+        Two optional inputs are assembled here rather than inside M15, which has
+        no read path for either (both are pass-through parameters by design):
+
+        * ``fundamentals_scores`` — on by default; a DuckDB read plus pure
+          arithmetic. Inert until ``risk_label_config.fundamentals.score_weight``
+          is raised above its seeded ``0.0``.
+        * ``ai_review_scores`` — off by default, and gated behind an injected
+          provider. Enabling it makes Step 5 run **twice** per signal_date:
+          proposals must exist before M18 can export them for review, so the
+          scores only exist after a first pass. See ``_rescore_with_ai_review``.
+        """
+        flags = self._pipeline_flags(db_role, log)
+
+        fundamentals_scores: dict[str, float] | None = None
+        if flags["auto_invoke_fundamentals"]:
+            fundamentals_scores = self._build_fundamentals_scores(run_date, db_role, log)
+
+        result = self._proposal_engine.propose(
+            signal_date=run_date,
+            db_role=db_role,
+            run_id=run_id,
+            fundamentals_scores=fundamentals_scores,
+        )
+
+        if not flags["auto_invoke_ai_review"]:
+            return result
+        if getattr(result, "status", None) == service_result.STATUS_FAILED:
+            return result
+        return self._rescore_with_ai_review(
+            run_date, db_role, run_id, log, fundamentals_scores, result
+        )
+
+    def _rescore_with_ai_review(
+        self,
+        run_date: date,
+        db_role: str,
+        run_id: str,
+        log: Any,
+        fundamentals_scores: dict[str, float] | None,
+        first_pass: Any,
+    ):
+        """Second Step 5 pass carrying ai_review_scores (auto_invoke_ai_review only).
+
+        Ordering is forced by the data model: ``step5_proposals`` must exist
+        before M18 can export them and M19 can review them, so the scores cannot
+        exist during the first pass. M15's ``_write`` is INSERT-only, so the
+        first pass's rows are deleted before re-proposing rather than updated in
+        place. Any failure here degrades to the first pass's already-committed
+        proposals — an unreviewable AI response must not cost us the run.
+        """
+        if self._ai_review_scores_provider is None:
+            log.warning(
+                "step5: auto_invoke_ai_review is enabled but no "
+                "ai_review_scores_provider was injected; keeping first-pass proposals"
+            )
+            return first_pass
+
+        try:
+            ai_review_scores = self._ai_review_scores_provider(
+                run_date, db_role, run_id, log
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.warning("step5: ai review scoring failed, keeping first pass: %s", exc)
+            return first_pass
+
+        if not ai_review_scores:
+            log.info("step5: ai review produced no scores; keeping first pass")
+            return first_pass
+
+        try:
+            self._delete_step5_rows(db_role, run_date)
+        except Exception as exc:  # noqa: BLE001
+            log.error("step5: could not clear first-pass proposals: %s", exc)
+            return first_pass
+
+        log.info(
+            "step5: re-proposing with ai_review_scores for %d ticker(s)",
+            len(ai_review_scores),
+        )
         return self._proposal_engine.propose(
             signal_date=run_date,
             db_role=db_role,
             run_id=run_id,
+            fundamentals_scores=fundamentals_scores,
+            ai_review_scores=ai_review_scores,
         )
+
+    def _delete_step5_rows(self, db_role: str, signal_date: date) -> None:
+        connection = self._db.connect(db_role, read_only=False)
+        try:
+            connection.execute(_DELETE_STEP5, [signal_date])
+        finally:
+            connection.close()
 
     def _step_enqueue(self, run_date: date, db_role: str, run_id: str, log: Any):
         """Outcome queue creation — setup-mode compatibility shim.

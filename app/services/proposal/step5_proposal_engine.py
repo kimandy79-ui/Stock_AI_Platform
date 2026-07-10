@@ -171,8 +171,33 @@ _AUDIT_CONSISTENCY_MIN_FOR_BUY: Final[float] = 40.0
 # pre-Phase-4 behavior). Never a hard gate (mirrors the RVOL precedent,
 # AD-22.23) -- there is deliberately no disposition-forcing threshold here,
 # unlike audit_consistency_min_for_buy.
+#
+# The weight defaults to 0.0, i.e. the term is inert unless a risk_label_config
+# explicitly opts in via fundamentals.score_weight. This matters because the
+# term is two-sided: at a non-zero weight a high-quality ticker *gains* score,
+# which reorders top_n and can promote it into BUY. Configs are immutable, and
+# every risk_label_config active today predates Phase 4 and carries no
+# fundamentals block -- so a non-zero fallback here would silently change live
+# trade decisions the moment M20 started feeding scores. Activation is one
+# config value (see DEFAULT_RISK_LABEL_CONFIG["fundamentals"]["score_weight"]);
+# 0.10 gives the reference +/-5 points at quality_score 100/0.
 # ---------------------------------------------------------------------------
-_W_FUNDAMENTALS: Final[float] = 0.10  # +/-5 points at quality_score 100/0
+_W_FUNDAMENTALS: Final[float] = 0.0  # inert; 0.10 => +/-5 points at quality 100/0
+
+
+def _m14_owns_fundamentals(setup_config: dict[str, Any] | None) -> bool:
+    """True when M14 already folded a fundamentals adjustment into setup_score.
+
+    Mirrors ``m14_setup_validators._compute_fundamentals_adjustment``'s own
+    activation test exactly (``enabled`` truthy *and* a non-zero ``weight``): a
+    config with ``enabled=True, weight=0`` contributes nothing there, so Step 5
+    is free to apply its own term.
+    """
+    fundamentals_cfg = (setup_config or {}).get("fundamentals") or {}
+    if not fundamentals_cfg.get("enabled", False):
+        return False
+    weight = _f(fundamentals_cfg.get("weight", 0.0)) or 0.0
+    return weight != 0.0
 
 # ---------------------------------------------------------------------------
 # Metadata keys contract
@@ -1239,7 +1264,19 @@ class Step5ProposalEngine:
             ticker_ai_scores = ai_review_scores.get(ticker, {})
             contrarian_risk_score = ticker_ai_scores.get("contrarian_risk_score")
             audit_consistency_score = ticker_ai_scores.get("audit_consistency_score")
-            fundamentals_quality_score = fundamentals_scores.get(ticker)
+            # Double-credit guard: when this row's setup_config opts M14 into its
+            # own fundamentals adjustment, the signal is already inside
+            # setup_score (which _proposal_score_raw weights at _W_SETUP). Adding
+            # the Step 5 term too would score the same five ticker_fundamentals
+            # fields twice -- the defect class of m15_double_credit_bug_finding.md.
+            # Exactly one path may contribute per setup_type; M14 wins because it
+            # ran first. ConfigService.validate_setup_config rejects this
+            # combination at authoring time, so reaching here means a config row
+            # predating that check.
+            if _m14_owns_fundamentals(setup_configs.get(setup_type, {})):
+                fundamentals_quality_score = None
+            else:
+                fundamentals_quality_score = fundamentals_scores.get(ticker)
             _ed = a.get("earnings_days")
             earnings_days: int | None = None
             if _ed is not None:

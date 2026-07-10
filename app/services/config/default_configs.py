@@ -448,6 +448,19 @@ DEFAULT_RISK_LABEL_CONFIG: Final[dict[str, Any]] = {
             "expensive": 20.0,
         },
     },
+    # Step 5's fundamentals score term (step5_proposal_engine._proposal_score_raw).
+    # Seeded inert. Unlike the ai_review penalties, this term is TWO-SIDED: at a
+    # non-zero weight a high-quality ticker gains score, reordering ranking.top_n
+    # and potentially promoting it into BUY. Left at 0.0 so that M20's
+    # auto_invoke_fundamentals can populate and carry the score end-to-end with
+    # zero effect on live trade decisions; raising it is a deliberate, separate,
+    # clone-and-version activation. 0.10 gives +/-5 points at quality 100/0.
+    #
+    # Do not raise this while any setup_config sets fundamentals.enabled=True --
+    # that double-counts the same five fields (M14 folds its own adjustment into
+    # setup_score, which this formula already weights at _W_SETUP).
+    # ConfigService.validate_setup_config enforces this.
+    "fundamentals": {"score_weight": 0.0},
     "buy_rules": {
         "min_rr_for_buy": 1.8,
         "allowed_buy_labels": ["low", "medium"],
@@ -515,6 +528,23 @@ DEFAULT_RUNTIME_CONFIGS: Final[dict[str, dict[str, Any]]] = {
         "lock_stale_seconds": 300,
         "force_rerun_default": False,
         "resume_behavior": "resume_from_step",
+        # M20 step5 orchestration (P2.5 coder note).
+        #
+        # auto_invoke_fundamentals: read ticker_fundamentals point-in-time and
+        # feed Step 5's fundamentals_scores pass-through. Cheap and
+        # deterministic (a DuckDB read plus pure arithmetic, no API calls), so
+        # it runs by default. It is a flag rather than unconditional because the
+        # score it feeds is two-sided and can promote a ticker into BUY once
+        # risk_label_config.fundamentals.score_weight is raised above its seeded
+        # 0.0 -- this is the kill-switch for that.
+        "auto_invoke_fundamentals": True,
+        # auto_invoke_ai_review: run M19's thesis/contrarian/audit passes during
+        # the pipeline and feed Step 5's ai_review_scores. OFF, and must stay
+        # off until explicitly activated: each pass is a paid API call across
+        # multiple vendors, so a backfill would multiply cost by
+        # (dates x candidates x passes). Turning it on also makes Step 5 run
+        # twice per signal_date (see PipelineOrchestrator._step_step5).
+        "auto_invoke_ai_review": False,
     },
     "provider": {
         "provider_name": "yahoo",

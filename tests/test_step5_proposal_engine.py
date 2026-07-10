@@ -2120,11 +2120,26 @@ class TestProposalScoreRawFundamentalsBackCompat:
         )
         assert with_none == explicit_none
 
+    def test_default_weight_is_inert_even_with_a_score(self):
+        """P2.5: the seeded weight is 0.0, so supplying a score alone changes nothing.
+
+        Guards the property that lets M20 auto-invoke fundamentals scoring
+        without moving any live trade decision until score_weight is raised.
+        """
+        base = _proposal_score_raw(80.0, 2.5, 70.0, "bull", stop_distance_pct=0.05)
+        for quality in (0.0, 50.0, 100.0):
+            scored = _proposal_score_raw(
+                80.0, 2.5, 70.0, "bull", stop_distance_pct=0.05,
+                fundamentals_quality_score=quality,
+            )
+            assert scored == base
+
     def test_above_neutral_quality_raises_score(self):
         base = _proposal_score_raw(80.0, 2.5, 70.0, "bull", stop_distance_pct=0.05)
         boosted = _proposal_score_raw(
             80.0, 2.5, 70.0, "bull", stop_distance_pct=0.05,
             fundamentals_quality_score=100.0,
+            fundamentals_score_weight=0.10,
         )
         assert boosted > base
 
@@ -2133,6 +2148,7 @@ class TestProposalScoreRawFundamentalsBackCompat:
         penalized = _proposal_score_raw(
             80.0, 2.5, 70.0, "bull", stop_distance_pct=0.05,
             fundamentals_quality_score=0.0,
+            fundamentals_score_weight=0.10,
         )
         assert penalized < base
 
@@ -2156,7 +2172,10 @@ class TestProposalScoreRawFundamentalsBackCompat:
         assert large_weight > small_weight
 
     def test_still_clamped_0_100_with_boost(self):
-        s = _proposal_score_raw(100.0, 5.0, 100.0, "bull", fundamentals_quality_score=100.0)
+        s = _proposal_score_raw(
+            100.0, 5.0, 100.0, "bull", fundamentals_quality_score=100.0,
+            fundamentals_score_weight=0.10,
+        )
         assert s <= 100.0
 
     def test_fundamentals_and_ai_review_adjustments_compose(self):
@@ -2165,11 +2184,11 @@ class TestProposalScoreRawFundamentalsBackCompat:
         both = _proposal_score_raw(
             80.0, 2.5, 70.0, "bull", stop_distance_pct=0.05,
             contrarian_risk_score=0.0, audit_consistency_score=100.0,
-            fundamentals_quality_score=100.0,
+            fundamentals_quality_score=100.0, fundamentals_score_weight=0.10,
         )
         fundamentals_only = _proposal_score_raw(
             80.0, 2.5, 70.0, "bull", stop_distance_pct=0.05,
-            fundamentals_quality_score=100.0,
+            fundamentals_quality_score=100.0, fundamentals_score_weight=0.10,
         )
         # Both zero-penalty AI-review scores contribute nothing, so adding
         # them must not change the fundamentals-only result.
@@ -2177,10 +2196,13 @@ class TestProposalScoreRawFundamentalsBackCompat:
 
 
 class TestParseRiskLabelConfigFundamentalsBlock:
-    def test_absent_block_uses_hardcoded_default(self):
+    def test_absent_block_is_inert_not_a_live_weight(self):
+        """P2.5: absent block => 0.0, so the two-sided fundamentals term cannot
+        silently move scores on the risk_label_config rows active today (all of
+        which predate Phase 4 and carry no fundamentals block, and are immutable)."""
         cfg = _minimal_risk_config()
         parsed = _parse_risk_label_config(cfg)
-        assert parsed["fundamentals_score_weight"] == pytest.approx(0.10)
+        assert parsed["fundamentals_score_weight"] == 0.0
 
     def test_explicit_block_overrides_default(self):
         cfg = _minimal_risk_config()
@@ -2210,6 +2232,8 @@ class TestProposeWithFundamentalsScores:
                         setup_score=75.0, entry_price_raw=100.0, market_regime="bull",
                         earnings_days=30)
         cfg = _minimal_risk_config(top_n=5, min_rr=1.5)
+        # Activate the term explicitly: the seeded weight is 0.0 (inert).
+        cfg["fundamentals"] = {"score_weight": 0.10}
         eng = _make_engine()
         result = eng.propose(
             SIGNAL_DATE, risk_label_config=cfg, setup_configs=DEFAULT_SETUP_CONFIGS,

@@ -48,6 +48,7 @@ from dataclasses import dataclass, field
 from typing import Any, Final
 
 from app.config import constants
+from app.services.fundamentals import fundamentals_quality as fq
 
 # ---------------------------------------------------------------------------
 # Confidence enum values (from 01a_CORE_PRINCIPLES.md §SCHEMA/12_Enum_Values_Reference)
@@ -275,17 +276,25 @@ def _resolve_earnings_macro_cfg(
     return earnings_cfg, macro_cfg
 
 
-# Altman Z'-Score interpretive zones (private-firm/book-value variant; see
-# app.providers.edgar_provider.compute_altman_z_score docstring for why this
-# variant is used). Standard textbook zones: >2.9 safe, <1.23 distress.
-_ALTMAN_SAFE_ZONE: Final[float] = 2.9
-_ALTMAN_DISTRESS_ZONE: Final[float] = 1.23
-_VALUATION_BAND_QUALITY: Final[dict[str, float]] = {
-    "cheap": 100.0,
-    "fair": 60.0,
-    "expensive": 20.0,
-    # "unknown" intentionally absent -> excluded from the average, not scored.
-}
+# Altman zones / valuation-band map now live in the shared quality module so
+# M14 and Step 5 cannot drift apart. Re-exported under their original private
+# names because callers (and tests) already reference them here.
+_ALTMAN_SAFE_ZONE: Final[float] = fq.ALTMAN_SAFE_ZONE
+_ALTMAN_DISTRESS_ZONE: Final[float] = fq.ALTMAN_DISTRESS_ZONE
+_VALUATION_BAND_QUALITY: Final[dict[str, float]] = fq.VALUATION_BAND_QUALITY
+
+
+def _count_fundamentals_fields(
+    feat: dict[str, Any], valuation_band_quality: dict[str, float]
+) -> int:
+    """How many of the 5 fundamentals fields actually contributed to the mean."""
+    present = 0
+    for key in ("piotroski_f_score", "altman_z_score", "eps_growth_trend", "leverage_ratio"):
+        if feat.get(key) is not None:
+            present += 1
+    if feat.get("valuation_band") in valuation_band_quality:
+        present += 1
+    return present
 
 
 def _compute_fundamentals_adjustment(
@@ -308,51 +317,28 @@ def _compute_fundamentals_adjustment(
     fundamentals fields contributed (absent/None fields are simply excluded
     from the average, not treated as a penalty -- a ticker with no
     fundamentals coverage yet gets adjustment 0.0, not a downgrade).
+
+    Enabling this while Step 5's own fundamentals term is active would score the
+    same five fields twice (Step 5 weights ``setup_score`` *and* adds its own
+    term). Step 5 skips its term for any setup_type whose config sets
+    ``enabled=True``, and ``ConfigService.validate_setup_config`` rejects the
+    combination outright at authoring time.
     """
     enabled = bool(fundamentals_cfg.get("enabled", False))
     weight = float(fundamentals_cfg.get("weight", 0.0))
     if not enabled or weight == 0.0:
         return 0.0, {"enabled": False}
 
-    quality_scores: list[float] = []
-
-    piotroski = feat.get("piotroski_f_score")
-    if piotroski is not None:
-        quality_scores.append(_clamp(100.0 * float(piotroski) / 9.0))
-
-    altman = feat.get("altman_z_score")
-    if altman is not None:
-        altman = float(altman)
-        if altman >= _ALTMAN_SAFE_ZONE:
-            quality_scores.append(100.0)
-        elif altman <= _ALTMAN_DISTRESS_ZONE:
-            quality_scores.append(0.0)
-        else:
-            span = _ALTMAN_SAFE_ZONE - _ALTMAN_DISTRESS_ZONE
-            quality_scores.append(100.0 * (altman - _ALTMAN_DISTRESS_ZONE) / span)
-
-    band = feat.get("valuation_band")
-    if band in valuation_band_quality:
-        quality_scores.append(valuation_band_quality[band])
-
-    eps_growth = feat.get("eps_growth_trend")
-    if eps_growth is not None:
-        quality_scores.append(_clamp(50.0 + float(eps_growth) * 100.0))
-
-    leverage = feat.get("leverage_ratio")
-    if leverage is not None:
-        quality_scores.append(_clamp(100.0 - float(leverage) * 100.0))
-
-    if not quality_scores:
+    avg_quality = fq.compute_fundamentals_quality(feat, valuation_band_quality)
+    if avg_quality is None:
         return 0.0, {"enabled": True, "fields_present": 0}
 
-    avg_quality = sum(quality_scores) / len(quality_scores)
     # Centered at 50 (neutral): above-average fundamentals add points,
     # below-average subtract -- never enough alone to force a gate.
     adjustment = weight * (avg_quality - 50.0) / 50.0
     evidence = {
         "enabled": True,
-        "fields_present": len(quality_scores),
+        "fields_present": _count_fundamentals_fields(feat, valuation_band_quality),
         "avg_quality": avg_quality,
         "adjustment": adjustment,
     }
