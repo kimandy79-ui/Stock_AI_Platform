@@ -252,8 +252,8 @@ _SQL_FUNDAMENTALS_UPSERT: Final[str] = (
     "INSERT INTO ticker_fundamentals "
     "(ticker, as_of_date, eps_growth_trend, leverage_ratio, valuation_band, "
     "piotroski_f_score, altman_z_score, insider_trade_flag, "
-    "institutional_ownership_delta, source_provider, calculated_at) "
-    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP) "
+    "institutional_ownership_delta, shares_outstanding, source_provider, calculated_at) "
+    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP) "
     "ON CONFLICT (ticker, as_of_date) DO UPDATE SET "
     "eps_growth_trend = EXCLUDED.eps_growth_trend, "
     "leverage_ratio = EXCLUDED.leverage_ratio, "
@@ -262,6 +262,7 @@ _SQL_FUNDAMENTALS_UPSERT: Final[str] = (
     "altman_z_score = EXCLUDED.altman_z_score, "
     "insider_trade_flag = EXCLUDED.insider_trade_flag, "
     "institutional_ownership_delta = EXCLUDED.institutional_ownership_delta, "
+    "shares_outstanding = EXCLUDED.shares_outstanding, "
     "source_provider = EXCLUDED.source_provider, "
     "calculated_at = EXCLUDED.calculated_at"
 )
@@ -1141,6 +1142,7 @@ class PipelineOrchestrator:
                 snapshot.altman_z_score,
                 snapshot.insider_trade_flag,
                 snapshot.institutional_ownership_delta,
+                getattr(snapshot, "shares_outstanding", None),
                 snapshot.source_provider,
             ))
 

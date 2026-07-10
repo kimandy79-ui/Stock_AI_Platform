@@ -270,6 +270,11 @@ class FundamentalSnapshot:
     altman_z_score: float | None = None
     insider_trade_flag: bool | None = None
     institutional_ownership_delta: float | None = None
+    # P2.4: actual common shares outstanding (cover-page count), not a
+    # weighted-average or diluted figure -- the only share count that pairs
+    # dimensionally with an unadjusted close to give a market cap. ``None``
+    # when the provider cannot source it point-in-time.
+    shares_outstanding: float | None = None
     source_provider: str
 
     def __post_init__(self) -> None:
@@ -284,6 +289,11 @@ class FundamentalSnapshot:
             raise ValueError(
                 f"FundamentalSnapshot.piotroski_f_score must be in [0, 9], "
                 f"got {self.piotroski_f_score!r}"
+            )
+        if self.shares_outstanding is not None and self.shares_outstanding <= 0:
+            raise ValueError(
+                f"FundamentalSnapshot.shares_outstanding must be positive, "
+                f"got {self.shares_outstanding!r}"
             )
 
 

@@ -98,7 +98,7 @@ driver. They may appear only in historical notes.
 Use zero-padded version strings:
 
 ```text
-FEATURE_SCHEMA_VERSION = "features_v03"
+FEATURE_SCHEMA_VERSION = "features_v04"
 ```
 
 Setup mode requires structural-level features (support / resistance /
@@ -115,6 +115,26 @@ spread against a benchmark. Scoring input only; no hard gate. NULL when the
 ticker has <126 bars of history. `features_v02` rows are retained as
 historical/frozen and do not get this field retroactively, same policy as
 the `v01`->`v02` bump.
+
+`features_v04` (P2.3/P2.4, 2026-07-10) adds two columns, both **dormant** —
+persisted and tested, read by no validator or scoring path, pending an explicit
+future decision (same land-the-field-first discipline as `rs_percentile_126d`
+and `market_breadth_pct`):
+
+- `vcp_sequence_score` — 0-100 measure of *progressive* contraction inside the
+  base window (successively shallower pullbacks on successively drier volume).
+  Orthogonal to `atr_compression_score` / `volume_dry_up_score`, which are
+  single-window scalars and cannot distinguish a flat quiet range from a
+  tightening coil. NULL, never 0.0, when the base is too short or holds fewer
+  than two legs — "not measurable here", not "measured and bad".
+- `market_cap` — `shares_outstanding × close_raw`, where the share count is the
+  point-in-time cover-page figure from `ticker_fundamentals`. Uses `close_raw`
+  deliberately: `close_adj` is retro-restated by later splits/dividends and
+  would embed corporate actions that had not occurred as of the feature date.
+
+Version bumps are **reinit, not migrate**: `daily_features` is derived, rebuilt
+by M11 from `daily_prices`. Older-version rows are retained as historical/frozen
+and never back-filled with new columns.
 
 ### Avg dollar volume
 

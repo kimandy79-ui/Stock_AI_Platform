@@ -425,8 +425,10 @@ class TestFeaturesV02Columns:
         sm.apply_schema(role)
         assert "feature_schema_version" in _columns(role, "daily_features")
         assert isinstance(constants.FEATURE_SCHEMA_VERSION, str)
-        # P1.1 (2026-07-08): bumped from features_v02 to features_v03.
-        assert constants.FEATURE_SCHEMA_VERSION == "features_v03"
+        # P1.1 (2026-07-08): bumped features_v02 -> features_v03.
+        # P2.3/P2.4 (2026-07-10): bumped -> features_v04 (market_cap,
+        # vcp_sequence_score).
+        assert constants.FEATURE_SCHEMA_VERSION == "features_v04"
 
     @pytest.mark.parametrize("role", ["prod", "debug"])
     def test_features_v03_columns_exist(
@@ -436,6 +438,15 @@ class TestFeaturesV02Columns:
         cols = set(_columns(role, "daily_features"))
         missing = FEATURES_V03_COLUMNS - cols
         assert missing == set(), f"Missing features_v03 columns: {missing}"
+
+    @pytest.mark.parametrize("role", ["prod", "debug"])
+    def test_features_v04_columns_exist(
+        self, role: str, tmp_db_paths: dict[str, Path]
+    ) -> None:
+        sm.apply_schema(role)
+        cols = set(_columns(role, "daily_features"))
+        missing = {"market_cap", "vcp_sequence_score"} - cols
+        assert missing == set(), f"Missing features_v04 columns: {missing}"
 
     def test_feature_value_fits_column(self, tmp_db_paths: dict[str, Path]) -> None:
         sm.apply_prod_schema()
@@ -652,6 +663,8 @@ class TestTickerFundamentalsSchema:
             "ticker", "as_of_date", "eps_growth_trend", "leverage_ratio",
             "valuation_band", "piotroski_f_score", "altman_z_score",
             "insider_trade_flag", "institutional_ownership_delta",
+            # P2.4 (2026-07-10): cover-page share count, point-in-time.
+            "shares_outstanding",
             "source_provider", "calculated_at",
         ]
         assert cols == expected

@@ -338,6 +338,10 @@ class TestYfModuleInjection:
             fetch_json=fake_fetch,
             ticker_to_cik=lambda ticker: "0000320193",
             yf_module=_FakeYfModule(),
+            # P2.4: the fallback serves only near-current dates. Pin "today" to
+            # the requested date so this test keeps exercising yf_module wiring
+            # rather than the (separately tested) point-in-time restriction.
+            today_fn=lambda: date(2024, 6, 1),
         )
         result = provider.get_fundamentals("AAPL", date(2024, 6, 1))
         assert result.status == "success_with_warnings"

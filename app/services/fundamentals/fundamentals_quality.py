@@ -140,6 +140,83 @@ def read_fundamentals_map(
     return result
 
 
+# P2.4: shares history for the as-of join M11 needs. A single read covering the
+# whole batch beats one query per (ticker, cutoff): M11 computes features for a
+# date *range*, and each cutoff must see only the filings knowable by then.
+SQL_READ_SHARES_HISTORY: Final[str] = """
+SELECT ticker, as_of_date, shares_outstanding
+FROM ticker_fundamentals
+WHERE as_of_date <= ? AND shares_outstanding IS NOT NULL
+ORDER BY ticker, as_of_date
+"""
+
+
+def read_shares_history(
+    db_mgr: _DbManagerLike, db_role: str, max_date: date
+) -> dict[str, list[tuple[date, float]]]:
+    """ticker -> ascending [(as_of_date, shares_outstanding)] up to *max_date*.
+
+    Ascending order is the contract :func:`shares_as_of` relies on. Returns an
+    empty map (never raises) when ``ticker_fundamentals`` is absent — it is not
+    part of the simulation schema, and M11 runs there too.
+    """
+    try:
+        conn = db_mgr.connect(db_role)
+    except Exception:  # noqa: BLE001
+        return {}
+    try:
+        rows = conn.execute(SQL_READ_SHARES_HISTORY, [max_date.isoformat()]).fetchall()
+    except Exception:  # noqa: BLE001
+        return {}
+    finally:
+        conn.close()
+
+    history: dict[str, list[tuple[date, float]]] = {}
+    for ticker, as_of, shares in rows:
+        if shares is None:
+            continue
+        history.setdefault(ticker, []).append((as_of, float(shares)))
+    return history
+
+
+def shares_as_of(
+    history: dict[str, list[tuple[date, float]]], ticker: str, as_of: date
+) -> float | None:
+    """Most recent shares_outstanding known for *ticker* on *as_of*, else None.
+
+    Point-in-time: a filing dated after *as_of* is invisible, even though it sits
+    in ``history`` for a later cutoff in the same batch.
+    """
+    entries = history.get(ticker)
+    if not entries:
+        return None
+    result: float | None = None
+    for entry_date, shares in entries:  # ascending
+        if entry_date > as_of:
+            break
+        result = shares
+    return result
+
+
+def compute_market_cap(
+    shares_outstanding: float | None, close_raw: float | None
+) -> float | None:
+    """``shares_outstanding * close_raw``, or ``None`` if either is unusable.
+
+    **``close_raw``, never ``close_adj``.** The adjusted series is retro-restated
+    as later splits/dividends occur (hence ``daily_prices.adjustment_factor`` and
+    M10's mutation detection), so a market cap built on it would (a) multiply a
+    split-adjusted price by an unadjusted share count and (b) embed corporate
+    actions that had not happened as of the date -- a look-ahead leak, and a value
+    that silently changes on every backfill.
+    """
+    if shares_outstanding is None or close_raw is None:
+        return None
+    if shares_outstanding <= 0 or close_raw <= 0:
+        return None
+    return shares_outstanding * close_raw
+
+
 def build_fundamentals_scores(
     fundamentals_by_ticker: dict[str, dict[str, Any]],
     valuation_band_quality: dict[str, float] = VALUATION_BAND_QUALITY,

@@ -16,8 +16,12 @@ Does NOT:
 
 Two distinct versions (never confused):
 - DATABASE_SCHEMA_VERSION = "schema_v02" — seeded into schema_versions.
-- FEATURE_SCHEMA_VERSION = "features_v03" — written into daily_features rows by M11
-  (P1.1, 2026-07-08: adds rs_percentile_126d; bumped from features_v02).
+- FEATURE_SCHEMA_VERSION = "features_v04" — written into daily_features rows by M11
+  (P2.3/P2.4, 2026-07-10: adds market_cap + vcp_sequence_score; bumped from
+  features_v03, which added rs_percentile_126d on 2026-07-08).
+  Reinit, not migrate: daily_features is a derived table, rebuilt by M11 from
+  daily_prices. Adding columns changes the CREATE TABLE only; existing rows are
+  discarded by the wipe/backfill, never ALTERed in place.
 """
 
 from __future__ import annotations
@@ -192,6 +196,14 @@ _PROD_TABLE_DDL: Final[tuple[str, ...]] = (
         volume_expansion_score DOUBLE,
         relative_strength_vs_spy DOUBLE,
         rs_percentile_126d DOUBLE,
+        -- v04 (P2.4): shares_outstanding x close_raw, computed here rather than
+        -- in ticker_fundamentals because it is a daily, price-dependent value
+        -- and fundamentals_refresh runs before price_ingestion. Dormant: no
+        -- validator or scoring path reads it yet.
+        market_cap DOUBLE,
+        -- v04 (P2.3): progressive-contraction (VCP) sequencing score over the
+        -- base window. NULL when the base holds fewer than two legs. Dormant.
+        vcp_sequence_score DOUBLE,
         sector_relative_strength DOUBLE,
         market_regime VARCHAR,
         market_breadth_pct DOUBLE,
@@ -416,6 +428,12 @@ _PROD_TABLE_DDL: Final[tuple[str, ...]] = (
         altman_z_score DOUBLE,
         insider_trade_flag BOOLEAN,
         institutional_ownership_delta DOUBLE,
+        -- P2.4: dei:EntityCommonStockSharesOutstanding, the cover-page count
+        -- knowable as of as_of_date. Not a weighted-average/diluted figure.
+        -- market_cap is derived from this in daily_features (M11), not stored
+        -- here: it depends on that day's close_raw, and fundamentals_refresh
+        -- runs before price_ingestion.
+        shares_outstanding DOUBLE,
         source_provider VARCHAR NOT NULL,
         calculated_at TIMESTAMP NOT NULL,
         PRIMARY KEY (ticker, as_of_date)

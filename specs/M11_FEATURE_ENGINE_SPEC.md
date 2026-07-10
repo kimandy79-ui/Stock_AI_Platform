@@ -1,8 +1,27 @@
 # M11_FEATURE_ENGINE_SPEC
 
 Module 11 — Feature Engine. Contract spec. Phase 2 (features_v02), extended
-by P1.1 (features_v03, 2026-07-08 — adds `rs_percentile_126d`).
+by P1.1 (features_v03, 2026-07-08 — adds `rs_percentile_126d`) and by
+P2.3/P2.4 (features_v04, 2026-07-10 — adds `vcp_sequence_score`, `market_cap`;
+both dormant).
 Derived from the frozen split Project Files; gaps are marked, not invented.
+
+### features_v04 additions (P2.3 / P2.4)
+
+`vcp_sequence_score` measures *progressive* contraction inside the base window
+located by `_find_base_window` — the window-detection logic extracted from
+`_compute_base` so both consumers share one definition. Legs are
+`pivot_high -> next pivot_low` pairs found by `_base_scoped_pivots`, a
+base-scoped pivot pass with a more sensitive confirmation window
+(`_VCP_PIVOT_CONFIRM_BARS = 1`) than the module-wide `_compute_swing_pivots`
+(`_PIVOT_CONFIRM_BARS = 2`), which is also capped to the last `_SWING_LOOKBACK`
+bars and returns prices rather than indices. NULL on short bases / <2 legs.
+
+`market_cap` requires `ticker_fundamentals.shares_outstanding`, read once per
+batch (`fq.read_shares_history`) and joined per cutoff (`fq.shares_as_of`) so an
+early `feature_date` never sees a filing that only became knowable later in the
+same run. A missing `ticker_fundamentals` table (it is not part of the
+simulation schema) degrades to an empty map, not an error.
 
 ## 1. Purpose and non-scope
 
@@ -187,6 +206,8 @@ Requires ≥ 60 bars.  Returns all-None otherwise.
 | range_tightness_score | range_width_pct null | consolidation_base |
 | relative_strength_vs_spy | SPY roc20 missing | trend_continuation |
 | rs_percentile_126d | ticker's own roc126 null (<126 bars) | none yet (scoring input only, not wired to any setup validator by this addition) |
+| vcp_sequence_score | <60 bars, no base window, base < 10 bars, or < 2 legs | none yet (dormant; intended for `consolidation_base_strict`) |
+| market_cap | no `shares_outstanding` knowable as of feature_date, or no `close_raw` | none yet (dormant) |
 
 ## 10. Readiness (unchanged)
 
@@ -241,3 +262,5 @@ Single `BEGIN / COMMIT` across all tickers per run.  Any exception triggers
 | volume_expansion_score | breakout | NULL if rvol20 null | test_volume_expansion_score_exact, test_volume_expansion_at_1x_is_zero |
 | relative_strength_vs_spy | trend_continuation | NULL if SPY data missing | test_relative_strength_vs_spy_exact, test_rs_vs_spy_null_when_spy_absent |
 | rs_percentile_126d | none yet (scoring input only) | NULL if <126 bars; 100.0 if lone valid value in its day's population | see `test_feature_engine_v03.py` |
+| vcp_sequence_score | none yet (dormant) | NULL (never 0.0) on short base / <2 legs | see `test_p2_3_vcp_sequencing.py` |
+| market_cap | none yet (dormant) | NULL when share count or close_raw unavailable | see `test_p2_4_shares_market_cap.py` |

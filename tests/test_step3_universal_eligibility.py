@@ -266,7 +266,9 @@ class TestContractCompatibility:
 
     def test_constants_feature_schema_version(self):
         # P1.1 (2026-07-08): bumped to features_v03 (adds rs_percentile_126d).
-        assert constants.FEATURE_SCHEMA_VERSION == "features_v03"
+        # P2.3/P2.4 (2026-07-10): bumped to features_v04 (adds market_cap,
+        # vcp_sequence_score).
+        assert constants.FEATURE_SCHEMA_VERSION == "features_v04"
 
     def test_allowed_setup_types_from_constants(self):
         for cfg in ALL_SETUP_CONFIGS:

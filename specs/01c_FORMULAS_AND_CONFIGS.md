@@ -145,6 +145,66 @@ something the formula itself corrects for.
 Scoring input only (per-setup-type scoring-weight wiring is a separate,
 future decision — not part of this addition). No hard gate.
 
+### VCP sequencing (features_v04, P2.3)
+```
+base window        = longest contiguous run, within the last 60 bars, of bars
+                     whose true range <= 1.5 x median TR of the prior 60 bars
+                     (the same window _compute_base already reports)
+legs               = successive (pivot_high -> next pivot_low) pullbacks
+                     inside that window
+depth_i            = (high_i - low_i) / high_i
+volume_i           = mean(volume_raw) over leg i's bar span
+
+depth_frac         = share of adjacent pairs with depth_i <= depth_{i-1} * 0.90
+volume_frac        = share of adjacent pairs with volume_i <= volume_{i-1}
+contraction_ratio  = clip(1 - depth_last / depth_first, 0, 1)
+
+vcp_sequence_score = 100 * (0.45*depth_frac + 0.25*volume_frac
+                            + 0.30*contraction_ratio)
+```
+Captures Minervini's defining VCP trait — each successive pullback shallower
+than the last, on drier volume (e.g. 25% → 12% → 6%). `atr_compression_score`
+and `volume_dry_up_score` **cannot** express this: both are single-window
+scalars, so a uniformly quiet range and a genuine tightening coil score
+identically. The `0.90` factor (each leg materially shallower, not merely
+non-increasing) is what separates the two — without it a flat base's
+equal-depth legs would pass a naive monotonicity test.
+
+`NULL` — never `0.0` — when the sequence is not measurable: <60 bars, no base
+window, a base shorter than 10 bars, or fewer than 2 identifiable legs. VCP is
+a longer-base pattern; a short base has no sequence to judge, and `0.0` would
+misread as "measured, and bad".
+
+Two known, documented properties of measuring strictly inside the detected base
+window (not defects): the window is chosen as the longest *low*-true-range run,
+so a real VCP's deepest, earliest contraction often falls outside it; and a peak
+sitting on the window's opening bar cannot be pivot-confirmed. Both cost a leg.
+Weights and thresholds are placeholders pending diagnostics.
+
+Scoring-only, dormant. Not wired into `validate_consolidation_base`'s hard or
+soft checks, and not into `enforce_compression_floor` — a separate, future
+decision once outcome data justifies it.
+
+### Market cap (features_v04, P2.4)
+```
+shares_outstanding = dei:EntityCommonStockSharesOutstanding, from the freshest
+                     filing with end <= feature_date AND filed <= feature_date
+market_cap         = shares_outstanding * close_raw
+```
+`close_raw`, **never** `close_adj`: the adjusted series is retro-restated as
+later splits/dividends occur, so a market cap built on it would multiply a
+split-adjusted price by an unadjusted share count *and* embed corporate actions
+that had not happened as of the feature date — a look-ahead leak, and a value
+that silently changes on each backfill.
+
+Not weighted-average diluted shares (a period average over dilutive
+instruments, which does not pair dimensionally with a price). Computed in M11
+rather than stored in `ticker_fundamentals` because it is a daily,
+price-dependent value and `fundamentals_refresh` runs *before* `price_ingestion`.
+
+`NULL` when no share count is knowable as of `feature_date`. Dormant: no
+universe gate, no scoring weight.
+
 ---
 
 ## FILE: `FORMULAS/61_Step3_Universal_Eligibility.md`

@@ -8,11 +8,19 @@ fundamentals source; a ``yfinance``-backed fallback (see
 degrading gracefully instead of failing outright when SEC EDGAR is
 unreachable, rate-limited, or blocked.
 
-Field coverage (of the 7 :class:`FundamentalSnapshot` fields):
+Field coverage (of the 8 :class:`FundamentalSnapshot` fields):
 
 - ``eps_growth_trend``, ``leverage_ratio``, ``piotroski_f_score``,
   ``altman_z_score`` — computed here, self-contained, from EDGAR XBRL facts
   only (annual/10-K figures).
+- ``shares_outstanding`` (P2.4) — ``dei:EntityCommonStockSharesOutstanding``
+  from the ``dei`` namespace: the instantaneous cover-page common-share count,
+  taken from the freshest filing (10-K *or* 10-Q) knowable as of the requested
+  date. Deliberately not the weighted-average diluted count, which is a period
+  average over dilutive instruments and does not pair dimensionally with a
+  price. Consumed by M11 to derive ``market_cap = shares_outstanding *
+  close_raw`` (never ``close_adj``, which is retro-restated and would embed
+  corporate actions occurring after the date).
 - ``valuation_band`` — computed here *if* a ``price_lookup`` callable is
   injected (see :class:`EdgarFundamentalsProvider`); otherwise ``"unknown"``
   (a valid catalog value, not a failure) since EPS-to-price bucketing has no
@@ -27,6 +35,14 @@ Field coverage (of the 7 :class:`FundamentalSnapshot` fields):
   *all* institutional filers for a given issuer, quarter over quarter — a
   substantial data-engineering undertaking, not a single per-ticker API
   call. Flagged as a blocking gap rather than substituted with a proxy.
+
+The ``yfinance`` fallback is **point-in-time restricted** (P2.4): ``Ticker.info``
+is a current-only snapshot with no historical addressing, so the fallback
+declines any ``as_of_date`` more than ``_FALLBACK_MAX_STALENESS_DAYS`` in the
+past (and any future date) rather than stamping today's figures onto a
+historical date. Before this restriction a multi-year backfill would have
+written present-day fundamentals into every historical ``as_of_date`` for each
+ticker whose SEC fetch failed. See :func:`fallback_can_serve`.
 
 Altman Z-Score uses the **Z'-Score (private-firm) variant** — book value of
 equity in place of market value of equity — so the computation is entirely
@@ -154,6 +170,10 @@ _CONCEPT_CFO: Final[tuple[str, ...]] = (
 )
 _CONCEPT_GROSS_PROFIT: Final[tuple[str, ...]] = ("GrossProfit",)
 _CONCEPT_EPS_DILUTED: Final[tuple[str, ...]] = ("EarningsPerShareDiluted",)
+# P2.4: lives in the `dei` namespace, not `us-gaap`. Single concept, no alias
+# family -- the cover-page tag is standardized, unlike the us-gaap share
+# concepts whose filer inconsistency is why Piotroski signal 7 is omitted.
+_CONCEPT_SHARES_OUTSTANDING: Final[str] = "EntityCommonStockSharesOutstanding"
 _CONCEPT_LONG_TERM_DEBT: Final[tuple[str, ...]] = (
     "LongTermDebtNoncurrent",
     "LongTermDebt",
@@ -306,6 +326,69 @@ def extract_annual_series(
                 seen_ends[end_str] = entry
     ordered = sorted(seen_ends.values(), key=lambda e: e["end"], reverse=True)
     return ordered
+
+
+def extract_shares_outstanding(
+    dei_facts: dict[str, Any], as_of_date: date
+) -> float | None:
+    """Most recent cover-page common shares outstanding knowable as of *as_of_date*.
+
+    Reads the ``dei`` namespace, not ``us-gaap``. ``dei:EntityCommonStockSharesOutstanding``
+    is an *instantaneous* cover-page count as of a stated date -- the correct
+    input for a market cap. It is deliberately not
+    ``us-gaap:WeightedAverageNumberOfDilutedSharesOutstanding``, which is a
+    period *average* including dilutive instruments (and which this module
+    already declines to trust; see ``compute_piotroski_f_score``).
+
+    Point-in-time discipline (Phase 0), same rule as :func:`extract_annual_series`:
+    an entry is eligible only when both its ``end`` (the date the shares were
+    counted) and its ``filed`` date are on or before *as_of_date*. Filtering on
+    ``end`` alone would leak -- a cover page dated before *as_of_date* is not
+    knowable until the filing carrying it is actually filed.
+
+    Unlike :func:`extract_annual_series` this accepts **any** form, not just
+    ``10-K``: the same concept appears on 10-Q cover pages, and taking the
+    freshest filed count rather than the last annual one is both more accurate
+    and still strictly point-in-time.
+
+    Returns the value with the latest ``end`` (ties broken by latest ``filed``),
+    or ``None`` when the concept is absent, malformed, or nothing is yet
+    knowable as of *as_of_date*.
+    """
+    concept_facts = (dei_facts or {}).get(_CONCEPT_SHARES_OUTSTANDING)
+    if not concept_facts:
+        return None
+    units = concept_facts.get("units")
+    if not isinstance(units, dict):
+        return None
+
+    best: tuple[date, date, float] | None = None
+    for entries in units.values():
+        if not isinstance(entries, list):
+            continue
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            end_str = entry.get("end")
+            filed_str = entry.get("filed")
+            val = entry.get("val")
+            if end_str is None or filed_str is None or val is None:
+                continue
+            try:
+                end_dt = date.fromisoformat(end_str)
+                filed_dt = date.fromisoformat(filed_str)
+                shares = float(val)
+            except (ValueError, TypeError):
+                continue
+            if end_dt > as_of_date or filed_dt > as_of_date:
+                continue
+            if shares <= 0:
+                continue
+            candidate = (end_dt, filed_dt, shares)
+            if best is None or candidate[:2] > best[:2]:
+                best = candidate
+
+    return best[2] if best is not None else None
 
 
 def extract_metric_series(
@@ -503,7 +586,9 @@ def compute_fundamentals_from_companyfacts(
     ``None`` here (see module docstring for why). ``price`` is an optional
     caller-supplied quote used only for ``valuation_band`` bucketing.
     """
-    us_gaap = company_facts.get("facts", {}).get("us-gaap", {})
+    facts = company_facts.get("facts", {})
+    us_gaap = facts.get("us-gaap", {})
+    dei_facts = facts.get("dei", {})
 
     assets = extract_metric_series(us_gaap, _CONCEPT_ASSETS, as_of_date)
     liabilities = extract_metric_series(us_gaap, _CONCEPT_LIABILITIES, as_of_date)
@@ -531,6 +616,7 @@ def compute_fundamentals_from_companyfacts(
         eps_growth_trend=compute_eps_growth_trend(eps_diluted),
         leverage_ratio=compute_leverage_ratio(long_term_debt, assets),
         valuation_band=compute_valuation_band(eps_diluted, price),
+        shares_outstanding=extract_shares_outstanding(dei_facts, as_of_date),
         piotroski_f_score=compute_piotroski_f_score(
             assets=assets,
             current_assets=current_assets,
@@ -560,6 +646,35 @@ def compute_fundamentals_from_companyfacts(
 # --------------------------------------------------------------------------- #
 # yfinance fallback (used when the SEC EDGAR path fails for any reason).
 # --------------------------------------------------------------------------- #
+
+# P2.4: how far back an `as_of_date` may sit and still be served by the
+# fallback. `yfinance`'s Ticker.info is a *current* snapshot with no historical
+# addressing, so it can only ever answer "what is true now". A few days of slack
+# covers catch-up runs over a weekend/holiday without admitting a backfill.
+_FALLBACK_MAX_STALENESS_DAYS: Final[int] = 7
+
+
+def fallback_can_serve(as_of_date: date, today: date) -> bool:
+    """Whether the yfinance fallback may answer for *as_of_date* at all.
+
+    ``Ticker.info`` returns **current** ``trailingPE`` / ``earningsQuarterlyGrowth``
+    / ``debtToEquity`` / ``sharesOutstanding`` regardless of the ``as_of_date``
+    asked for. Stamping those onto a historical ``as_of_date`` -- which is
+    exactly what a multi-year backfill does for every ticker whose SEC fetch
+    fails -- writes *today's* fundamentals into the past. That is the Phase 0
+    look-ahead class: a value that was not knowable on the date it is recorded
+    against.
+
+    The fallback therefore declines historical (and future) dates outright.
+    Declining yields no ``ticker_fundamentals`` row, which every consumer
+    already treats as "no coverage, no adjustment" -- strictly better than a
+    contaminated row, because absence is honest and a wrong value is not.
+    """
+    if as_of_date > today:
+        return False
+    return (today - as_of_date).days <= _FALLBACK_MAX_STALENESS_DAYS
+
+
 def compute_fundamentals_from_yfinance_info(
     info: dict[str, Any], ticker: str, as_of_date: date
 ) -> FundamentalSnapshot:
@@ -589,12 +704,21 @@ def compute_fundamentals_from_yfinance_info(
     pe_ratio = info.get("trailingPE")
     valuation_band = _bucket_pe_ratio(float(pe_ratio)) if pe_ratio else "unknown"
 
+    raw_shares = info.get("sharesOutstanding")
+    try:
+        shares_outstanding = float(raw_shares) if raw_shares else None
+    except (TypeError, ValueError):
+        shares_outstanding = None
+    if shares_outstanding is not None and shares_outstanding <= 0:
+        shares_outstanding = None
+
     return FundamentalSnapshot(
         ticker=ticker,
         as_of_date=as_of_date,
         eps_growth_trend=float(eps_growth) if eps_growth is not None else None,
         leverage_ratio=leverage_ratio,
         valuation_band=valuation_band,
+        shares_outstanding=shares_outstanding,
         piotroski_f_score=None,
         altman_z_score=None,
         insider_trade_flag=None,
@@ -648,6 +772,11 @@ class EdgarFundamentalsProvider(MarketDataProvider):
         Injected fake ``yfinance``-like module (mirrors
         :class:`YahooProvider`'s ``yf_module`` hook) used to build the
         default fallback. Ignored if ``yfinance_fallback`` is supplied.
+    today_fn:
+        Injected ``Callable[[], date]`` (default :meth:`date.today`) used only
+        to decide whether the default fallback may serve a given ``as_of_date``
+        (see :func:`fallback_can_serve`). Ignored if ``yfinance_fallback`` is
+        supplied.
     min_request_interval_sec, max_retries, requests_module, sleep_fn:
         Passed through to :class:`_SecHttpClient` (mainly for tests).
     """
@@ -662,6 +791,7 @@ class EdgarFundamentalsProvider(MarketDataProvider):
         cache_ttl_seconds: int | None = None,
         yfinance_fallback: Callable[[str, date], FundamentalSnapshot | None] | None = None,
         yf_module: Any | None = None,
+        today_fn: Callable[[], date] | None = None,
         min_request_interval_sec: float | None = None,
         max_retries: int | None = None,
         requests_module: Any | None = None,
@@ -689,14 +819,19 @@ class EdgarFundamentalsProvider(MarketDataProvider):
             else _CACHE_TTL_SECONDS_DEFAULT
         )
         self._yfinance_fallback = yfinance_fallback or self._build_default_yfinance_fallback(
-            yf_module
+            yf_module, today_fn
         )
 
     @staticmethod
     def _build_default_yfinance_fallback(
         yf_module: Any | None,
+        today_fn: Callable[[], date] | None = None,
     ) -> Callable[[str, date], FundamentalSnapshot | None]:
+        _today = today_fn or date.today
+
         def _fallback(ticker: str, as_of_date: date) -> FundamentalSnapshot | None:
+            if not fallback_can_serve(as_of_date, _today()):
+                return None
             yf = yf_module
             if yf is None:
                 import yfinance as yf  # noqa: PLC0415 - intentional lazy import

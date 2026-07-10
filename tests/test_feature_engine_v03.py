@@ -97,7 +97,8 @@ class TestFeatureSchemaVersionBump:
         days = _seed_ticker_with_final_close(prod, "VBUMP", 110.0)
         FeatureEngine().calculate(days[-1], days[-1], tickers=["VBUMP"])
         row = _fetch_feature(prod, "VBUMP")
-        assert row["feature_schema_version"] == "features_v03" == constants.FEATURE_SCHEMA_VERSION
+        # P2.3/P2.4 (2026-07-10): bumped features_v03 -> features_v04.
+        assert row["feature_schema_version"] == "features_v04" == constants.FEATURE_SCHEMA_VERSION
 
 
 class TestRsPercentile126dNullPropagation:

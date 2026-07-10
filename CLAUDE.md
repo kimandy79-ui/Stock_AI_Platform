@@ -156,6 +156,8 @@ M23  app/services/learning/config_recommender.py
      tests/test_phase6_diagnostics.py        phase6
      tests/test_phase7_setup_mode.py         phase7 integration
      tests/test_p2_5_orchestration_wiring.py  P2.5 M20 step5 wiring + fundamentals
+     tests/test_p2_3_vcp_sequencing.py       P2.3 vcp_sequence_score (features_v04)
+     tests/test_p2_4_shares_market_cap.py    P2.4 shares_outstanding + market_cap
      tests/test_tools_runners.py             tools
      tests/test_backfill_prod_history.py     tools
      tests/test_import_legacy_prices.py      tools
@@ -224,6 +226,13 @@ data/input/                    static CSVs (e.g. backfill_tickers_common_only.cs
 - Step 5 runs once per signal date across all setup types
 
 **Data integrity:**
+- market_cap uses close_raw, never close_adj — close_adj is retro-restated by
+  later splits/dividends and embeds corporate actions post-dating the bar
+- The yfinance fundamentals fallback serves near-current dates only; it cannot
+  honor a historical as_of_date and must never be relaxed to do so
+- Dormant feature fields (rs_percentile_126d, market_breadth_pct, market_cap,
+  vcp_sequence_score) are landed but read by NO validator/scoring path; wiring
+  one in is an explicit decision, gated on diagnostics
 - RVOL is NOT a universal hard gate (AD-22.23); setup-specific only
 - market_regime NULL never defaulted to neutral; NULL blocks BUY (WATCHLIST_ONLY at most)
 - Fixed-R target only when no structural evidence above entry exists; target_is_structural = FALSE

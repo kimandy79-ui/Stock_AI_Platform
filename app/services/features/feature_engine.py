@@ -1,6 +1,6 @@
-"""Module 11 — Feature Engine (features_v03).
+"""Module 11 — Feature Engine (features_v04).
 
-Computes ``daily_features`` rows (schema version ``features_v03``) from already-
+Computes ``daily_features`` rows (schema version ``features_v04``) from already-
 ingested, validated, and mutation-checked ``daily_prices`` data.  Runs after
 Module 10 (Mutation Detector) and before Module 12 (Market Regime Engine).
 
@@ -37,6 +37,26 @@ with a valid 126d ROC (a lone value ranks at 100.0, not NULL — see
 frozen, and do not get this field retroactively (same policy as the
 ``v01``->``v02`` bump).
 
+P2.3/P2.4 (2026-07-10): ``features_v04`` adds two columns over ``features_v03``.
+Both are **dormant** — persisted and tested, read by no validator or scoring
+path, pending an explicit future decision (same discipline as
+``rs_percentile_126d`` and ``market_breadth_pct``).
+
+- ``vcp_sequence_score`` (P2.3) — 0-100 measure of *progressive* contraction
+  inside the base window: successively shallower pullbacks on successively drier
+  volume. Orthogonal to ``atr_compression_score`` / ``volume_dry_up_score``,
+  which are single-window scalars and cannot distinguish a flat quiet range from
+  a tightening coil. NULL (never 0.0) when the base is shorter than
+  ``_VCP_MIN_BASE_BARS`` or holds fewer than ``_VCP_MIN_LEGS`` legs — VCP is a
+  longer-base pattern and a short base has no sequence to judge.
+- ``market_cap`` (P2.4) — ``shares_outstanding × close_raw``, where the share
+  count is the point-in-time cover-page figure from ``ticker_fundamentals``
+  (EDGAR ``dei``). Computed here, not in ``ticker_fundamentals``, because it is a
+  daily price-dependent value and ``fundamentals_refresh`` runs *before*
+  ``price_ingestion``. Uses ``close_raw`` deliberately: ``close_adj`` is
+  retro-restated by later splits/dividends and would embed future corporate
+  actions. NULL when the ticker has no share count knowable as of the cutoff.
+
 Scope
 -----
 - Reads ``daily_prices`` (``data_quality_status = 'ok'``) plus warmup history.
@@ -65,6 +85,7 @@ import polars as pl
 
 from app.config import constants
 from app.database import duckdb_manager
+from app.services.fundamentals import fundamentals_quality as fq
 from app.utils import logging_config
 from app.utils import service_result
 from app.utils.service_result import ServiceResult
@@ -109,6 +130,26 @@ _SWING_LOOKBACK: Final[int] = 20  # bars scanned to find confirmed pivots
 # Consolidation base: maximum true range relative to median true range.
 _BASE_RANGE_MAX_MULTIPLE: Final[float] = 1.5
 _BASE_MAX_DURATION: Final[int] = 60  # maximum bars in a base window
+
+# --------------------------------------------------------------------------- #
+# P2.3 — VCP sequencing (features_v04). Dormant: scoring-only, no gate, not read
+# by any validator. Values are placeholders pending diagnostics, per CLAUDE.md's
+# no-pre-diagnostic-tuning rule.
+# --------------------------------------------------------------------------- #
+# More sensitive than _PIVOT_CONFIRM_BARS (2): the swings inside a tight base are
+# small and would otherwise go unconfirmed, under-counting legs.
+_VCP_PIVOT_CONFIRM_BARS: Final[int] = 1
+# A base shorter than this cannot hold a meaningful contraction sequence.
+_VCP_MIN_BASE_BARS: Final[int] = 10
+# Minervini's "2T-4T": two contractions is the minimum profile worth scoring.
+_VCP_MIN_LEGS: Final[int] = 2
+# Each leg must be at least this much shallower than the prior one to count as a
+# real contraction. Without a material step, a flat base's equal-depth legs would
+# satisfy a naive "non-increasing" test and score like a genuine coil.
+_VCP_MIN_CONTRACTION: Final[float] = 0.10
+_VCP_W_DEPTH: Final[float] = 0.45
+_VCP_W_VOLUME: Final[float] = 0.25
+_VCP_W_CONTRACTION: Final[float] = 0.30
 
 # ATR compression: comparison window (bars).
 _ATR_COMPRESSION_LOOKBACK: Final[int] = 60
@@ -166,6 +207,9 @@ OPTIONAL_FEATURE_COLUMNS: Final[tuple[str, ...]] = (
     # v03 new (optional — NULL when <126 bars of history, or no other active
     # ticker that day has a valid 126d ROC to rank against)
     "rs_percentile_126d",
+    # v04 new (optional, dormant — no validator/scoring path reads either yet)
+    "market_cap",
+    "vcp_sequence_score",
 )
 
 # --------------------------------------------------------------------------- #
@@ -233,6 +277,9 @@ _FEATURE_PARAM_COLUMNS: Final[tuple[str, ...]] = (
     "relative_strength_vs_spy",
     # v03 cross-sectional
     "rs_percentile_126d",
+    # v04 dormant
+    "market_cap",
+    "vcp_sequence_score",
     # context / open-gap columns
     "sector_relative_strength",
     "market_regime",
@@ -503,33 +550,23 @@ def _compute_support_resistance(
     return (support, resistance, next_resistance)
 
 
-def _compute_base(
-    ticker_df: pl.DataFrame,
-) -> tuple[float | None, float | None, int | None, float | None, float | None]:
-    """Compute base_high, base_low, range_duration, range_width_pct, range_tightness_score.
+def _find_base_window(ticker_df: pl.DataFrame) -> tuple[int, int] | None:
+    """Locate the base window as ``(start_idx, end_idx)``, end exclusive.
 
-    Algorithm:
-    1. Compute per-bar true range (full ATR formula: max of hl, |h-prev_c|,
-       |l-prev_c|) on adjusted prices.
-    2. Derive the reference threshold: median true range over the prior 60 bars
-       (bars n-61 .. n-2, i.e. not including the cutoff bar) × 1.5.
-    3. Within the last 60 bars (bars n-60 .. n-1), find the *longest*
-       contiguous window of bars whose true range ≤ threshold.  The window is
-       not required to end at the cutoff bar, supporting detection of a base
-       that the price has partially broken out of.
-    4. If the longest qualifying run is ≥ 2 bars, compute:
-       - base_high = max(high_adj) over the window
-       - base_low  = min(low_adj)  over the window
-       - range_width_pct = (base_high - base_low) / base_low
-       - range_tightness_score = 100 × (1 - min(range_width_pct / 0.20, 1))
+    The longest contiguous run, within the last ``_BASE_MAX_DURATION`` bars,
+    of bars whose true range is ≤ ``_BASE_RANGE_MAX_MULTIPLE`` × the median true
+    range of the prior 60 bars. The run need not end at the cutoff bar, so a
+    base the price has partially broken out of is still found.
 
-    Requires ≥ 60 bars.  Returns all-None on insufficient data or no run ≥ 2.
-    Bars with any None in high_adj/low_adj/close_adj are treated as
-    non-qualifying (TR=0.0 but excluded from base_high/base_low computation).
+    Returns ``None`` when there are <60 bars, no usable reference median, or no
+    qualifying run of at least 2 bars.
+
+    Extracted from :func:`_compute_base` (P2.3) so ``_compute_vcp_sequence_score``
+    measures the sequence inside exactly the window ``_compute_base`` reports.
     """
     n = len(ticker_df)
     if n < 60:
-        return (None, None, None, None, None)
+        return None
 
     highs: list[float | None] = ticker_df["high_adj"].to_list()
     lows: list[float | None] = ticker_df["low_adj"].to_list()
@@ -543,7 +580,7 @@ def _compute_base(
     # Exclude TR=0 sentinel values (from None bars) from the median
     reference_trs = sorted(tr for tr in trs[ref_start:ref_end] if tr > 0.0)
     if not reference_trs:
-        return (None, None, None, None, None)
+        return None
     mid = len(reference_trs) // 2
     median_tr = (
         reference_trs[mid]
@@ -551,7 +588,7 @@ def _compute_base(
         else (reference_trs[mid - 1] + reference_trs[mid]) / 2.0
     )
     if median_tr <= 0:
-        return (None, None, None, None, None)
+        return None
 
     threshold = _BASE_RANGE_MAX_MULTIPLE * median_tr
 
@@ -583,11 +620,200 @@ def _compute_base(
             cur_len = 0
 
     if best_start is None or best_len < 2:
-        return (None, None, None, None, None)
+        return None
 
-    # Map back to absolute indices
     abs_start = search_start_idx + best_start
-    abs_end = abs_start + best_len  # exclusive
+    return (abs_start, abs_start + best_len)
+
+
+def _base_scoped_pivots(
+    highs: list[float | None],
+    lows: list[float | None],
+    start: int,
+    end: int,
+    k: int = _VCP_PIVOT_CONFIRM_BARS,
+) -> list[tuple[int, str, float]]:
+    """Confirmed pivots strictly inside ``[start, end)``, chronological.
+
+    Deliberately *not* :func:`_compute_swing_pivots`, for two reasons flagged in
+    the P2.3 design note: that helper is capped to the last ``_SWING_LOOKBACK``
+    bars (a base can start earlier) and returns prices, not indices (legs need
+    ordering and bar spans). It also confirms with ``_PIVOT_CONFIRM_BARS`` = 2,
+    which under-counts the small swings inside a tight base -- hence the more
+    sensitive ``k`` here.
+
+    Each element is ``(index, "H" | "L", price)``. A bar is a pivot high when its
+    ``high`` strictly exceeds the ``k`` bars either side; a pivot low mirrors it
+    on ``low``. Neighbours must lie inside the window, so pivots never peek at
+    bars outside the base.
+    """
+    pivots: list[tuple[int, str, float]] = []
+    for i in range(start + k, end - k):
+        h = highs[i]
+        lo = lows[i]
+        if h is not None:
+            window = [highs[j] for j in range(i - k, i + k + 1) if j != i]
+            if all(v is not None and h > v for v in window):
+                pivots.append((i, "H", h))
+                continue
+        if lo is not None:
+            window = [lows[j] for j in range(i - k, i + k + 1) if j != i]
+            if all(v is not None and lo < v for v in window):
+                pivots.append((i, "L", lo))
+    return pivots
+
+
+def _extract_contraction_legs(
+    pivots: list[tuple[int, str, float]],
+    volumes: list[float | None],
+) -> list[tuple[float, float]]:
+    """Turn alternating pivots into ``(depth_pct, avg_volume)`` pullback legs.
+
+    A leg is a pivot high followed by the next pivot low: the pullback. Depth is
+    ``(high - low) / high``; volume is the mean over the leg's bar span. Repeated
+    same-kind pivots collapse to the most extreme one (highest H, lowest L), so a
+    noisy sequence like H H L still yields one clean leg.
+    """
+    # Collapse runs of same-kind pivots to their extreme.
+    collapsed: list[tuple[int, str, float]] = []
+    for pivot in pivots:
+        if collapsed and collapsed[-1][1] == pivot[1]:
+            prev = collapsed[-1]
+            better = pivot[2] > prev[2] if pivot[1] == "H" else pivot[2] < prev[2]
+            if better:
+                collapsed[-1] = pivot
+            continue
+        collapsed.append(pivot)
+
+    legs: list[tuple[float, float]] = []
+    for first, second in zip(collapsed, collapsed[1:]):
+        if first[1] != "H" or second[1] != "L":
+            continue
+        high_idx, _, high_price = first
+        low_idx, _, low_price = second
+        if high_price <= 0 or low_price >= high_price:
+            continue
+        depth = (high_price - low_price) / high_price
+        span = [v for v in volumes[high_idx : low_idx + 1] if v is not None]
+        if not span:
+            continue
+        legs.append((depth, sum(span) / len(span)))
+    return legs
+
+
+def _compute_vcp_sequence_score(ticker_df: pl.DataFrame) -> float | None:
+    """0–100 score for progressive (VCP) contraction inside the base window.
+
+    Minervini's defining trait: each successive pullback is *shallower* than the
+    last, on *drier* volume (e.g. 25% → 12% → 6%). ``atr_compression_score`` and
+    ``volume_dry_up_score`` cannot see this -- they are single-window scalars, so
+    a uniformly quiet range and a genuine tightening coil score identically. This
+    measures the *sequence*, and is computed from raw price/volume only: it reads
+    neither of those scores, and neither reads it.
+
+    ``None`` (never 0.0) when the sequence is not measurable:
+
+    * fewer than 60 bars, or no base window (:func:`_find_base_window`);
+    * a base shorter than ``_VCP_MIN_BASE_BARS`` -- too short to hold multiple
+      legs;
+    * fewer than ``_VCP_MIN_LEGS`` identifiable legs.
+
+    That last case is inherent, not a defect: VCP is a longer-base pattern, and a
+    10-bar base simply has no sequence to judge. ``None`` means "not measurable
+    here", which downstream already distinguishes from a measured-and-poor 0.0.
+
+    The score rewards three things, weighted:
+
+    * ``depth_frac`` — share of adjacent leg pairs where depth contracted by at
+      least ``_VCP_MIN_CONTRACTION``. Requiring a *material* step is what
+      separates a true coil from a flat base, whose equal-depth legs would
+      otherwise pass a mere "non-increasing" test.
+    * ``volume_frac`` — share of adjacent pairs whose average volume did not
+      rise. Volume is noisier than price, so this only asks for non-increasing.
+    * ``contraction_ratio`` — how much tighter the final leg is than the first.
+
+    Thresholds/weights are deliberate placeholders pending diagnostics
+    (CLAUDE.md's no-pre-diagnostic-tuning rule); the field is dormant.
+    """
+    window = _find_base_window(ticker_df)
+    if window is None:
+        return None
+    start, end = window
+    if end - start < _VCP_MIN_BASE_BARS:
+        return None
+
+    highs: list[float | None] = ticker_df["high_adj"].to_list()
+    lows: list[float | None] = ticker_df["low_adj"].to_list()
+    volumes: list[float | None] = [
+        float(v) if v is not None else None for v in ticker_df["volume_raw"].to_list()
+    ]
+
+    legs = _extract_contraction_legs(
+        _base_scoped_pivots(highs, lows, start, end), volumes
+    )
+    if len(legs) < _VCP_MIN_LEGS:
+        return None
+
+    depths = [leg[0] for leg in legs]
+    vols = [leg[1] for leg in legs]
+    pairs = len(legs) - 1
+
+    depth_hits = sum(
+        1 for i in range(1, len(depths))
+        if depths[i] <= depths[i - 1] * (1.0 - _VCP_MIN_CONTRACTION)
+    )
+    volume_hits = sum(1 for i in range(1, len(vols)) if vols[i] <= vols[i - 1])
+
+    depth_frac = depth_hits / pairs
+    volume_frac = volume_hits / pairs
+    contraction_ratio = (
+        max(0.0, min(1.0, 1.0 - depths[-1] / depths[0])) if depths[0] > 0 else 0.0
+    )
+
+    score = 100.0 * (
+        _VCP_W_DEPTH * depth_frac
+        + _VCP_W_VOLUME * volume_frac
+        + _VCP_W_CONTRACTION * contraction_ratio
+    )
+    return float(max(0.0, min(100.0, score)))
+
+
+def _compute_base(
+    ticker_df: pl.DataFrame,
+) -> tuple[float | None, float | None, int | None, float | None, float | None]:
+    """Compute base_high, base_low, range_duration, range_width_pct, range_tightness_score.
+
+    Algorithm:
+    1. Compute per-bar true range (full ATR formula: max of hl, |h-prev_c|,
+       |l-prev_c|) on adjusted prices.
+    2. Derive the reference threshold: median true range over the prior 60 bars
+       (bars n-61 .. n-2, i.e. not including the cutoff bar) × 1.5.
+    3. Within the last 60 bars (bars n-60 .. n-1), find the *longest*
+       contiguous window of bars whose true range ≤ threshold.  The window is
+       not required to end at the cutoff bar, supporting detection of a base
+       that the price has partially broken out of.
+    4. If the longest qualifying run is ≥ 2 bars, compute:
+       - base_high = max(high_adj) over the window
+       - base_low  = min(low_adj)  over the window
+       - range_width_pct = (base_high - base_low) / base_low
+       - range_tightness_score = 100 × (1 - min(range_width_pct / 0.20, 1))
+
+    Requires ≥ 60 bars.  Returns all-None on insufficient data or no run ≥ 2.
+    Bars with any None in high_adj/low_adj/close_adj are treated as
+    non-qualifying (TR=0.0 but excluded from base_high/base_low computation).
+
+    Window detection itself lives in :func:`_find_base_window`, shared with
+    ``_compute_vcp_sequence_score`` (P2.3) so the two cannot disagree about
+    where the base is.
+    """
+    window = _find_base_window(ticker_df)
+    if window is None:
+        return (None, None, None, None, None)
+    abs_start, abs_end = window
+    best_len = abs_end - abs_start
+
+    highs: list[float | None] = ticker_df["high_adj"].to_list()
+    lows: list[float | None] = ticker_df["low_adj"].to_list()
 
     # Only use bars with valid (non-None) OHLC values
     valid_highs = [h for h in highs[abs_start:abs_end] if h is not None]
@@ -680,6 +906,10 @@ class FeatureEngine:
         tickers_skipped = read["tickers_skipped_no_data"]
         rows_read = read["rows_read"]
 
+        # P2.4: one read for the whole batch; the per-cutoff as-of join happens
+        # in _build_feature_rows so an early cutoff never sees a later filing.
+        shares_history = fq.read_shares_history(self._db, db_role, end_date)
+
         feature_rows = self._build_feature_rows(
             read["prices"],
             process_tickers,
@@ -688,6 +918,7 @@ class FeatureEngine:
             read.get("earnings_by_ticker", {}),
             start_date,
             end_date,
+            shares_history,
         )
         tickers_processed = len(feature_rows)
         ready_count = sum(1 for r in feature_rows if r["feature_ready"])
@@ -918,10 +1149,12 @@ class FeatureEngine:
         earnings_by_ticker: dict[str, list[tuple[date, str]]],
         start_date: date,
         end_date: date,
+        shares_history: dict[str, list[tuple[date, float]]] | None = None,
     ) -> list[dict[str, Any]]:
         """Return one feature-row dict per processed ticker at its cutoff."""
         if prices.height == 0 or not process_tickers:
             return []
+        shares_history = shares_history or {}
 
         features = _compute_features(prices)
 
@@ -1045,9 +1278,20 @@ class FeatureEngine:
                 swing_highs, swing_lows = _compute_swing_pivots(ticker_prices)
 
                 # close_adj at cutoff for support/resistance derivation
-                ca_rows = ticker_prices.filter(pl.col("date") == cutoff).select("close_adj")
+                cutoff_rows = ticker_prices.filter(pl.col("date") == cutoff)
+                ca_rows = cutoff_rows.select("close_adj")
                 close_adj_val: float | None = (
                     _sanitize(ca_rows[0, "close_adj"]) if ca_rows.height > 0 else None
+                )
+
+                # P2.4: market_cap = shares_outstanding x close_raw. Deliberately
+                # the *unadjusted* close -- see fq.compute_market_cap. Dormant
+                # field: nothing reads it yet.
+                close_raw_val: float | None = (
+                    _sanitize(cutoff_rows[0, "close_raw"]) if cutoff_rows.height > 0 else None
+                )
+                market_cap = fq.compute_market_cap(
+                    fq.shares_as_of(shares_history, ticker, cutoff), close_raw_val
                 )
 
                 support, resistance, next_resistance = _compute_support_resistance(
@@ -1062,6 +1306,10 @@ class FeatureEngine:
                 base_high, base_low, range_duration, range_width_pct, range_tightness = (
                     _compute_base(ticker_prices)
                 )
+
+                # P2.3: progressive-contraction sequence within the same base
+                # window. Dormant field; NULL when the base holds <2 legs.
+                vcp_sequence_score = _compute_vcp_sequence_score(ticker_prices)
 
                 # Most-recent single swing pivot values for storage
                 swing_high_val = swing_highs[0] if swing_highs else None
@@ -1087,6 +1335,8 @@ class FeatureEngine:
                     sector_rs=sector_rs,
                     rs_vs_spy=rs_vs_spy,
                     roc126=_sanitize(rec["roc126"]),
+                    market_cap=market_cap,
+                    vcp_sequence_score=vcp_sequence_score,
                     swing_high=swing_high_val,
                     swing_low=swing_low_val,
                     support=support,
@@ -1150,6 +1400,8 @@ class FeatureEngine:
         range_duration: int | None,
         range_width_pct: float | None,
         range_tightness_score: float | None,
+        market_cap: float | None = None,
+        vcp_sequence_score: float | None = None,
         days_to_earnings: int | None = None,
         earnings_confidence: str | None = None,
     ) -> dict[str, Any]:
@@ -1193,6 +1445,9 @@ class FeatureEngine:
             # _build_feature_rows) and its placeholder percentile output.
             "roc126": roc126,
             "rs_percentile_126d": None,
+            # v04 dormant fields (nothing reads these yet)
+            "market_cap": _sanitize(market_cap),
+            "vcp_sequence_score": _sanitize(vcp_sequence_score),
             # context
             "sector_relative_strength": _sanitize(sector_rs),
             # market_regime: open gap G-REGIME (owned by Module 12)

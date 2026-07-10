@@ -9,6 +9,10 @@ P1.1 (2026-07-08): FEATURE_SCHEMA_VERSION bumped again to features_v03 —
 adds rs_percentile_126d (cross-sectional RS percentile). features_v02 rows
 are retained as historical/frozen, same policy as v01->v02.
 
+P2.3/P2.4 (2026-07-10): bumped to features_v04 — adds vcp_sequence_score
+(progressive base contraction) and market_cap (shares_outstanding x close_raw).
+Both dormant: persisted, read by no validator or scoring path.
+
 Module 01 scope: definitions only. No database, provider, or trading logic.
 """
 
@@ -17,10 +21,11 @@ from __future__ import annotations
 from typing import Final
 
 # --------------------------------------------------------------------------- #
-# Feature schema version (AD-22.8; bumped AD-22.19; bumped again for P1.1)
+# Feature schema version (AD-22.8; bumped AD-22.19; bumped for P1.1; bumped for
+# P2.3/P2.4 -- adds vcp_sequence_score + market_cap).
 # Zero-padded per DECISIONS_LOG.md to avoid lexicographic MAX bugs.
 # --------------------------------------------------------------------------- #
-FEATURE_SCHEMA_VERSION: Final[str] = "features_v03"
+FEATURE_SCHEMA_VERSION: Final[str] = "features_v04"
 
 # --------------------------------------------------------------------------- #
 # Database file names

@@ -153,6 +153,8 @@ CREATE TABLE IF NOT EXISTS daily_features (
     volume_expansion_score DOUBLE,
     relative_strength_vs_spy DOUBLE,
     rs_percentile_126d DOUBLE,
+    market_cap DOUBLE,            -- v04 (P2.4), dormant
+    vcp_sequence_score DOUBLE,    -- v04 (P2.3), dormant
     sector_relative_strength DOUBLE,
     market_regime VARCHAR,
     days_to_earnings_bd INTEGER,
@@ -340,6 +342,28 @@ CREATE TABLE IF NOT EXISTS earnings_calendar (
     confidence VARCHAR NOT NULL,
     updated_at TIMESTAMP NOT NULL,
     PRIMARY KEY (ticker, earnings_date)
+);
+
+-- Phase 4 companion table (prod/debug only; absent from the simulation schema,
+-- same scope as earnings_calendar). as_of_date is the point-in-time OBSERVATION
+-- date, not a filing period end: the row records what was knowable about the
+-- ticker on that date. The EDGAR provider enforces this by requiring both
+-- `end <= as_of_date` AND `filed <= as_of_date` on every XBRL fact.
+-- Grain is therefore (ticker, observation date), one row per ticker per run day.
+CREATE TABLE IF NOT EXISTS ticker_fundamentals (
+    ticker VARCHAR NOT NULL,
+    as_of_date DATE NOT NULL,
+    eps_growth_trend DOUBLE,
+    leverage_ratio DOUBLE,
+    valuation_band VARCHAR,
+    piotroski_f_score INTEGER,
+    altman_z_score DOUBLE,
+    insider_trade_flag BOOLEAN,
+    institutional_ownership_delta DOUBLE,
+    shares_outstanding DOUBLE,        -- P2.4; dei cover-page count
+    source_provider VARCHAR NOT NULL,
+    calculated_at TIMESTAMP NOT NULL,
+    PRIMARY KEY (ticker, as_of_date)
 );
 
 CREATE TABLE IF NOT EXISTS macro_events_calendar (
