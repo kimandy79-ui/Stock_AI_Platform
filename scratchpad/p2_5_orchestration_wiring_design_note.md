@@ -1,7 +1,27 @@
 # P2.5 — M20 Orchestration Wiring: Design Note
 
-**Status:** implemented, uncommitted, held for sign-off.
+**Status:** implemented, signed off, committed.
 **Date:** 2026-07-10.
+
+> **Commit provenance — read this before `git log` confuses you.** The P2.5 code,
+> tests, and specs did **not** land under a `module20_*` commit. They were swept
+> into `6aff145` (message `"26.07.10"`), an unrelated 685-file repo-cleanup commit
+> (`.idea/` + `Deliverables/` removals, −270,177 lines), which was authored and
+> pushed to `origin/main` outside the implementation session. By the time the
+> intended commit was to be made, the work was already published, so renaming it
+> would have required rewriting pushed history. Deliberately not done.
+>
+> `module20_fundamentals_orchestration_wiring_stable` therefore contains only
+> `validate_setup_config_call_path_scoping_note.md`. To see the actual P2.5 diff:
+>
+> ```
+> git show 6aff145 -- app/services/fundamentals \
+>   app/services/proposal/step5_proposal_engine.py \
+>   app/services/pipeline/pipeline_orchestrator.py \
+>   app/services/config/ app/services/screening/m14_setup_validators.py \
+>   app/services/analysis/step4_setup_validation_engine.py \
+>   tests/test_p2_5_orchestration_wiring.py specs/
+> ```
 
 ---
 
