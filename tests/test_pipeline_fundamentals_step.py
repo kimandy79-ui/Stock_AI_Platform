@@ -165,11 +165,22 @@ class TestStepFundamentals:
         assert result.rows_processed == 0
 
     def test_default_fundamentals_provider_is_edgar(self) -> None:
+        """P2.6: built lazily, not in __init__ -- the default provider needs a
+        price_lookup bound to a db_role/run_date, and neither exists at
+        construction time. The contract is what _resolve returns."""
+        import logging
+
         from app.providers.edgar_provider import EdgarFundamentalsProvider
 
         db = _FakeDb(tickers=[])
         orch = PipelineOrchestrator(db_manager=db, provider=object())
-        assert isinstance(orch._fundamentals_provider, EdgarFundamentalsProvider)
+        assert orch._fundamentals_provider is None
+
+        resolved = orch._resolve_fundamentals_provider(
+            "prod", RUN_DATE, logging.getLogger("test")
+        )
+        assert isinstance(resolved, EdgarFundamentalsProvider)
+        assert resolved._price_lookup is not None
 
     def test_step_registered_in_step_names_and_recoverable(self) -> None:
         from app.services.pipeline.pipeline_orchestrator import (

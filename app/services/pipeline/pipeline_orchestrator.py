@@ -248,6 +248,13 @@ _SQL_FUNDAMENTALS_CHECK: Final[str] = (
     "SELECT COUNT(*) FROM ticker_fundamentals "
     "WHERE CAST(calculated_at AS DATE) = ?"
 )
+# P2.6: point-in-time close for valuation_band's P/E. close_raw (not close_adj)
+# pairs with as-reported EPS; `date <= ?` makes a future price unreachable.
+_SQL_LATEST_CLOSE_AS_OF: Final[str] = (
+    "SELECT ticker, close_raw FROM daily_prices "
+    "WHERE date <= ? AND close_raw IS NOT NULL "
+    "QUALIFY ROW_NUMBER() OVER (PARTITION BY ticker ORDER BY date DESC) = 1"
+)
 _SQL_FUNDAMENTALS_UPSERT: Final[str] = (
     "INSERT INTO ticker_fundamentals "
     "(ticker, as_of_date, eps_growth_trend, leverage_ratio, valuation_band, "
@@ -340,9 +347,10 @@ class PipelineOrchestrator:
             provider = YahooProvider()
         self._provider = provider
 
-        if fundamentals_provider is None:
-            from app.providers.edgar_provider import EdgarFundamentalsProvider
-            fundamentals_provider = EdgarFundamentalsProvider()
+        # Constructed lazily in _step_fundamentals, not here: the default
+        # provider needs a `price_lookup` bound to a db_role and a run_date, and
+        # neither is known at __init__ (both arrive on run()). An explicitly
+        # injected provider is used as-is and never rebuilt.
         self._fundamentals_provider = fundamentals_provider
 
         if benchmark_loader is None:
@@ -1056,6 +1064,70 @@ class PipelineOrchestrator:
             warnings=all_warnings,
         )
 
+    def _make_price_lookup(
+        self, db_role: str, run_date: date, log: Any
+    ) -> Any:
+        """Build the point-in-time ``(ticker, as_of_date) -> close_raw`` callable.
+
+        Feeds ``EdgarFundamentalsProvider``'s ``price_lookup``, which exists
+        solely to let ``compute_valuation_band`` bucket a P/E. Without it the
+        band is permanently ``"unknown"`` and is silently dropped from the
+        fundamentals quality mean.
+
+        ``close_raw``, never ``close_adj`` — as-reported EPS pairs with an
+        unadjusted price, and the adjusted series is retro-restated by later
+        corporate actions (same reasoning as ``market_cap``).
+
+        Point-in-time: the query is bounded by ``date <= run_date`` and the map
+        is prefetched once for that date, so a later price cannot leak in. The
+        returned callable ignores its ``as_of_date`` argument because this call
+        path only ever asks for ``run_date``; it asserts rather than silently
+        answering for a different date.
+
+        Structurally one day stale: ``fundamentals_refresh`` is ``STEP_NAMES[3]``
+        and ``price_ingestion`` is ``[4]``, so ``run_date``'s own bar is not yet
+        ingested and this resolves to the prior trading day's close. Accepted,
+        not worked around — the P/E buckets sit at 15 and 25, so an overnight
+        move only reclassifies a ticker sitting within ~1% of a boundary, and
+        reordering the pipeline steps would touch resume/delete semantics.
+        """
+        prices: dict[str, float] = {}
+        try:
+            conn = self._db.connect(db_role)
+            try:
+                rows = conn.execute(_SQL_LATEST_CLOSE_AS_OF, [run_date]).fetchall()
+            finally:
+                conn.close()
+        except Exception as exc:  # noqa: BLE001
+            log.warning(
+                "fundamentals_refresh: price lookup unavailable (%s); "
+                "valuation_band will be 'unknown'", exc,
+            )
+            return None
+
+        for ticker, close_raw in rows:
+            if close_raw is not None and float(close_raw) > 0:
+                prices[ticker] = float(close_raw)
+
+        def _lookup(ticker: str, as_of_date: date) -> float | None:
+            if as_of_date != run_date:
+                raise ValueError(
+                    f"price_lookup bound to {run_date}, asked for {as_of_date}"
+                )
+            return prices.get(ticker)
+
+        log.info("fundamentals_refresh: price lookup covers %d ticker(s)", len(prices))
+        return _lookup
+
+    def _resolve_fundamentals_provider(self, db_role: str, run_date: date, log: Any):
+        """Injected provider as-is; otherwise a default one wired for this run."""
+        if self._fundamentals_provider is not None:
+            return self._fundamentals_provider
+        from app.providers.edgar_provider import EdgarFundamentalsProvider
+        return EdgarFundamentalsProvider(
+            price_lookup=self._make_price_lookup(db_role, run_date, log)
+        )
+
     def _step_fundamentals(self, run_date: date, db_role: str, run_id: str, log: Any):
         """Ensure ``ticker_fundamentals`` is refreshed for *run_date* (Phase 4).
 
@@ -1103,6 +1175,10 @@ class PipelineOrchestrator:
                 warnings=["fundamentals_refresh: no active stock tickers"],
             )
 
+        # Built once per run: the default provider carries a price_lookup bound
+        # to this db_role/run_date (P2.6 -- valuation_band wiring).
+        fundamentals_provider = self._resolve_fundamentals_provider(db_role, run_date, log)
+
         upsert_rows: list[tuple] = []
         fetch_warnings: list[str] = []
         # Per-source counts (e.g. "sec_edgar", "yfinance_fallback") plus a
@@ -1113,7 +1189,7 @@ class PipelineOrchestrator:
         unavailable_count = 0
         for ticker in tickers:
             try:
-                result = self._fundamentals_provider.get_fundamentals(ticker, run_date)
+                result = fundamentals_provider.get_fundamentals(ticker, run_date)
             except Exception as exc:  # noqa: BLE001
                 fetch_warnings.append(f"get_fundamentals({ticker}) raised: {exc}")
                 unavailable_count += 1
