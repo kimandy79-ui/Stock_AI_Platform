@@ -285,6 +285,22 @@ M12  app/services/regime/market_regime_engine.py
      app/utils/service_result.py
 ```
 
+### Approved frozen-module deltas
+Narrow, additive exceptions to the freeze, each ratified before/at merge. The
+freeze otherwise holds; future frozen-module changes must be approved *before*
+implementation, not disclosed after.
+
+- **M04 `provider_interface.py` — `FundamentalSnapshot.shares_outstanding`**
+  (ratified 2026-07-11, commit `ef91fb0`). Additive optional field
+  `shares_outstanding: float | None = None` plus a `__post_init__` check
+  rejecting non-positive values. It is the only channel carrying the P2.4
+  cover-page share count from `get_fundamentals()` to M20's `ticker_fundamentals`
+  upsert. Same pattern as Phase 4's original `FundamentalSnapshot` /
+  `get_fundamentals` introduction (see the inline `M04_PROVIDER_INTERFACE_CONFIG_DELTA.md`
+  references in the module). Because `FundamentalSnapshot` is a
+  `@dataclass(frozen=True)`, every present and future `MarketDataProvider`
+  implementation inherits the field and its validation.
+
 ---
 
 ## Current state & next steps
