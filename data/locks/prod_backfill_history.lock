@@ -1,0 +1,1 @@
+{"pid": 27600, "started_at": "2026-07-10T23:46:48.123604+00:00", "argv": ["--start-date", "2022-08-01", "--end-date", "2026-07-08", "--tickers-file", "data/input/backfill_tickers_common_only.csv", "--no-run-validation", "--no-run-mutation", "--no-run-features", "--no-run-regime"], "cwd": "D:\\Python\\Stock_AI_Platform"}
