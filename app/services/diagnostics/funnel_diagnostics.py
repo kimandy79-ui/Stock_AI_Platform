@@ -1222,11 +1222,13 @@ _CB_PASS_RATE_WARN: Final[float] = 0.05     # consolidation_base pass rate below
 
 # Item B (CODER_NOTE 2026-07-13): step5 diversity-cap rejections are applied
 # *after* ranking as a diversity trim, not as a validation gate. Relabel them in
-# the human-readable report so they are not misread as gate failures. The raw
-# DB value (see step5_proposal_engine REJECT_INDUSTRY_CAP) is unchanged; this is
-# a display-surface mapping only.
+# the human-readable report so they are not misread as gate failures. Both caps
+# (see step5_proposal_engine REJECT_SECTOR_CAP / REJECT_INDUSTRY_CAP) are the
+# same class of post-ranking trim. The raw DB values are unchanged; this is a
+# display-surface mapping only.
 _REJECTION_DISPLAY_LABELS: Final[dict[str, str]] = {
     "industry_cap": "diversity_trim_industry_cap",
+    "sector_cap": "diversity_trim_sector_cap",
 }
 
 

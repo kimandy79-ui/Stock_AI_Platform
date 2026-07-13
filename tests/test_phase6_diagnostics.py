@@ -32,6 +32,7 @@ from app.services.diagnostics.funnel_diagnostics import (
     _borderline_proximity,
     _sort_borderline_by_proximity,
     _rpt_eligibility_rejection_reasons,
+    _rpt_s5_rejection_reasons,
 )
 from app.utils.service_result import ServiceResult
 
@@ -787,6 +788,23 @@ def test_borderline_proximity_sort_orders_correctly():
     ]
     ordered = _sort_borderline_by_proximity(rows)
     assert [r["ticker"] for r in ordered] == ["NEAR", "WIDE", "FAR", "NONE"]
+
+
+def test_s5_diversity_cap_rejections_relabeled_in_report():
+    """Both post-ranking diversity-cap rejections are relabeled in report display
+    only; the raw DB value is untouched (matching is done on the raw value)."""
+    s5 = [
+        {"rejection_reason": "industry_cap", "ticker": "AAA"},
+        {"rejection_reason": "sector_cap", "ticker": "BBB"},
+        {"rejection_reason": "rvol_too_low", "ticker": "CCC"},
+    ]
+    reasons = {r["reason"] for r in _rpt_s5_rejection_reasons(s5)}
+    assert "diversity_trim_industry_cap" in reasons
+    assert "diversity_trim_sector_cap" in reasons
+    assert "industry_cap" not in reasons
+    assert "sector_cap" not in reasons
+    # non-diversity reasons pass through unchanged
+    assert "rvol_too_low" in reasons
 
 
 def test_report_includes_eligibility_rejection_reasons():

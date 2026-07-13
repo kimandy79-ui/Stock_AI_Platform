@@ -156,10 +156,11 @@ No field may appear in both series. The CLI prints two sub-headers per setup:
 - `eligibility_rejection_reasons` — list of `{reason, count, pct_of_ineligible}`
   over step3 ineligible candidates, sorted by count desc (surfaces M13 gates such
   as `merger_pending`). Printed as CLI section `1b`.
-- `s5_rejection_reasons` — step5 rejection reasons. The diversity-cap rejection
-  `industry_cap` (a post-ranking diversity trim, not a validation gate) is
-  relabelled `diversity_trim_industry_cap` in the report **display only**; the
-  raw DB `rejection_reason` value is unchanged.
+- `s5_rejection_reasons` — step5 rejection reasons. The diversity-cap rejections
+  `industry_cap` / `sector_cap` (post-ranking diversity trims, not validation
+  gates) are relabelled `diversity_trim_industry_cap` / `diversity_trim_sector_cap`
+  in the report **display only**; the raw DB `rejection_reason` values are
+  unchanged.
 - `borderline_failures` — printed twice: CLI section `6` (sorted by
   `setup_score`, primary) and section `6b` (sorted ascending by direction-aware
   normalised distance to the failed threshold — nearest miss first).
