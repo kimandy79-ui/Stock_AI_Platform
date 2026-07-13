@@ -113,6 +113,57 @@ Each entry is classified by prefix:
 }
 ```
 
+## Report surface (`build_report`) — read-only, does not persist
+
+`build_report()` returns a rich human-readable report dict in
+`ServiceResult.metadata["report"]` (rendered by `tools/run_funnel_diagnostics.py`).
+It does **not** write to `pipeline_run_diagnostics`.
+
+### `evidence_summaries` — routed/validated population split (P0 batch, 2026-07-13)
+
+Prior to this delta the evidence section mixed populations under a single
+"step4-passed rows" header: `setup_score` was summarised over **all** step4
+rows while every other field was gated on `setup_passed == True`, so their `n`
+values silently disagreed (e.g. `setup_score n=713` next to `rvol n=14`).
+
+The section now splits each setup_type into two explicit populations, each
+carrying its own row count:
+
+```
+evidence_summaries[setup_type] = {
+    "routed_n":    <count of all step4 rows for setup_type (pass + fail)>,
+    "validated_n": <count of setup_passed == True step4 rows>,
+    "routed":    { "setup_score": {stats}, ... },
+    "validated": { "rvol": {stats}, "atr_pct": {stats}, ..., "breakout_proximity": {stats} },
+}
+```
+
+- **routed** — fields defined for every routed candidate regardless of pass/fail.
+  Currently: `setup_score`.
+- **validated** — gate-input / evidence fields that only exist for candidates
+  that cleared the validator: `rvol`, `atr_pct`, `ema20_distance_pct`,
+  `ema50_distance_pct`, `estimated_rr`, `stop_distance_pct`, `range_width_pct`,
+  `price_position_in_range`, `days_in_range`; `support_found`/`resistance_found`
+  (consolidation_base only); `breakout_proximity` (breakout only); and the
+  step5-derived `estimated_rr_s5` / `stop_distance_pct_s5` (a step5 proposal
+  only exists for a validated candidate).
+
+No field may appear in both series. The CLI prints two sub-headers per setup:
+`<setup_type> — routed (n=…)` and `<setup_type> — validated (n=…)`.
+
+### Other report sections
+
+- `eligibility_rejection_reasons` — list of `{reason, count, pct_of_ineligible}`
+  over step3 ineligible candidates, sorted by count desc (surfaces M13 gates such
+  as `merger_pending`). Printed as CLI section `1b`.
+- `s5_rejection_reasons` — step5 rejection reasons. The diversity-cap rejection
+  `industry_cap` (a post-ranking diversity trim, not a validation gate) is
+  relabelled `diversity_trim_industry_cap` in the report **display only**; the
+  raw DB `rejection_reason` value is unchanged.
+- `borderline_failures` — printed twice: CLI section `6` (sorted by
+  `setup_score`, primary) and section `6b` (sorted ascending by direction-aware
+  normalised distance to the failed threshold — nearest miss first).
+
 ## Schema: pipeline_run_diagnostics
 
 ```sql

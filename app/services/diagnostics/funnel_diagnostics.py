@@ -727,6 +727,7 @@ class SetupModeFunnelDiagnosticsService:
             "total_s5": len(s5),
         }
         report["routing_summary"]        = _rpt_routing(s3)
+        report["eligibility_rejection_reasons"] = _rpt_eligibility_rejection_reasons(s3)
         report["setup_funnel"]           = _rpt_setup_funnel(s3, s4, s5, setup_type_filter)
         report["failure_reasons"]        = _rpt_failure_reasons(s4, setup_type_filter)
         report["s5_rejection_reasons"]   = _rpt_s5_rejection_reasons(s5)
@@ -899,6 +900,33 @@ def _rpt_routing(s3: list[dict]) -> dict:
     }
 
 
+def _rpt_eligibility_rejection_reasons(s3: list[dict]) -> list[dict]:
+    """Aggregate step3 eligibility fail reasons over ineligible candidates.
+
+    Item C (CODER_NOTE 2026-07-13): surfaces the ``eligibility_fail_reasons``
+    already loaded per step3 row (equivalent to the persisted
+    ``eligibility.rejection_reason.<reason>`` metrics) so the report can show
+    which step3 gates — e.g. the M13 merger filter (``merger_pending``) — are
+    firing.  Returns ``{reason, count, pct_of_ineligible}`` sorted by count desc.
+    """
+    ineligible = [r for r in s3 if not r.get("passed_eligibility")]
+    total_ineligible = len(ineligible)
+    counts: dict[str, int] = {}
+    for r in ineligible:
+        for reason in (r.get("eligibility_fail_reasons") or []):
+            if reason:
+                counts[str(reason)] = counts.get(str(reason), 0) + 1
+
+    result = []
+    for reason, cnt in sorted(counts.items(), key=lambda x: (-x[1], x[0])):
+        result.append({
+            "reason": reason,
+            "count": cnt,
+            "pct_of_ineligible": _pct_f(cnt, total_ineligible),
+        })
+    return result
+
+
 def _rpt_setup_funnel(
     s3: list[dict],
     s4: list[dict],
@@ -991,15 +1019,39 @@ def _rpt_evidence(
     s5: list[dict],
     setup_type_filter: str | None,
 ) -> dict[str, dict]:
-    data: dict[str, dict[str, list]] = {st: {} for st in ACTIVE_SETUP_TYPES}
+    """Summarise step4/step5 evidence fields per setup_type.
+
+    Item B (CODER_NOTE 2026-07-13): the evidence output is split into two
+    explicit populations per setup so that no field silently mixes counts:
+
+    - ``routed``    — statistics over **all** step4 rows for that setup_type
+      (pass + fail).  ``setup_score`` belongs here: every routed candidate has
+      a score regardless of whether it passed validation.
+    - ``validated`` — statistics over only ``setup_passed == True`` step4 rows
+      (the gate-input fields ``rvol``/``atr_pct``/… only make sense for
+      candidates that cleared the validator).  The step5-derived ``*_s5`` fields
+      also live here: a step5 proposal only exists for a validated candidate.
+
+    Each setup entry also carries the population **row** counts ``routed_n`` and
+    ``validated_n`` (distinct from any single field's non-null ``n``), so the
+    report can label ``breakout — routed (n=713)`` vs
+    ``breakout — validated (n=14)`` unambiguously.
+    """
+    routed_data: dict[str, dict[str, list]] = {st: {} for st in ACTIVE_SETUP_TYPES}
+    validated_data: dict[str, dict[str, list]] = {st: {} for st in ACTIVE_SETUP_TYPES}
+    routed_n: dict[str, int] = {st: 0 for st in ACTIVE_SETUP_TYPES}
+    validated_n: dict[str, int] = {st: 0 for st in ACTIVE_SETUP_TYPES}
 
     for r in s4:
         st = r.get("setup_type") or ""
-        if st not in data or (setup_type_filter and st != setup_type_filter):
+        if st not in routed_data or (setup_type_filter and st != setup_type_filter):
             continue
-        d = data[st]
-        _collect(d, "setup_score", r.get("setup_score"))
+        routed_n[st] += 1
+        # routed population — score exists for every step4 row (pass or fail)
+        _collect(routed_data[st], "setup_score", r.get("setup_score"))
         if r["setup_passed"]:
+            validated_n[st] += 1
+            d = validated_data[st]
             _collect(d, "rvol", r.get("rvol"))
             _collect(d, "atr_pct", r.get("atr_pct"))
             _collect(d, "ema20_distance_pct", r.get("distance_to_ema20_pct"))
@@ -1023,17 +1075,23 @@ def _rpt_evidence(
 
     for r in s5:
         st = r.get("setup_type") or ""
-        if st not in data or (setup_type_filter and st != setup_type_filter):
+        if st not in validated_data or (setup_type_filter and st != setup_type_filter):
             continue
-        d = data[st]
+        d = validated_data[st]
         _collect(d, "estimated_rr_s5", r.get("estimated_rr"))
         _collect(d, "stop_distance_pct_s5", r.get("stop_distance_pct"))
 
-    return {
-        st: {k: _stats_of(v) for k, v in d.items()}
-        for st, d in data.items()
-        if not setup_type_filter or st == setup_type_filter
-    }
+    result: dict[str, dict] = {}
+    for st in ACTIVE_SETUP_TYPES:
+        if setup_type_filter and st != setup_type_filter:
+            continue
+        result[st] = {
+            "routed_n": routed_n[st],
+            "validated_n": validated_n[st],
+            "routed": {k: _stats_of(v) for k, v in routed_data[st].items()},
+            "validated": {k: _stats_of(v) for k, v in validated_data[st].items()},
+        }
+    return result
 
 
 def _rpt_borderline(
@@ -1068,6 +1126,41 @@ def _rpt_borderline(
             })
         result[st] = top
     return result
+
+
+def _borderline_proximity(row: dict) -> float | None:
+    """Direction-aware normalised distance from a borderline row to its threshold.
+
+    Item B (CODER_NOTE 2026-07-13). Smaller = nearer the threshold.
+
+    - "below min" rules (direction ``'<'``): ``(threshold - actual) / threshold``
+    - "above max" rules (direction ``'>'``): ``(actual - threshold) / threshold``
+
+    Returns ``None`` when the comparison is unparseable or the threshold is 0.
+    """
+    actual = _flt(row.get("actual_value"))
+    threshold = _flt(row.get("threshold"))
+    direction = row.get("direction")
+    if actual is None or threshold is None or threshold == 0:
+        return None
+    if direction == "<":
+        return (threshold - actual) / threshold
+    if direction == ">":
+        return (actual - threshold) / threshold
+    return None
+
+
+def _sort_borderline_by_proximity(rows: list[dict]) -> list[dict]:
+    """Return ``rows`` sorted ascending by :func:`_borderline_proximity`.
+
+    Rows whose distance is unparseable (``None``) sort last, preserving their
+    original relative order (stable sort).
+    """
+    def _key(r: dict) -> tuple[bool, float]:
+        d = _borderline_proximity(r)
+        return (d is None, d if d is not None else 0.0)
+
+    return sorted(rows, key=_key)
 
 
 def _rpt_layers(
@@ -1127,6 +1220,20 @@ def _rpt_ftd(s5: list[dict]) -> dict[str, int]:
 _DOMINANCE_THRESHOLD: Final[float] = 0.60   # share of selected = dominance warning
 _CB_PASS_RATE_WARN: Final[float] = 0.05     # consolidation_base pass rate below this = warning
 
+# Item B (CODER_NOTE 2026-07-13): step5 diversity-cap rejections are applied
+# *after* ranking as a diversity trim, not as a validation gate. Relabel them in
+# the human-readable report so they are not misread as gate failures. The raw
+# DB value (see step5_proposal_engine REJECT_INDUSTRY_CAP) is unchanged; this is
+# a display-surface mapping only.
+_REJECTION_DISPLAY_LABELS: Final[dict[str, str]] = {
+    "industry_cap": "diversity_trim_industry_cap",
+}
+
+
+def _display_rejection_label(key: str) -> str:
+    """Map a raw rejection key to its human-readable report label (identity by default)."""
+    return _REJECTION_DISPLAY_LABELS.get(key, key)
+
 
 def _rpt_s5_rejection_reasons(s5: list[dict]) -> list[dict]:
     """Aggregate step5 rejection_reason by normalised key across all dispositions."""
@@ -1150,7 +1257,7 @@ def _rpt_s5_rejection_reasons(s5: list[dict]) -> list[dict]:
     for key, cnt in sorted(counts.items(), key=lambda x: -x[1]):
         ex = examples.get(key, [])
         result.append({
-            "reason": key,
+            "reason": _display_rejection_label(key),
             "count": cnt,
             "pct_of_total": _pct_f(cnt, total_with_reason),
             "actual_value": ex[0][0] if ex else None,

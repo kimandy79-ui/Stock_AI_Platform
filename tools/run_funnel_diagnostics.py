@@ -27,6 +27,8 @@ sys.path.insert(0, str(_ROOT))
 from app.services.diagnostics.funnel_diagnostics import (
     SetupModeFunnelDiagnosticsService,
     ACTIVE_SETUP_TYPES,
+    _borderline_proximity,
+    _sort_borderline_by_proximity,
 )
 
 
@@ -183,6 +185,19 @@ def _print_routing(rpt: dict) -> None:
             print(f"      {st:<28}  {by_setup.get(st, 0):>5}")
 
 
+def _print_eligibility_rejections(rpt: dict) -> None:
+    _h2("1b. ELIGIBILITY REJECTION REASONS  (step3, over ineligible candidates)")
+    rows = rpt.get("eligibility_rejection_reasons", [])
+    if not rows:
+        print("    (no ineligible candidates or no reasons recorded)")
+        return
+    print(f"    {'Reason':<44}  {'Count':>6}  {'% inelig':>9}")
+    print("  " + "─" * (_W - 2))
+    for r in rows:
+        print(f"    {(r['reason'] or 'unknown'):<44}  {r['count']:>6}  "
+              f"{_pct_str(r['pct_of_ineligible']):>9}")
+
+
 def _print_setup_funnel(rpt: dict) -> None:
     _h2("2. SETUP-MODE FUNNEL")
     funnel = rpt.get("setup_funnel", [])
@@ -283,43 +298,72 @@ def _print_routing_detail(rpt: dict) -> None:
               f"consolidation-like candidates if both qualify.")
 
 
+_EVIDENCE_ROUTED_FIELDS = [
+    ("setup_score", "setup_score", 2),
+]
+_EVIDENCE_VALIDATED_FIELDS = [
+    ("rvol",                    "rvol",                  2),
+    ("atr_pct",                 "atr_pct",               4),
+    ("ema20_distance_pct",      "ema20_dist%",           4),
+    ("ema50_distance_pct",      "ema50_dist%",           4),
+    ("estimated_rr",            "estimated_rr",          2),
+    ("stop_distance_pct",       "stop_dist%",            4),
+    ("range_width_pct",         "range_width%",          4),
+    ("days_in_range",           "days_in_range",         1),
+    ("price_position_in_range", "price_pos_in_range",    3),
+    ("breakout_proximity",      "breakout_prox",         3),
+]
+_EVIDENCE_CB_FIELDS = [
+    ("support_found",    "support_found",    2),
+    ("resistance_found", "resistance_found", 2),
+]
+
+
+def _print_evidence_block(header: str, fields: list, stats_map: dict) -> None:
+    print()
+    print(f"    {header}")
+    print(f"      {'Field':<24}  {'n':>4}  {'min':>7}  {'p25':>7}  "
+          f"{'p50':>7}  {'p75':>7}  {'max':>7}  {'mean':>7}")
+    print("      " + "─" * 64)
+    printed = False
+    for key, label, dec in fields:
+        s = stats_map.get(key, {})
+        if not s or s.get("n", 0) == 0:
+            continue
+        printed = True
+        print(f"      {label:<24}  {s['n']:>4}  "
+              f"{_fmt(s['min'], dec):>7}  {_fmt(s['p25'], dec):>7}  "
+              f"{_fmt(s['p50'], dec):>7}  {_fmt(s['p75'], dec):>7}  "
+              f"{_fmt(s['max'], dec):>7}  {_fmt(s['mean'], dec):>7}")
+    if not printed:
+        print("      (no populated fields)")
+
+
 def _print_evidence(rpt: dict) -> None:
-    _h2("5. EVIDENCE SUMMARIES  (step4 passed rows)")
+    # Item B (CODER_NOTE 2026-07-13): two explicit populations per setup —
+    # routed (all step4 rows; setup_score) vs validated (setup_passed rows;
+    # gate-input fields). Each carries its own n so counts never silently mix.
+    _h2("5. EVIDENCE SUMMARIES  (routed vs validated populations)")
     evidence = rpt.get("evidence_summaries", {})
-    fields = [
-        ("setup_score",             "setup_score",          2),
-        ("rvol",                    "rvol",                  2),
-        ("atr_pct",                 "atr_pct",               4),
-        ("ema20_distance_pct",      "ema20_dist%",           4),
-        ("ema50_distance_pct",      "ema50_dist%",           4),
-        ("estimated_rr",            "estimated_rr",          2),
-        ("stop_distance_pct",       "stop_dist%",            4),
-        ("range_width_pct",         "range_width%",          4),
-        ("days_in_range",           "days_in_range",         1),
-        ("price_position_in_range", "price_pos_in_range",    3),
-    ]
-    cb_fields = [
-        ("support_found",    "support_found",    2),
-        ("resistance_found", "resistance_found", 2),
-    ]
     for st in ACTIVE_SETUP_TYPES:
         ev = evidence.get(st, {})
-        n = ev.get("setup_score", {}).get("n", 0)
-        if not n:
+        routed_n = int(ev.get("routed_n", 0) or 0)
+        validated_n = int(ev.get("validated_n", 0) or 0)
+        if not routed_n and not validated_n:
             continue
-        print()
-        print(f"    {st}  (n={n})")
-        print(f"      {'Field':<24}  {'n':>4}  {'min':>7}  {'p25':>7}  "
-              f"{'p50':>7}  {'p75':>7}  {'max':>7}  {'mean':>7}")
-        print("      " + "─" * 64)
-        for key, label, dec in fields + (cb_fields if st == "consolidation_base" else []):
-            s = ev.get(key, {})
-            if not s or s.get("n", 0) == 0:
-                continue
-            print(f"      {label:<24}  {s['n']:>4}  "
-                  f"{_fmt(s['min'], dec):>7}  {_fmt(s['p25'], dec):>7}  "
-                  f"{_fmt(s['p50'], dec):>7}  {_fmt(s['p75'], dec):>7}  "
-                  f"{_fmt(s['max'], dec):>7}  {_fmt(s['mean'], dec):>7}")
+        _print_evidence_block(
+            f"{st} — routed (n={routed_n})",
+            _EVIDENCE_ROUTED_FIELDS,
+            ev.get("routed", {}),
+        )
+        validated_fields = _EVIDENCE_VALIDATED_FIELDS + (
+            _EVIDENCE_CB_FIELDS if st == "consolidation_base" else []
+        )
+        _print_evidence_block(
+            f"{st} — validated (n={validated_n})",
+            validated_fields,
+            ev.get("validated", {}),
+        )
 
 
 def _print_borderline(rpt: dict) -> None:
@@ -337,6 +381,29 @@ def _print_borderline(rpt: dict) -> None:
             ex_s = _fmt_example(r.get("actual_value"), r.get("threshold"), r.get("direction"))
             print(f"      {r['ticker']:<8}  {_fmt(r['setup_score'], 4):>6}  "
                   f"{(r['failed_rule'] or '—'):<40}  {ex_s or '—'}")
+
+    # Item B (CODER_NOTE 2026-07-13): second view sorted by proximity to the
+    # failed threshold (nearest miss first), independent of setup_score.
+    _h2("6b. BORDERLINE — nearest to threshold  (direction-aware normalized distance)")
+    any_prox = False
+    for st in ACTIVE_SETUP_TYPES:
+        rows = bl.get(st, [])
+        if not rows:
+            continue
+        any_prox = True
+        ordered = _sort_borderline_by_proximity(rows)
+        print()
+        print(f"    {st}:")
+        print(f"      {'Ticker':<8}  {'Dist':>7}  {'Failed Rule':<40}  Comparison")
+        print("      " + "─" * 74)
+        for r in ordered:
+            dist = _borderline_proximity(r)
+            dist_s = _pct_str(dist) if dist is not None else "—"
+            ex_s = _fmt_example(r.get("actual_value"), r.get("threshold"), r.get("direction"))
+            print(f"      {r['ticker']:<8}  {dist_s:>7}  "
+                  f"{(r['failed_rule'] or '—'):<40}  {ex_s or '—'}")
+    if not any_prox:
+        print("    (no borderline failures)")
 
 
 def _print_layers(rpt: dict) -> None:
@@ -503,6 +570,7 @@ def _print_report(rpt: dict) -> None:
 
     _print_warnings(rpt)
     _print_routing(rpt)
+    _print_eligibility_rejections(rpt)
     _print_setup_funnel(rpt)
     _print_failure_reasons(rpt)
     _print_s5_rejections(rpt)

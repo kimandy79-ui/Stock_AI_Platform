@@ -29,6 +29,9 @@ from app.services.diagnostics.funnel_diagnostics import (
     ACTIVE_SETUP_TYPES,
     _normalize_validation_reason,
     _rpt_evidence,
+    _borderline_proximity,
+    _sort_borderline_by_proximity,
+    _rpt_eligibility_rejection_reasons,
 )
 from app.utils.service_result import ServiceResult
 
@@ -697,12 +700,12 @@ def test_pipeline_run_diagnostics_schema():
 # P1.3 (CODER_NOTE P1 batch, 2026-07-08): breakout_proximity instrumentation
 # --------------------------------------------------------------------------- #
 def _s4_row(setup_type: str, setup_passed: bool, breakout_proximity: float | None = None,
-            setup_score: float = 70.0) -> dict:
+            setup_score: float = 70.0, rvol: float | None = None) -> dict:
     return {
         "setup_type": setup_type,
         "setup_passed": setup_passed,
         "setup_score": setup_score,
-        "rvol": None,
+        "rvol": rvol,
         "atr_pct": None,
         "distance_to_ema20_pct": None,
         "distance_to_ema50_pct": None,
@@ -713,22 +716,92 @@ def _s4_row(setup_type: str, setup_passed: bool, breakout_proximity: float | Non
 
 
 def test_evidence_summaries_collects_breakout_proximity_for_passed_breakout():
+    # breakout_proximity is a validated-population field (only setup_passed rows).
     s4 = [_s4_row("breakout", True, breakout_proximity=-0.02)]
     result = _rpt_evidence(s4, [], None)
-    bp = result["breakout"]["breakout_proximity"]
+    bp = result["breakout"]["validated"]["breakout_proximity"]
     assert bp["n"] == 1
     assert bp["min"] == bp["max"] == -0.02
 
 
 def test_evidence_summaries_breakout_proximity_absent_when_no_passed_rows():
-    # Matches every other evidence field: only setup_passed=True rows are
+    # Matches every other validated field: only setup_passed=True rows are
     # summarized at all, so a breakout-only-failing day has no key, not n=0.
     s4 = [_s4_row("breakout", False, breakout_proximity=-0.9)]
     result = _rpt_evidence(s4, [], None)
-    assert "breakout_proximity" not in result["breakout"]
+    assert "breakout_proximity" not in result["breakout"]["validated"]
 
 
 def test_evidence_summaries_other_setup_types_have_no_breakout_proximity_key():
     s4 = [_s4_row("trend_continuation", True)]
     result = _rpt_evidence(s4, [], None)
-    assert "breakout_proximity" not in result["trend_continuation"]
+    assert "breakout_proximity" not in result["trend_continuation"]["validated"]
+
+
+# --------------------------------------------------------------------------- #
+# Item B (CODER_NOTE 2026-07-13): routed vs validated population split
+# --------------------------------------------------------------------------- #
+def test_evidence_summaries_setup_score_uses_routed_population():
+    """setup_score summarizes ALL routed step4 rows (pass + fail), never the
+    validated series."""
+    s4 = [
+        _s4_row("breakout", True, setup_score=80.0),
+        _s4_row("breakout", False, setup_score=40.0),
+    ]
+    result = _rpt_evidence(s4, [], None)
+    ev = result["breakout"]
+    assert ev["routed_n"] == 2
+    assert ev["validated_n"] == 1
+    assert ev["routed"]["setup_score"]["n"] == 2
+    assert "setup_score" not in ev["validated"]
+
+
+def test_evidence_summaries_rvol_uses_validated_population():
+    """rvol summarizes only setup_passed=True rows; the failed row's rvol is
+    excluded and rvol never appears in the routed series."""
+    s4 = [
+        _s4_row("breakout", True, rvol=2.0),
+        _s4_row("breakout", False, rvol=9.9),   # failed → must be excluded
+    ]
+    result = _rpt_evidence(s4, [], None)
+    ev = result["breakout"]
+    assert ev["validated_n"] == 1
+    rv = ev["validated"]["rvol"]
+    assert rv["n"] == 1
+    assert rv["max"] == 2.0
+    assert "rvol" not in ev["routed"]
+
+
+def test_borderline_proximity_sort_orders_correctly():
+    """Rows sort ascending by direction-aware normalized distance to threshold;
+    unparseable rows sort last."""
+    rows = [
+        {"ticker": "FAR",  "failed_rule": "rvol_low",
+         "actual_value": "0.5", "threshold": "1.5", "direction": "<"},   # (1.5-0.5)/1.5 = 0.667
+        {"ticker": "NEAR", "failed_rule": "rvol_low",
+         "actual_value": "1.4", "threshold": "1.5", "direction": "<"},   # (1.5-1.4)/1.5 = 0.067
+        {"ticker": "WIDE", "failed_rule": "stop_wide",
+         "actual_value": "0.12", "threshold": "0.10", "direction": ">"}, # (0.12-0.10)/0.10 = 0.20
+        {"ticker": "NONE", "failed_rule": "x",
+         "actual_value": None, "threshold": None, "direction": None},
+    ]
+    ordered = _sort_borderline_by_proximity(rows)
+    assert [r["ticker"] for r in ordered] == ["NEAR", "WIDE", "FAR", "NONE"]
+
+
+def test_report_includes_eligibility_rejection_reasons():
+    """Step3 eligibility fail reasons (incl. the M13 merger filter) are surfaced
+    in the report with correct counts and pct_of_ineligible."""
+    db = FakeDbManager()
+    _insert_s3(db, "AAA", False, "ineligible", fail_reasons=["merger_pending"])
+    _insert_s3(db, "BBB", False, "ineligible", fail_reasons=["merger_pending", "price_below_min"])
+    _insert_s3(db, "CCC", True, "routed", ["breakout"])
+    svc = build_svc(db)
+    result = svc.build_report(signal_date=SIG_DATE, db_role="prod", run_id=RUN_ID)
+    assert result.status in ("success", "success_with_warnings")
+    rpt = result.metadata["report"]
+    reasons = {r["reason"]: r for r in rpt["eligibility_rejection_reasons"]}
+    assert "merger_pending" in reasons, "M13 merger filter reason must be surfaced"
+    assert reasons["merger_pending"]["count"] == 2
+    assert reasons["merger_pending"]["pct_of_ineligible"] == 1.0   # 2 of 2 ineligible
+    assert reasons["price_below_min"]["count"] == 1
