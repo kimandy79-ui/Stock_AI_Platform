@@ -1,0 +1,79 @@
+up<title>Prod DB Rebuild + Universe Backfill - 2026-07-14</title>
+<style>
+:root{--bg:#fff;--fg:#1a1d21;--mut:#6b7280;--line:#e5e7eb;--accent:#2563eb;--card:#f9fafb;--new:#16a34a}
+@media (prefers-color-scheme:dark){:root{--bg:#0f1114;--fg:#e6e8eb;--mut:#9aa1ab;--line:#262b31;--accent:#60a5fa;--card:#161a1f;--new:#4ade80}}
+:root[data-theme=dark]{--bg:#0f1114;--fg:#e6e8eb;--mut:#9aa1ab;--line:#262b31;--accent:#60a5fa;--card:#161a1f;--new:#4ade80}
+:root[data-theme=light]{--bg:#fff;--fg:#1a1d21;--mut:#6b7280;--line:#e5e7eb;--accent:#2563eb;--card:#f9fafb;--new:#16a34a}
+body{background:var(--bg);color:var(--fg);font:15px/1.55 -apple-system,Segoe UI,Roboto,sans-serif;margin:0;padding:2rem 1.25rem}
+.wrap{max-width:920px;margin:0 auto}
+h1{font-size:1.55rem;margin:0 0 .25rem} h2{font-size:1.15rem;margin:2rem 0 .6rem;border-bottom:1px solid var(--line);padding-bottom:.3rem}
+.sub{color:var(--mut);margin:0 0 1.5rem}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:.75rem;margin:1rem 0}
+.kpi{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:.85rem 1rem}
+.kpi .v{font-size:1.5rem;font-weight:650} .kpi .l{color:var(--mut);font-size:.82rem}
+table{border-collapse:collapse;width:100%;font-size:.9rem}
+.scroll{overflow-x:auto}
+th,td{text-align:left;padding:.4rem .6rem;border-bottom:1px solid var(--line);white-space:nowrap}
+th{color:var(--mut);font-weight:600;font-size:.8rem;text-transform:uppercase;letter-spacing:.03em}
+.num{text-align:right;font-variant-numeric:tabular-nums}
+.t{font-family:ui-monospace,Menlo,monospace} .cat{color:var(--mut);font-size:.82rem;white-space:normal}
+.new{color:var(--new);font-weight:700;font-size:.7rem;border:1px solid var(--new);border-radius:4px;padding:0 4px;margin-left:4px}
+.note{background:var(--card);border-left:3px solid var(--accent);border-radius:0 8px 8px 0;padding:.7rem 1rem;margin:1rem 0;color:var(--fg)}
+code{font-family:ui-monospace,Menlo,monospace;background:var(--card);padding:.05rem .3rem;border-radius:4px;font-size:.85em}
+ul{margin:.4rem 0}
+</style>
+<div class=wrap>
+<h1>Production DB &mdash; Rebuild &amp; Full-Universe Backfill</h1>
+<p class=sub>Generated 2026-07-14 20:36 &middot; <code>data/duckdb/prod.duckdb</code> &middot; schema_v02</p>
+
+<div class=note><b>Summary:</b> prod was rebuilt from the Jul-9 backup (raw data only, proposals dropped), then the full ticker universe was reconciled against <code>backfill_tickers_common_only.csv</code> (32 missing tickers added), <b>all 4,082 tickers reactivated</b>, and price history backfilled across <b>2025-06-02 &rarr; 2026-07-13</b> for every ticker with gaps.</div>
+
+<div class=grid>
+<div class=kpi><div class=v>4,082</div><div class=l>active tickers (all)</div></div>
+<div class=kpi><div class=v>4,082</div><div class=l>tickers with price data</div></div>
+<div class=kpi><div class=v>1,138,664</div><div class=l>price rows</div></div>
+<div class=kpi><div class=v>279</div><div class=l>trading dates</div></div>
+</div>
+<p class=sub>Coverage: <b>2025-06-02 &rarr; 2026-07-13</b> &middot; universe: {'benchmark': 2, 'index': 1, 'stock': 4019, 'etf': 60}</p>
+
+<h2>Universe reconciliation vs CSV</h2>
+<div class=scroll><table>
+<thead><tr><th>Metric</th><th class=num>Count</th></tr></thead>
+<tbody>
+<tr><td>CSV stock tickers (<code>backfill_tickers_common_only.csv</code>)</td><td class=num>4,015</td></tr>
+<tr><td>CSV tickers now present in prod</td><td class=num>4,015 / 4,015</td></tr>
+<tr><td>Missing tickers added this run</td><td class=num>32</td></tr>
+<tr><td>Total stocks in ticker_master</td><td class=num>4,019</td></tr>
+<tr><td>&nbsp;&nbsp;of which have price data</td><td class=num>4,019 / 4,019</td></tr>
+<tr><td>Stocks current through 2026-07-13</td><td class=num>4,007</td></tr>
+<tr><td>Benchmark / ETF / index symbols</td><td class=num>63</td></tr>
+</tbody></table></div>
+<div class=note>Stocks = <b>4,019</b> = 4,015 CSV tickers + 4 legacy extras (<code>BRK-A, GOOGM, GOOGN, SPCX</code>) that were already in the DB and remain active per the &ldquo;reactivate all&rdquo; instruction. <b>4,007</b> are current through 2026-07-13; the ~12 that stop earlier (6/11&ndash;6/29) are genuinely delisted (Yahoo returns no later data).</div>
+
+<h2>Daily coverage - recent trading days</h2>
+<p class=sub>Full history (all 279 dates) is in <code>reports/prod_db_daily_coverage.csv</code>.</p>
+<div class=scroll><table>
+<thead><tr><th>Date</th><th class=num>Stock tickers</th><th class=num>Bench/ETF/index</th><th class=num>Total rows</th><th class=num>Bad-quality</th></tr></thead>
+<tbody><tr><td>2026-07-13 <span class=new>NEW</span></td><td class=num>4007</td><td class=num>63</td><td class=num>4070</td><td class=num>25</td></tr><tr><td>2026-07-10 <span class=new>NEW</span></td><td class=num>4007</td><td class=num>63</td><td class=num>4070</td><td class=num>9</td></tr><tr><td>2026-07-09 <span class=new>NEW</span></td><td class=num>4007</td><td class=num>63</td><td class=num>4070</td><td class=num>23</td></tr><tr><td>2026-07-08</td><td class=num>4007</td><td class=num>63</td><td class=num>4070</td><td class=num>23</td></tr><tr><td>2026-07-07</td><td class=num>4007</td><td class=num>63</td><td class=num>4070</td><td class=num>23</td></tr><tr><td>2026-07-06</td><td class=num>4007</td><td class=num>63</td><td class=num>4070</td><td class=num>23</td></tr><tr><td>2026-07-02</td><td class=num>4007</td><td class=num>63</td><td class=num>4070</td><td class=num>20</td></tr><tr><td>2026-07-01</td><td class=num>4007</td><td class=num>63</td><td class=num>4070</td><td class=num>21</td></tr><tr><td>2026-06-30</td><td class=num>4007</td><td class=num>63</td><td class=num>4070</td><td class=num>18</td></tr><tr><td>2026-06-29</td><td class=num>4008</td><td class=num>63</td><td class=num>4071</td><td class=num>0</td></tr><tr><td>2026-06-26</td><td class=num>4008</td><td class=num>63</td><td class=num>4071</td><td class=num>0</td></tr><tr><td>2026-06-25</td><td class=num>4008</td><td class=num>63</td><td class=num>4071</td><td class=num>0</td></tr><tr><td>2026-06-24</td><td class=num>4008</td><td class=num>63</td><td class=num>4071</td><td class=num>0</td></tr></tbody></table></div>
+
+<h2>Features / regime landed</h2>
+<p class=sub>Features are computed on-demand per signal date; the backfill landed them for its end date (2026-07-13).</p>
+<div class=scroll><table><thead><tr><th>feature_date</th><th class=num>tickers</th></tr></thead><tbody><tr><td>2026-07-13</td><td class=num>4045</td></tr><tr><td>2026-07-10</td><td class=num>16</td></tr><tr><td>2026-07-02</td><td class=num>3</td></tr><tr><td>2026-07-01</td><td class=num>1</td></tr><tr><td>2026-06-30</td><td class=num>4</td></tr><tr><td>2026-06-29</td><td class=num>2</td></tr><tr><td>2026-06-22</td><td class=num>2</td></tr><tr><td>2026-06-15</td><td class=num>1</td></tr></tbody></table></div>
+
+<h2>Data-quality repair queue</h2>
+<p class=sub>Validation flagged rows across the 279-date &times; 4,082-ticker history. These are queued for review, not blocking errors.</p>
+<div class=scroll><table><thead><tr><th>reason</th><th class=num>rows</th></tr></thead><tbody><tr><td class=t>bad_ohlc</td><td class=num>32,190</td></tr><tr><td class=t>mutation</td><td class=num>4,195</td></tr><tr><td class=t>missing_price</td><td class=num>261</td></tr></tbody></table></div>
+
+<h2>Table inventory</h2>
+<div class=scroll><table>
+<thead><tr><th>Table</th><th class=num>Rows</th><th>Category</th></tr></thead>
+<tbody><tr><td class=t>ai_reviews</td><td class=num>0</td><td class=cat>CALCULATED (empty - no proposals generated)</td></tr><tr><td class=t>config_recommendations</td><td class=num>0</td><td class=cat>CALCULATED (empty - no proposals generated)</td></tr><tr><td class=t>daily_features</td><td class=num>4,082</td><td class=cat>DERIVED (regenerated by backfill)</td></tr><tr><td class=t>daily_prices</td><td class=num>1,138,664</td><td class=cat>RAW / downloaded (prices, universe, earnings, fundamentals)</td></tr><tr><td class=t>data_repair_queue</td><td class=num>36,646</td><td class=cat>DERIVED (regenerated by backfill)</td></tr><tr><td class=t>earnings_calendar</td><td class=num>3,247</td><td class=cat>RAW / downloaded (prices, universe, earnings, fundamentals)</td></tr><tr><td class=t>execution_decisions</td><td class=num>0</td><td class=cat>CALCULATED (empty - no proposals generated)</td></tr><tr><td class=t>feature_rebuild_log</td><td class=num>4,195</td><td class=cat>DERIVED (regenerated by backfill)</td></tr><tr><td class=t>macro_events_calendar</td><td class=num>0</td><td class=cat>CALCULATED (empty - no proposals generated)</td></tr><tr><td class=t>outcome_tracking_queue</td><td class=num>0</td><td class=cat>CALCULATED (empty - no proposals generated)</td></tr><tr><td class=t>pipeline_locks</td><td class=num>0</td><td class=cat>CALCULATED (empty - no proposals generated)</td></tr><tr><td class=t>pipeline_run_diagnostics</td><td class=num>0</td><td class=cat>CALCULATED (empty - no proposals generated)</td></tr><tr><td class=t>pipeline_runs</td><td class=num>0</td><td class=cat>CALCULATED (empty - no proposals generated)</td></tr><tr><td class=t>risk_label_config</td><td class=num>1</td><td class=cat>CONFIG (seeded by init)</td></tr><tr><td class=t>schema_versions</td><td class=num>1</td><td class=cat>CONFIG (seeded by init)</td></tr><tr><td class=t>sector_alias_map</td><td class=num>18</td><td class=cat>CONFIG (seeded by init)</td></tr><tr><td class=t>sector_etf_map</td><td class=num>11</td><td class=cat>CONFIG (seeded by init)</td></tr><tr><td class=t>setup_configs</td><td class=num>4</td><td class=cat>CONFIG (seeded by init)</td></tr><tr><td class=t>signal_outcomes</td><td class=num>0</td><td class=cat>CALCULATED (empty - no proposals generated)</td></tr><tr><td class=t>step3_candidates</td><td class=num>0</td><td class=cat>CALCULATED (empty - no proposals generated)</td></tr><tr><td class=t>step4_analysis</td><td class=num>0</td><td class=cat>CALCULATED (empty - no proposals generated)</td></tr><tr><td class=t>step5_proposals</td><td class=num>0</td><td class=cat>CALCULATED (empty - no proposals generated)</td></tr><tr><td class=t>ticker_fundamentals</td><td class=num>48</td><td class=cat>RAW / downloaded (prices, universe, earnings, fundamentals)</td></tr><tr><td class=t>ticker_master</td><td class=num>4,082</td><td class=cat>RAW / downloaded (prices, universe, earnings, fundamentals)</td></tr><tr><td class=t>ticker_universe_snapshot</td><td class=num>4,015</td><td class=cat>DERIVED (regenerated by backfill)</td></tr></tbody></table></div>
+
+<h2>Notes</h2>
+<ul>
+<li>All 4,082 tickers are <code>active_flag=true, delisted_flag=false</code>.</li>
+<li>No proposals were generated (Step 3/4/5 tables empty). Run <code>tools/run_prod_pipeline.py --date &lt;signal_date&gt;</code> to generate proposals for a date.</li>
+<li><code>ticker_fundamentals</code> holds 48 copied rows; <code>shares_outstanding</code> is NULL for them (dormant optional field).</li>
+<li>Backfill returned <b>success_with_warnings</b> - warnings are the delisted / no-data notices for newer listings on early-2025 dates.</li>
+</ul>
+</div>

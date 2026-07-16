@@ -1,0 +1,1587 @@
+{
+  "run_id": "fd593ae3-fd41-4865-af22-b26cc79d4b83",
+  "signal_date": "2026-07-08",
+  "db_role": "debug",
+  "status": "success",
+  "warnings": [],
+  "report": {
+    "signal_date": "2026-07-08",
+    "db_role": "debug",
+    "run_id": "fd593ae3-fd41-4865-af22-b26cc79d4b83",
+    "total_s3": 50,
+    "total_s4": 46,
+    "total_s5": 42,
+    "routing_summary": {
+      "total_universe": 50,
+      "passed_eligibility": 27,
+      "failed_eligibility": 23,
+      "routed": 23,
+      "not_routed": 4,
+      "ineligible_no_route": 23,
+      "multi_routed": 15,
+      "by_setup": {
+        "breakout": 11,
+        "pullback": 10,
+        "trend_continuation": 17,
+        "consolidation_base": 8
+      }
+    },
+    "eligibility_rejection_reasons": [
+      {
+        "reason": "liquidity_below_min",
+        "count": 20,
+        "pct_of_ineligible": 0.8696
+      },
+      {
+        "reason": "price_below_min",
+        "count": 10,
+        "pct_of_ineligible": 0.4348
+      }
+    ],
+    "setup_funnel": [
+      {
+        "setup_type": "breakout",
+        "routed_count": 11,
+        "validator_pass_count": 0,
+        "validator_fail_count": 11,
+        "pass_rate": 0.0,
+        "step4_count": 11,
+        "step5_count": 11,
+        "selected_count": 0
+      },
+      {
+        "setup_type": "pullback",
+        "routed_count": 10,
+        "validator_pass_count": 5,
+        "validator_fail_count": 5,
+        "pass_rate": 0.5,
+        "step4_count": 10,
+        "step5_count": 10,
+        "selected_count": 2
+      },
+      {
+        "setup_type": "trend_continuation",
+        "routed_count": 17,
+        "validator_pass_count": 9,
+        "validator_fail_count": 8,
+        "pass_rate": 0.5294,
+        "step4_count": 17,
+        "step5_count": 13,
+        "selected_count": 2
+      },
+      {
+        "setup_type": "consolidation_base",
+        "routed_count": 8,
+        "validator_pass_count": 0,
+        "validator_fail_count": 8,
+        "pass_rate": 0.0,
+        "step4_count": 8,
+        "step5_count": 8,
+        "selected_count": 0
+      }
+    ],
+    "failure_reasons": [
+      {
+        "setup_type": "breakout",
+        "failure_reason": "rvol_below_hard_threshold",
+        "count": 11,
+        "pct_of_setup_failures": 1.0,
+        "actual_value": "0.60",
+        "threshold": "1.5",
+        "direction": "<",
+        "sample_tickers": [
+          "AAPL",
+          "AAT",
+          "ABG"
+        ]
+      },
+      {
+        "setup_type": "consolidation_base",
+        "failure_reason": "range_tightness_too_low",
+        "count": 4,
+        "pct_of_setup_failures": 0.5,
+        "actual_value": "57.0",
+        "threshold": "60.0",
+        "direction": "<",
+        "sample_tickers": [
+          "ABM",
+          "ACAD",
+          "ACI"
+        ]
+      },
+      {
+        "setup_type": "consolidation_base",
+        "failure_reason": "price_above_base_high",
+        "count": 2,
+        "pct_of_setup_failures": 0.25,
+        "actual_value": "25.01",
+        "threshold": "21.05",
+        "direction": ">",
+        "sample_tickers": [
+          "AAT",
+          "ACGL"
+        ]
+      },
+      {
+        "setup_type": "consolidation_base",
+        "failure_reason": "score_below_threshold",
+        "count": 1,
+        "pct_of_setup_failures": 0.125,
+        "actual_value": "49.2",
+        "threshold": "55.0",
+        "direction": "<",
+        "sample_tickers": [
+          "ABCB"
+        ]
+      },
+      {
+        "setup_type": "consolidation_base",
+        "failure_reason": "stop_below_atr_floor",
+        "count": 1,
+        "pct_of_setup_failures": 0.125,
+        "actual_value": "0.26",
+        "threshold": "0.3",
+        "direction": "<",
+        "sample_tickers": [
+          "ACM"
+        ]
+      },
+      {
+        "setup_type": "pullback",
+        "failure_reason": "pullback_too_deep",
+        "count": 3,
+        "pct_of_setup_failures": 0.6,
+        "actual_value": "0.121",
+        "threshold": "0.12",
+        "direction": ">",
+        "sample_tickers": [
+          "AAL",
+          "AAP",
+          "ACHV"
+        ]
+      },
+      {
+        "setup_type": "pullback",
+        "failure_reason": "stop_below_atr_floor",
+        "count": 2,
+        "pct_of_setup_failures": 0.4,
+        "actual_value": "0.40",
+        "threshold": "0.5",
+        "direction": "<",
+        "sample_tickers": [
+          "A",
+          "ABSI"
+        ]
+      },
+      {
+        "setup_type": "trend_continuation",
+        "failure_reason": "roc20_out_of_range",
+        "count": 3,
+        "pct_of_setup_failures": 0.375,
+        "actual_value": "-0.027 not in [0.02,0.4]",
+        "threshold": null,
+        "direction": null,
+        "sample_tickers": [
+          "A",
+          "ABSI",
+          "ABTC"
+        ]
+      },
+      {
+        "setup_type": "trend_continuation",
+        "failure_reason": "too_extended_from_ema50",
+        "count": 3,
+        "pct_of_setup_failures": 0.375,
+        "actual_value": "0.172",
+        "threshold": "0.15",
+        "direction": ">",
+        "sample_tickers": [
+          "ACHC",
+          "ACHV",
+          "ACIW"
+        ]
+      },
+      {
+        "setup_type": "trend_continuation",
+        "failure_reason": "stop_below_atr_floor",
+        "count": 2,
+        "pct_of_setup_failures": 0.25,
+        "actual_value": "0.33",
+        "threshold": "0.5",
+        "direction": "<",
+        "sample_tickers": [
+          "ACA",
+          "ACMR"
+        ]
+      }
+    ],
+    "s5_rejection_reasons": [
+      {
+        "reason": "rvol_below_hard_threshold",
+        "count": 11,
+        "pct_of_total": 0.2619,
+        "actual_value": "0.60",
+        "threshold": "1.5",
+        "direction": "<",
+        "sample_tickers": [
+          "AAPL",
+          "AAT",
+          "ABG"
+        ]
+      },
+      {
+        "reason": "diversity_trim_industry_cap",
+        "count": 6,
+        "pct_of_total": 0.1429,
+        "actual_value": null,
+        "threshold": null,
+        "direction": null,
+        "sample_tickers": [
+          "ACAD",
+          "ABCB",
+          "ABM"
+        ]
+      },
+      {
+        "reason": "stop_below_atr_floor",
+        "count": 5,
+        "pct_of_total": 0.119,
+        "actual_value": "0.40",
+        "threshold": "0.5",
+        "direction": "<",
+        "sample_tickers": [
+          "A",
+          "ABSI",
+          "ACA"
+        ]
+      },
+      {
+        "reason": "target_room_insufficient",
+        "count": 4,
+        "pct_of_total": 0.0952,
+        "actual_value": null,
+        "threshold": null,
+        "direction": null,
+        "sample_tickers": [
+          "AAT",
+          "ABNB",
+          "AAL"
+        ]
+      },
+      {
+        "reason": "range_tightness_too_low",
+        "count": 4,
+        "pct_of_total": 0.0952,
+        "actual_value": "57.0",
+        "threshold": "60.0",
+        "direction": "<",
+        "sample_tickers": [
+          "ABM",
+          "ACAD",
+          "ACI"
+        ]
+      },
+      {
+        "reason": "roc20_out_of_range",
+        "count": 3,
+        "pct_of_total": 0.0714,
+        "actual_value": "-0.027 not in [0.02,0.4]",
+        "threshold": null,
+        "direction": null,
+        "sample_tickers": [
+          "A",
+          "ABSI",
+          "ABTC"
+        ]
+      },
+      {
+        "reason": "pullback_too_deep",
+        "count": 3,
+        "pct_of_total": 0.0714,
+        "actual_value": "0.121",
+        "threshold": "0.12",
+        "direction": ">",
+        "sample_tickers": [
+          "AAL",
+          "AAP",
+          "ACHV"
+        ]
+      },
+      {
+        "reason": "too_extended_from_ema50",
+        "count": 3,
+        "pct_of_total": 0.0714,
+        "actual_value": "0.172",
+        "threshold": "0.15",
+        "direction": ">",
+        "sample_tickers": [
+          "ACHC",
+          "ACHV",
+          "ACIW"
+        ]
+      },
+      {
+        "reason": "price_above_base_high",
+        "count": 2,
+        "pct_of_total": 0.0476,
+        "actual_value": "25.01",
+        "threshold": "21.05",
+        "direction": ">",
+        "sample_tickers": [
+          "AAT",
+          "ACGL"
+        ]
+      },
+      {
+        "reason": "score_below_threshold",
+        "count": 1,
+        "pct_of_total": 0.0238,
+        "actual_value": "49.2",
+        "threshold": "55.0",
+        "direction": "<",
+        "sample_tickers": [
+          "ABCB"
+        ]
+      }
+    ],
+    "evidence_summaries": {
+      "breakout": {
+        "routed_n": 11,
+        "validated_n": 0,
+        "routed": {
+          "setup_score": {
+            "n": 11,
+            "min": 38.5684,
+            "mean": 55.3109,
+            "max": 67.6143,
+            "p25": 47.129,
+            "p50": 58.9482,
+            "p75": 63.3175
+          }
+        },
+        "validated": {}
+      },
+      "pullback": {
+        "routed_n": 10,
+        "validated_n": 5,
+        "routed": {
+          "setup_score": {
+            "n": 10,
+            "min": 51.903,
+            "mean": 74.059,
+            "max": 87.0483,
+            "p25": 71.9273,
+            "p50": 79.1672,
+            "p75": 79.7058
+          }
+        },
+        "validated": {
+          "rvol": {
+            "n": 5,
+            "min": 0.5473,
+            "mean": 0.6725,
+            "max": 0.8254,
+            "p25": 0.5895,
+            "p50": 0.6297,
+            "p75": 0.7706
+          },
+          "atr_pct": {
+            "n": 5,
+            "min": 0.022,
+            "mean": 0.0305,
+            "max": 0.0457,
+            "p25": 0.0261,
+            "p50": 0.0263,
+            "p75": 0.0321
+          },
+          "ema20_distance_pct": {
+            "n": 5,
+            "min": -0.0074,
+            "mean": 0.0309,
+            "max": 0.099,
+            "p25": 0.0032,
+            "p50": 0.0115,
+            "p75": 0.0482
+          },
+          "ema50_distance_pct": {
+            "n": 5,
+            "min": 0.0183,
+            "mean": 0.0742,
+            "max": 0.1723,
+            "p25": 0.0301,
+            "p50": 0.0434,
+            "p75": 0.1067
+          },
+          "stop_distance_pct_s5": {
+            "n": 5,
+            "min": 0.0409,
+            "mean": 0.0953,
+            "max": 0.2414,
+            "p25": 0.0433,
+            "p50": 0.0482,
+            "p75": 0.1029
+          },
+          "estimated_rr_s5": {
+            "n": 2,
+            "min": 0.2803,
+            "mean": 0.472,
+            "max": 0.6637,
+            "p25": 0.2803,
+            "p50": 0.6637,
+            "p75": 0.6637
+          }
+        }
+      },
+      "trend_continuation": {
+        "routed_n": 17,
+        "validated_n": 9,
+        "routed": {
+          "setup_score": {
+            "n": 17,
+            "min": 42.3776,
+            "mean": 62.3666,
+            "max": 71.5522,
+            "p25": 60.744,
+            "p50": 63.0611,
+            "p75": 67.8665
+          }
+        },
+        "validated": {
+          "rvol": {
+            "n": 9,
+            "min": 0.5473,
+            "mean": 0.818,
+            "max": 1.3668,
+            "p25": 0.6038,
+            "p50": 0.7706,
+            "p75": 0.8802
+          },
+          "atr_pct": {
+            "n": 9,
+            "min": 0.0205,
+            "mean": 0.028,
+            "max": 0.0441,
+            "p25": 0.022,
+            "p50": 0.0263,
+            "p75": 0.0321
+          },
+          "ema20_distance_pct": {
+            "n": 9,
+            "min": -0.0074,
+            "mean": 0.0291,
+            "max": 0.0825,
+            "p25": 0.0032,
+            "p50": 0.0218,
+            "p75": 0.0482
+          },
+          "ema50_distance_pct": {
+            "n": 9,
+            "min": 0.0183,
+            "mean": 0.0734,
+            "max": 0.1338,
+            "p25": 0.0434,
+            "p50": 0.0726,
+            "p75": 0.1027
+          },
+          "stop_distance_pct_s5": {
+            "n": 5,
+            "min": 0.0339,
+            "mean": 0.0775,
+            "max": 0.1331,
+            "p25": 0.0492,
+            "p50": 0.057,
+            "p75": 0.114
+          },
+          "estimated_rr_s5": {
+            "n": 3,
+            "min": 0.0722,
+            "mean": 0.3977,
+            "max": 1.0249,
+            "p25": 0.0722,
+            "p50": 0.0961,
+            "p75": 1.0249
+          }
+        }
+      },
+      "consolidation_base": {
+        "routed_n": 8,
+        "validated_n": 0,
+        "routed": {
+          "setup_score": {
+            "n": 8,
+            "min": 32.3648,
+            "mean": 40.7925,
+            "max": 49.1719,
+            "p25": 37.2871,
+            "p50": 41.9143,
+            "p75": 46.8672
+          }
+        },
+        "validated": {}
+      }
+    },
+    "borderline_failures": {
+      "pullback": [
+        {
+          "ticker": "AAL",
+          "setup_score": 80.6615,
+          "failed_rule": "pullback_too_deep",
+          "actual_value": "0.121",
+          "threshold": "0.12",
+          "direction": ">"
+        },
+        {
+          "ticker": "A",
+          "setup_score": 79.1672,
+          "failed_rule": "stop_below_atr_floor",
+          "actual_value": "0.40",
+          "threshold": "0.5",
+          "direction": "<"
+        },
+        {
+          "ticker": "ABSI",
+          "setup_score": 75.0945,
+          "failed_rule": "stop_below_atr_floor",
+          "actual_value": "0.29",
+          "threshold": "0.5",
+          "direction": "<"
+        },
+        {
+          "ticker": "AAP",
+          "setup_score": 71.9273,
+          "failed_rule": "pullback_too_deep",
+          "actual_value": "0.131",
+          "threshold": "0.12",
+          "direction": ">"
+        },
+        {
+          "ticker": "ACHV",
+          "setup_score": 51.903,
+          "failed_rule": "pullback_too_deep",
+          "actual_value": "0.127",
+          "threshold": "0.12",
+          "direction": ">"
+        }
+      ],
+      "trend_continuation": [
+        {
+          "ticker": "ACA",
+          "setup_score": 69.2958,
+          "failed_rule": "stop_below_atr_floor",
+          "actual_value": "0.33",
+          "threshold": "0.5",
+          "direction": "<"
+        },
+        {
+          "ticker": "A",
+          "setup_score": 64.4413,
+          "failed_rule": "roc20_out_of_range",
+          "actual_value": "-0.027 not in [0.02,0.4]",
+          "threshold": null,
+          "direction": null
+        },
+        {
+          "ticker": "ACHC",
+          "setup_score": 63.0611,
+          "failed_rule": "too_extended_from_ema50",
+          "actual_value": "0.172",
+          "threshold": "0.15",
+          "direction": ">"
+        },
+        {
+          "ticker": "ACMR",
+          "setup_score": 62.9987,
+          "failed_rule": "stop_below_atr_floor",
+          "actual_value": "0.50",
+          "threshold": "0.5",
+          "direction": "<"
+        },
+        {
+          "ticker": "ACIW",
+          "setup_score": 60.938,
+          "failed_rule": "too_extended_from_ema50",
+          "actual_value": "0.211",
+          "threshold": "0.15",
+          "direction": ">"
+        },
+        {
+          "ticker": "ACHV",
+          "setup_score": 60.744,
+          "failed_rule": "too_extended_from_ema50",
+          "actual_value": "0.164",
+          "threshold": "0.15",
+          "direction": ">"
+        },
+        {
+          "ticker": "ABSI",
+          "setup_score": 44.596,
+          "failed_rule": "roc20_out_of_range",
+          "actual_value": "0.695 not in [0.02,0.4]",
+          "threshold": null,
+          "direction": null
+        },
+        {
+          "ticker": "ABTC",
+          "setup_score": 42.3776,
+          "failed_rule": "roc20_out_of_range",
+          "actual_value": "5.504 not in [0.02,0.4]",
+          "threshold": null,
+          "direction": null
+        }
+      ],
+      "breakout": [
+        {
+          "ticker": "ACA",
+          "setup_score": 67.6143,
+          "failed_rule": "rvol_below_hard_threshold",
+          "actual_value": "0.65",
+          "threshold": "1.5",
+          "direction": "<"
+        },
+        {
+          "ticker": "ACAD",
+          "setup_score": 65.6416,
+          "failed_rule": "rvol_below_hard_threshold",
+          "actual_value": "0.88",
+          "threshold": "1.5",
+          "direction": "<"
+        },
+        {
+          "ticker": "ACIW",
+          "setup_score": 63.3175,
+          "failed_rule": "rvol_below_hard_threshold",
+          "actual_value": "1.14",
+          "threshold": "1.5",
+          "direction": "<"
+        },
+        {
+          "ticker": "AAT",
+          "setup_score": 62.5234,
+          "failed_rule": "rvol_below_hard_threshold",
+          "actual_value": "1.37",
+          "threshold": "1.5",
+          "direction": "<"
+        },
+        {
+          "ticker": "AAPL",
+          "setup_score": 60.8185,
+          "failed_rule": "rvol_below_hard_threshold",
+          "actual_value": "0.60",
+          "threshold": "1.5",
+          "direction": "<"
+        },
+        {
+          "ticker": "ABT",
+          "setup_score": 58.9482,
+          "failed_rule": "rvol_below_hard_threshold",
+          "actual_value": "0.70",
+          "threshold": "1.5",
+          "direction": "<"
+        },
+        {
+          "ticker": "ABG",
+          "setup_score": 52.4797,
+          "failed_rule": "rvol_below_hard_threshold",
+          "actual_value": "0.61",
+          "threshold": "1.5",
+          "direction": "<"
+        },
+        {
+          "ticker": "ABSI",
+          "setup_score": 49.3869,
+          "failed_rule": "rvol_below_hard_threshold",
+          "actual_value": "0.83",
+          "threshold": "1.5",
+          "direction": "<"
+        },
+        {
+          "ticker": "ACGL",
+          "setup_score": 47.129,
+          "failed_rule": "rvol_below_hard_threshold",
+          "actual_value": "0.58",
+          "threshold": "1.5",
+          "direction": "<"
+        },
+        {
+          "ticker": "ACHV",
+          "setup_score": 41.9923,
+          "failed_rule": "rvol_below_hard_threshold",
+          "actual_value": "0.86",
+          "threshold": "1.5",
+          "direction": "<"
+        }
+      ],
+      "consolidation_base": [
+        {
+          "ticker": "ABCB",
+          "setup_score": 49.1719,
+          "failed_rule": "score_below_threshold",
+          "actual_value": "49.2",
+          "threshold": "55.0",
+          "direction": "<"
+        },
+        {
+          "ticker": "ACGL",
+          "setup_score": 46.8672,
+          "failed_rule": "price_above_base_high",
+          "actual_value": "102.01",
+          "threshold": "96.11",
+          "direction": ">"
+        },
+        {
+          "ticker": "ACAD",
+          "setup_score": 42.1493,
+          "failed_rule": "range_tightness_too_low",
+          "actual_value": "54.0",
+          "threshold": "60.0",
+          "direction": "<"
+        },
+        {
+          "ticker": "AAT",
+          "setup_score": 41.9143,
+          "failed_rule": "price_above_base_high",
+          "actual_value": "25.01",
+          "threshold": "21.05",
+          "direction": ">"
+        },
+        {
+          "ticker": "ACM",
+          "setup_score": 41.3411,
+          "failed_rule": "stop_below_atr_floor",
+          "actual_value": "0.26",
+          "threshold": "0.3",
+          "direction": "<"
+        },
+        {
+          "ticker": "ABM",
+          "setup_score": 37.2871,
+          "failed_rule": "range_tightness_too_low",
+          "actual_value": "57.0",
+          "threshold": "60.0",
+          "direction": "<"
+        },
+        {
+          "ticker": "ACN",
+          "setup_score": 35.2447,
+          "failed_rule": "range_tightness_too_low",
+          "actual_value": "58.4",
+          "threshold": "60.0",
+          "direction": "<"
+        },
+        {
+          "ticker": "ACI",
+          "setup_score": 32.3648,
+          "failed_rule": "range_tightness_too_low",
+          "actual_value": "53.0",
+          "threshold": "60.0",
+          "direction": "<"
+        }
+      ]
+    },
+    "failure_layers": {
+      "ineligible": 23,
+      "not_routed": 4,
+      "routed_all_validators_failed": 13,
+      "validator_passed_no_step5": 0,
+      "step5_rejected": 32,
+      "step5_watchlist_not_selected": 6,
+      "step5_buy_diversity_rejected": 0,
+      "selected": 4
+    },
+    "final_trade_decisions": {
+      "WATCHLIST_ONLY": 10,
+      "REJECTED": 32
+    },
+    "diagnostic_warnings": [
+      {
+        "code": "consolidation_validator_too_strict_or_misconfigured",
+        "severity": "warn",
+        "message": "consolidation_base: routed=8, passed=0/8, pass_rate=0.0%",
+        "detail": {
+          "routed": 8,
+          "passed": 0,
+          "total_validated": 8,
+          "pass_rate": 0.0
+        }
+      }
+    ]
+  },
+  "pipeline_run_diagnostics": [
+    {
+      "step_name": "config_snapshot",
+      "setup_type": "breakout",
+      "metric_name": "config.setup_config",
+      "metric_value": null,
+      "reason": null,
+      "metadata_json": "{\"config_id\": \"setup_breakout_v1\", \"version\": \"breakout_v1\", \"config_hash\": \"70f4671623ce1cfa69220c6aad7ddadd743802de3eaa225b73da54f878393c81\", \"setup_type\": \"breakout\"}"
+    },
+    {
+      "step_name": "config_snapshot",
+      "setup_type": "consolidation_base",
+      "metric_name": "config.setup_config",
+      "metric_value": null,
+      "reason": null,
+      "metadata_json": "{\"config_id\": \"setup_consolidation_base_v1\", \"version\": \"consolidation_base_v1\", \"config_hash\": \"c7872c7652552d0138038ea4cb80df93839bf850945694c6f66c22650b9cdf93\", \"setup_type\": \"consolidation_base\"}"
+    },
+    {
+      "step_name": "config_snapshot",
+      "setup_type": "pullback",
+      "metric_name": "config.setup_config",
+      "metric_value": null,
+      "reason": null,
+      "metadata_json": "{\"config_id\": \"setup_pullback_v1\", \"version\": \"pullback_v1\", \"config_hash\": \"f3f1ffce25cff83fef522ed409e56c8e668170bdc460376271df807c64e0db89\", \"setup_type\": \"pullback\"}"
+    },
+    {
+      "step_name": "config_snapshot",
+      "setup_type": "trend_continuation",
+      "metric_name": "config.setup_config",
+      "metric_value": null,
+      "reason": null,
+      "metadata_json": "{\"config_id\": \"setup_trend_continuation_v1\", \"version\": \"trend_continuation_v1\", \"config_hash\": \"e1f365d3d0f030a82e8b114b48caae896f7a356752e6fa6b8a3368a9c6890e96\", \"setup_type\": \"trend_continuation\"}"
+    },
+    {
+      "step_name": "config_snapshot",
+      "setup_type": null,
+      "metric_name": "config.risk_label_config",
+      "metric_value": null,
+      "reason": null,
+      "metadata_json": "{\"config_id\": \"risk_label_config_v1\", \"version\": \"risk_v1\", \"config_hash\": \"b2378f18fa45ff52ea83f7dd99585c1177f8041b5edd2f9a291c593e130d8f85\"}"
+    },
+    {
+      "step_name": "pipeline_timing",
+      "setup_type": null,
+      "metric_name": "timing.step_duration_sec.earnings_calendar_refresh",
+      "metric_value": 8.731742400006624,
+      "reason": "earnings_calendar_refresh",
+      "metadata_json": null
+    },
+    {
+      "step_name": "pipeline_timing",
+      "setup_type": null,
+      "metric_name": "timing.step_duration_sec.feature_calculation",
+      "metric_value": 1.5731131999928039,
+      "reason": "feature_calculation",
+      "metadata_json": null
+    },
+    {
+      "step_name": "pipeline_timing",
+      "setup_type": null,
+      "metric_name": "timing.step_duration_sec.fundamentals_refresh",
+      "metric_value": 25.10220710001886,
+      "reason": "fundamentals_refresh",
+      "metadata_json": null
+    },
+    {
+      "step_name": "pipeline_timing",
+      "setup_type": null,
+      "metric_name": "timing.step_duration_sec.market_regime_classification",
+      "metric_value": 0.03224149998277426,
+      "reason": "market_regime_classification",
+      "metadata_json": null
+    },
+    {
+      "step_name": "pipeline_timing",
+      "setup_type": null,
+      "metric_name": "timing.step_duration_sec.mutation_detection",
+      "metric_value": 2.3600005079060793e-05,
+      "reason": "mutation_detection",
+      "metadata_json": null
+    },
+    {
+      "step_name": "pipeline_timing",
+      "setup_type": null,
+      "metric_name": "timing.step_duration_sec.outcome_processing",
+      "metric_value": 2.680000034160912e-05,
+      "reason": "outcome_processing",
+      "metadata_json": null
+    },
+    {
+      "step_name": "pipeline_timing",
+      "setup_type": null,
+      "metric_name": "timing.step_duration_sec.outcome_queue_creation",
+      "metric_value": 0.037744700006442145,
+      "reason": "outcome_queue_creation",
+      "metadata_json": null
+    },
+    {
+      "step_name": "pipeline_timing",
+      "setup_type": null,
+      "metric_name": "timing.step_duration_sec.price_ingestion",
+      "metric_value": 5.319999763742089e-05,
+      "reason": "price_ingestion",
+      "metadata_json": null
+    },
+    {
+      "step_name": "pipeline_timing",
+      "setup_type": null,
+      "metric_name": "timing.step_duration_sec.step3_universal_eligibility",
+      "metric_value": 0.21399299998302013,
+      "reason": "step3_universal_eligibility",
+      "metadata_json": null
+    },
+    {
+      "step_name": "pipeline_timing",
+      "setup_type": null,
+      "metric_name": "timing.step_duration_sec.step4_setup_validation",
+      "metric_value": 0.2965365999843925,
+      "reason": "step4_setup_validation",
+      "metadata_json": null
+    },
+    {
+      "step_name": "pipeline_timing",
+      "setup_type": null,
+      "metric_name": "timing.step_duration_sec.step5_proposals",
+      "metric_value": 0.33550539999851026,
+      "reason": "step5_proposals",
+      "metadata_json": null
+    },
+    {
+      "step_name": "pipeline_timing",
+      "setup_type": null,
+      "metric_name": "timing.step_duration_sec.universe_ingestion",
+      "metric_value": 0.14931280000018887,
+      "reason": "universe_ingestion",
+      "metadata_json": null
+    },
+    {
+      "step_name": "pipeline_timing",
+      "setup_type": null,
+      "metric_name": "timing.step_duration_sec.validation",
+      "metric_value": 2.6599998818710446e-05,
+      "reason": "validation",
+      "metadata_json": null
+    },
+    {
+      "step_name": "step3_routing",
+      "setup_type": "breakout",
+      "metric_name": "routing.routed",
+      "metric_value": 11.0,
+      "reason": null,
+      "metadata_json": null
+    },
+    {
+      "step_name": "step3_routing",
+      "setup_type": "consolidation_base",
+      "metric_name": "routing.routed",
+      "metric_value": 8.0,
+      "reason": null,
+      "metadata_json": null
+    },
+    {
+      "step_name": "step3_routing",
+      "setup_type": "pullback",
+      "metric_name": "routing.routed",
+      "metric_value": 10.0,
+      "reason": null,
+      "metadata_json": null
+    },
+    {
+      "step_name": "step3_routing",
+      "setup_type": "trend_continuation",
+      "metric_name": "routing.routed",
+      "metric_value": 17.0,
+      "reason": null,
+      "metadata_json": null
+    },
+    {
+      "step_name": "step3_routing",
+      "setup_type": null,
+      "metric_name": "routing.ineligible",
+      "metric_value": 23.0,
+      "reason": null,
+      "metadata_json": null
+    },
+    {
+      "step_name": "step3_routing",
+      "setup_type": null,
+      "metric_name": "routing.not_routed",
+      "metric_value": 4.0,
+      "reason": null,
+      "metadata_json": null
+    },
+    {
+      "step_name": "step3_universal_eligibility",
+      "setup_type": null,
+      "metric_name": "eligibility.failed",
+      "metric_value": 23.0,
+      "reason": null,
+      "metadata_json": null
+    },
+    {
+      "step_name": "step3_universal_eligibility",
+      "setup_type": null,
+      "metric_name": "eligibility.feature_missing",
+      "metric_value": 0.0,
+      "reason": null,
+      "metadata_json": null
+    },
+    {
+      "step_name": "step3_universal_eligibility",
+      "setup_type": null,
+      "metric_name": "eligibility.feature_ready",
+      "metric_value": 50.0,
+      "reason": null,
+      "metadata_json": null
+    },
+    {
+      "step_name": "step3_universal_eligibility",
+      "setup_type": null,
+      "metric_name": "eligibility.passed",
+      "metric_value": 27.0,
+      "reason": null,
+      "metadata_json": null
+    },
+    {
+      "step_name": "step3_universal_eligibility",
+      "setup_type": null,
+      "metric_name": "eligibility.rejection_reason.liquidity_below_min",
+      "metric_value": 20.0,
+      "reason": "liquidity_below_min",
+      "metadata_json": null
+    },
+    {
+      "step_name": "step3_universal_eligibility",
+      "setup_type": null,
+      "metric_name": "eligibility.rejection_reason.price_below_min",
+      "metric_value": 10.0,
+      "reason": "price_below_min",
+      "metadata_json": null
+    },
+    {
+      "step_name": "step3_universal_eligibility",
+      "setup_type": null,
+      "metric_name": "eligibility.total_input",
+      "metric_value": 50.0,
+      "reason": null,
+      "metadata_json": null
+    },
+    {
+      "step_name": "step4_setup_validation",
+      "setup_type": "breakout",
+      "metric_name": "validation.failed",
+      "metric_value": 11.0,
+      "reason": null,
+      "metadata_json": null
+    },
+    {
+      "step_name": "step4_setup_validation",
+      "setup_type": "breakout",
+      "metric_name": "validation.failure_reason.rvol_below_hard_threshold",
+      "metric_value": 11.0,
+      "reason": "rvol_below_hard_threshold",
+      "metadata_json": "{\"examples\": [\"1.37<1.5\", \"1.14<1.5\", \"0.86<1.5\", \"0.65<1.5\", \"0.58<1.5\"]}"
+    },
+    {
+      "step_name": "step4_setup_validation",
+      "setup_type": "breakout",
+      "metric_name": "validation.passed",
+      "metric_value": 0.0,
+      "reason": null,
+      "metadata_json": null
+    },
+    {
+      "step_name": "step4_setup_validation",
+      "setup_type": "consolidation_base",
+      "metric_name": "validation.failed",
+      "metric_value": 8.0,
+      "reason": null,
+      "metadata_json": null
+    },
+    {
+      "step_name": "step4_setup_validation",
+      "setup_type": "consolidation_base",
+      "metric_name": "validation.failure_reason.price_above_base_high",
+      "metric_value": 2.0,
+      "reason": "price_above_base_high",
+      "metadata_json": "{\"examples\": [\"close=102.01>base_high=96.11\", \"close=25.01>base_high=21.05\"]}"
+    },
+    {
+      "step_name": "step4_setup_validation",
+      "setup_type": "consolidation_base",
+      "metric_name": "validation.failure_reason.range_tightness_too_low",
+      "metric_value": 4.0,
+      "reason": "range_tightness_too_low",
+      "metadata_json": "{\"examples\": [\"54.0<60.0\", \"58.4<60.0\", \"53.0<60.0\", \"57.0<60.0\"]}"
+    },
+    {
+      "step_name": "step4_setup_validation",
+      "setup_type": "consolidation_base",
+      "metric_name": "validation.failure_reason.score_below_threshold",
+      "metric_value": 1.0,
+      "reason": "score_below_threshold",
+      "metadata_json": "{\"examples\": [\"49.2<55.0\"]}"
+    },
+    {
+      "step_name": "step4_setup_validation",
+      "setup_type": "consolidation_base",
+      "metric_name": "validation.failure_reason.stop_below_atr_floor",
+      "metric_value": 1.0,
+      "reason": "stop_below_atr_floor",
+      "metadata_json": "{\"examples\": [\"stop_atr=0.26<0.3\"]}"
+    },
+    {
+      "step_name": "step4_setup_validation",
+      "setup_type": "consolidation_base",
+      "metric_name": "validation.passed",
+      "metric_value": 0.0,
+      "reason": null,
+      "metadata_json": null
+    },
+    {
+      "step_name": "step4_setup_validation",
+      "setup_type": "pullback",
+      "metric_name": "validation.failed",
+      "metric_value": 5.0,
+      "reason": null,
+      "metadata_json": null
+    },
+    {
+      "step_name": "step4_setup_validation",
+      "setup_type": "pullback",
+      "metric_name": "validation.failure_reason.pullback_too_deep",
+      "metric_value": 3.0,
+      "reason": "pullback_too_deep",
+      "metadata_json": "{\"examples\": [\"0.131>0.12\", \"0.127>0.12\", \"0.121>0.12\"]}"
+    },
+    {
+      "step_name": "step4_setup_validation",
+      "setup_type": "pullback",
+      "metric_name": "validation.failure_reason.stop_below_atr_floor",
+      "metric_value": 2.0,
+      "reason": "stop_below_atr_floor",
+      "metadata_json": "{\"examples\": [\"stop_atr=0.40<0.5\", \"stop_atr=0.29<0.5\"]}"
+    },
+    {
+      "step_name": "step4_setup_validation",
+      "setup_type": "pullback",
+      "metric_name": "validation.passed",
+      "metric_value": 5.0,
+      "reason": null,
+      "metadata_json": null
+    },
+    {
+      "step_name": "step4_setup_validation",
+      "setup_type": "trend_continuation",
+      "metric_name": "validation.failed",
+      "metric_value": 8.0,
+      "reason": null,
+      "metadata_json": null
+    },
+    {
+      "step_name": "step4_setup_validation",
+      "setup_type": "trend_continuation",
+      "metric_name": "validation.failure_reason.roc20_out_of_range",
+      "metric_value": 3.0,
+      "reason": "roc20_out_of_range",
+      "metadata_json": "{\"examples\": [\"-0.027 not in [0.02,0.4]\", \"5.504 not in [0.02,0.4]\", \"0.695 not in [0.02,0.4]\"]}"
+    },
+    {
+      "step_name": "step4_setup_validation",
+      "setup_type": "trend_continuation",
+      "metric_name": "validation.failure_reason.stop_below_atr_floor",
+      "metric_value": 2.0,
+      "reason": "stop_below_atr_floor",
+      "metadata_json": "{\"examples\": [\"stop_atr=0.50<0.5\", \"stop_atr=0.33<0.5\"]}"
+    },
+    {
+      "step_name": "step4_setup_validation",
+      "setup_type": "trend_continuation",
+      "metric_name": "validation.failure_reason.too_extended_from_ema50",
+      "metric_value": 3.0,
+      "reason": "too_extended_from_ema50",
+      "metadata_json": "{\"examples\": [\"0.172>0.15\", \"0.164>0.15\", \"0.211>0.15\"]}"
+    },
+    {
+      "step_name": "step4_setup_validation",
+      "setup_type": "trend_continuation",
+      "metric_name": "validation.passed",
+      "metric_value": 9.0,
+      "reason": null,
+      "metadata_json": null
+    },
+    {
+      "step_name": "step5_proposals",
+      "setup_type": null,
+      "metric_name": "proposal.buy_eligible",
+      "metric_value": 0.0,
+      "reason": null,
+      "metadata_json": null
+    },
+    {
+      "step_name": "step5_proposals",
+      "setup_type": null,
+      "metric_name": "proposal.final_count",
+      "metric_value": 42.0,
+      "reason": null,
+      "metadata_json": null
+    },
+    {
+      "step_name": "step5_proposals",
+      "setup_type": null,
+      "metric_name": "proposal.rejected",
+      "metric_value": 32.0,
+      "reason": null,
+      "metadata_json": null
+    },
+    {
+      "step_name": "step5_proposals",
+      "setup_type": null,
+      "metric_name": "proposal.rejection_reason.industry_cap",
+      "metric_value": 6.0,
+      "reason": "industry_cap",
+      "metadata_json": null
+    },
+    {
+      "step_name": "step5_proposals",
+      "setup_type": null,
+      "metric_name": "proposal.rejection_reason.price_above_base_high(close=102.01>base_high=96.11)",
+      "metric_value": 1.0,
+      "reason": "price_above_base_high(close=102.01>base_high=96.11)",
+      "metadata_json": null
+    },
+    {
+      "step_name": "step5_proposals",
+      "setup_type": null,
+      "metric_name": "proposal.rejection_reason.price_above_base_high(close=25.01>base_high=21.05)",
+      "metric_value": 1.0,
+      "reason": "price_above_base_high(close=25.01>base_high=21.05)",
+      "metadata_json": null
+    },
+    {
+      "step_name": "step5_proposals",
+      "setup_type": null,
+      "metric_name": "proposal.rejection_reason.pullback_too_deep(0.121>0.12)",
+      "metric_value": 1.0,
+      "reason": "pullback_too_deep(0.121>0.12)",
+      "metadata_json": null
+    },
+    {
+      "step_name": "step5_proposals",
+      "setup_type": null,
+      "metric_name": "proposal.rejection_reason.pullback_too_deep(0.127>0.12)",
+      "metric_value": 1.0,
+      "reason": "pullback_too_deep(0.127>0.12)",
+      "metadata_json": null
+    },
+    {
+      "step_name": "step5_proposals",
+      "setup_type": null,
+      "metric_name": "proposal.rejection_reason.pullback_too_deep(0.131>0.12)",
+      "metric_value": 1.0,
+      "reason": "pullback_too_deep(0.131>0.12)",
+      "metadata_json": null
+    },
+    {
+      "step_name": "step5_proposals",
+      "setup_type": null,
+      "metric_name": "proposal.rejection_reason.range_tightness_too_low(53.0<60.0)",
+      "metric_value": 1.0,
+      "reason": "range_tightness_too_low(53.0<60.0)",
+      "metadata_json": null
+    },
+    {
+      "step_name": "step5_proposals",
+      "setup_type": null,
+      "metric_name": "proposal.rejection_reason.range_tightness_too_low(54.0<60.0)",
+      "metric_value": 1.0,
+      "reason": "range_tightness_too_low(54.0<60.0)",
+      "metadata_json": null
+    },
+    {
+      "step_name": "step5_proposals",
+      "setup_type": null,
+      "metric_name": "proposal.rejection_reason.range_tightness_too_low(57.0<60.0)",
+      "metric_value": 1.0,
+      "reason": "range_tightness_too_low(57.0<60.0)",
+      "metadata_json": null
+    },
+    {
+      "step_name": "step5_proposals",
+      "setup_type": null,
+      "metric_name": "proposal.rejection_reason.range_tightness_too_low(58.4<60.0)",
+      "metric_value": 1.0,
+      "reason": "range_tightness_too_low(58.4<60.0)",
+      "metadata_json": null
+    },
+    {
+      "step_name": "step5_proposals",
+      "setup_type": null,
+      "metric_name": "proposal.rejection_reason.roc20_out_of_range(-0.027 not in [0.02,0.4])",
+      "metric_value": 1.0,
+      "reason": "roc20_out_of_range(-0.027 not in [0.02,0.4])",
+      "metadata_json": null
+    },
+    {
+      "step_name": "step5_proposals",
+      "setup_type": null,
+      "metric_name": "proposal.rejection_reason.roc20_out_of_range(0.695 not in [0.02,0.4])",
+      "metric_value": 1.0,
+      "reason": "roc20_out_of_range(0.695 not in [0.02,0.4])",
+      "metadata_json": null
+    },
+    {
+      "step_name": "step5_proposals",
+      "setup_type": null,
+      "metric_name": "proposal.rejection_reason.roc20_out_of_range(5.504 not in [0.02,0.4])",
+      "metric_value": 1.0,
+      "reason": "roc20_out_of_range(5.504 not in [0.02,0.4])",
+      "metadata_json": null
+    },
+    {
+      "step_name": "step5_proposals",
+      "setup_type": null,
+      "metric_name": "proposal.rejection_reason.rvol_below_hard_threshold(0.58<1.5)",
+      "metric_value": 1.0,
+      "reason": "rvol_below_hard_threshold(0.58<1.5)",
+      "metadata_json": null
+    },
+    {
+      "step_name": "step5_proposals",
+      "setup_type": null,
+      "metric_name": "proposal.rejection_reason.rvol_below_hard_threshold(0.59<1.5)",
+      "metric_value": 1.0,
+      "reason": "rvol_below_hard_threshold(0.59<1.5)",
+      "metadata_json": null
+    },
+    {
+      "step_name": "step5_proposals",
+      "setup_type": null,
+      "metric_name": "proposal.rejection_reason.rvol_below_hard_threshold(0.60<1.5)",
+      "metric_value": 1.0,
+      "reason": "rvol_below_hard_threshold(0.60<1.5)",
+      "metadata_json": null
+    },
+    {
+      "step_name": "step5_proposals",
+      "setup_type": null,
+      "metric_name": "proposal.rejection_reason.rvol_below_hard_threshold(0.61<1.5)",
+      "metric_value": 1.0,
+      "reason": "rvol_below_hard_threshold(0.61<1.5)",
+      "metadata_json": null
+    },
+    {
+      "step_name": "step5_proposals",
+      "setup_type": null,
+      "metric_name": "proposal.rejection_reason.rvol_below_hard_threshold(0.65<1.5)",
+      "metric_value": 1.0,
+      "reason": "rvol_below_hard_threshold(0.65<1.5)",
+      "metadata_json": null
+    },
+    {
+      "step_name": "step5_proposals",
+      "setup_type": null,
+      "metric_name": "proposal.rejection_reason.rvol_below_hard_threshold(0.70<1.5)",
+      "metric_value": 1.0,
+      "reason": "rvol_below_hard_threshold(0.70<1.5)",
+      "metadata_json": null
+    },
+    {
+      "step_name": "step5_proposals",
+      "setup_type": null,
+      "metric_name": "proposal.rejection_reason.rvol_below_hard_threshold(0.83<1.5)",
+      "metric_value": 1.0,
+      "reason": "rvol_below_hard_threshold(0.83<1.5)",
+      "metadata_json": null
+    },
+    {
+      "step_name": "step5_proposals",
+      "setup_type": null,
+      "metric_name": "proposal.rejection_reason.rvol_below_hard_threshold(0.86<1.5)",
+      "metric_value": 1.0,
+      "reason": "rvol_below_hard_threshold(0.86<1.5)",
+      "metadata_json": null
+    },
+    {
+      "step_name": "step5_proposals",
+      "setup_type": null,
+      "metric_name": "proposal.rejection_reason.rvol_below_hard_threshold(0.88<1.5)",
+      "metric_value": 1.0,
+      "reason": "rvol_below_hard_threshold(0.88<1.5)",
+      "metadata_json": null
+    },
+    {
+      "step_name": "step5_proposals",
+      "setup_type": null,
+      "metric_name": "proposal.rejection_reason.rvol_below_hard_threshold(1.14<1.5)",
+      "metric_value": 1.0,
+      "reason": "rvol_below_hard_threshold(1.14<1.5)",
+      "metadata_json": null
+    },
+    {
+      "step_name": "step5_proposals",
+      "setup_type": null,
+      "metric_name": "proposal.rejection_reason.rvol_below_hard_threshold(1.37<1.5)",
+      "metric_value": 1.0,
+      "reason": "rvol_below_hard_threshold(1.37<1.5)",
+      "metadata_json": null
+    },
+    {
+      "step_name": "step5_proposals",
+      "setup_type": null,
+      "metric_name": "proposal.rejection_reason.score_below_threshold(49.2<55.0)",
+      "metric_value": 1.0,
+      "reason": "score_below_threshold(49.2<55.0)",
+      "metadata_json": null
+    },
+    {
+      "step_name": "step5_proposals",
+      "setup_type": null,
+      "metric_name": "proposal.rejection_reason.stop_below_atr_floor(stop_atr=0.26<0.3)",
+      "metric_value": 1.0,
+      "reason": "stop_below_atr_floor(stop_atr=0.26<0.3)",
+      "metadata_json": null
+    },
+    {
+      "step_name": "step5_proposals",
+      "setup_type": null,
+      "metric_name": "proposal.rejection_reason.stop_below_atr_floor(stop_atr=0.29<0.5)",
+      "metric_value": 1.0,
+      "reason": "stop_below_atr_floor(stop_atr=0.29<0.5)",
+      "metadata_json": null
+    },
+    {
+      "step_name": "step5_proposals",
+      "setup_type": null,
+      "metric_name": "proposal.rejection_reason.stop_below_atr_floor(stop_atr=0.33<0.5)",
+      "metric_value": 1.0,
+      "reason": "stop_below_atr_floor(stop_atr=0.33<0.5)",
+      "metadata_json": null
+    },
+    {
+      "step_name": "step5_proposals",
+      "setup_type": null,
+      "metric_name": "proposal.rejection_reason.stop_below_atr_floor(stop_atr=0.40<0.5)",
+      "metric_value": 1.0,
+      "reason": "stop_below_atr_floor(stop_atr=0.40<0.5)",
+      "metadata_json": null
+    },
+    {
+      "step_name": "step5_proposals",
+      "setup_type": null,
+      "metric_name": "proposal.rejection_reason.stop_below_atr_floor(stop_atr=0.50<0.5)",
+      "metric_value": 1.0,
+      "reason": "stop_below_atr_floor(stop_atr=0.50<0.5)",
+      "metadata_json": null
+    },
+    {
+      "step_name": "step5_proposals",
+      "setup_type": null,
+      "metric_name": "proposal.rejection_reason.target_room_insufficient",
+      "metric_value": 4.0,
+      "reason": "target_room_insufficient",
+      "metadata_json": null
+    },
+    {
+      "step_name": "step5_proposals",
+      "setup_type": null,
+      "metric_name": "proposal.rejection_reason.too_extended_from_ema50(0.164>0.15)",
+      "metric_value": 1.0,
+      "reason": "too_extended_from_ema50(0.164>0.15)",
+      "metadata_json": null
+    },
+    {
+      "step_name": "step5_proposals",
+      "setup_type": null,
+      "metric_name": "proposal.rejection_reason.too_extended_from_ema50(0.172>0.15)",
+      "metric_value": 1.0,
+      "reason": "too_extended_from_ema50(0.172>0.15)",
+      "metadata_json": null
+    },
+    {
+      "step_name": "step5_proposals",
+      "setup_type": null,
+      "metric_name": "proposal.rejection_reason.too_extended_from_ema50(0.211>0.15)",
+      "metric_value": 1.0,
+      "reason": "too_extended_from_ema50(0.211>0.15)",
+      "metadata_json": null
+    },
+    {
+      "step_name": "step5_proposals",
+      "setup_type": null,
+      "metric_name": "proposal.watchlist",
+      "metric_value": 10.0,
+      "reason": null,
+      "metadata_json": null
+    },
+    {
+      "step_name": "step5_risk_label",
+      "setup_type": null,
+      "metric_name": "risk.failure_reason.atr_pct",
+      "metric_value": 4.0,
+      "reason": "risk.failure_reason.atr_pct",
+      "metadata_json": "{\"score_examples\": [40.2, 55.1, 26.0, 33.3]}"
+    },
+    {
+      "step_name": "step5_risk_label",
+      "setup_type": null,
+      "metric_name": "risk.failure_reason.ema_extension",
+      "metric_value": 3.0,
+      "reason": "risk.failure_reason.ema_extension",
+      "metadata_json": "{\"score_examples\": [53.3, 66.9, 86.1]}"
+    },
+    {
+      "step_name": "step5_risk_label",
+      "setup_type": null,
+      "metric_name": "risk.failure_reason.liquidity",
+      "metric_value": 3.0,
+      "reason": "risk.failure_reason.liquidity",
+      "metadata_json": "{\"score_examples\": [88.8, 41.9, 65.0]}"
+    },
+    {
+      "step_name": "step5_risk_label",
+      "setup_type": null,
+      "metric_name": "risk.failure_reason.market_regime",
+      "metric_value": 10.0,
+      "reason": "risk.failure_reason.market_regime",
+      "metadata_json": "{\"score_examples\": [100.0, 100.0, 100.0, 100.0, 100.0]}"
+    },
+    {
+      "step_name": "step5_risk_label",
+      "setup_type": null,
+      "metric_name": "risk.failure_reason.setup_failed",
+      "metric_value": 32.0,
+      "reason": "risk.failure_reason.setup_failed",
+      "metadata_json": null
+    },
+    {
+      "step_name": "step5_risk_label",
+      "setup_type": null,
+      "metric_name": "risk_label.high",
+      "metric_value": 32.0,
+      "reason": null,
+      "metadata_json": null
+    },
+    {
+      "step_name": "step5_risk_label",
+      "setup_type": null,
+      "metric_name": "risk_label.low",
+      "metric_value": 0.0,
+      "reason": null,
+      "metadata_json": null
+    },
+    {
+      "step_name": "step5_risk_label",
+      "setup_type": null,
+      "metric_name": "risk_label.medium",
+      "metric_value": 10.0,
+      "reason": null,
+      "metadata_json": null
+    },
+    {
+      "step_name": "step5_risk_label",
+      "setup_type": null,
+      "metric_name": "rr.failure_reason.estimated_rr",
+      "metric_value": 10.0,
+      "reason": "rr.failure_reason.estimated_rr",
+      "metadata_json": "{\"score_examples\": [100.0, 100.0, 100.0, 100.0, 65.8]}"
+    },
+    {
+      "step_name": "step5_risk_label",
+      "setup_type": null,
+      "metric_name": "stop.failure_reason.stop_distance_pct",
+      "metric_value": 10.0,
+      "reason": "stop.failure_reason.stop_distance_pct",
+      "metadata_json": "{\"score_examples\": [22.6, 28.9, 38.0, 68.6, 32.8]}"
+    }
+  ]
+}

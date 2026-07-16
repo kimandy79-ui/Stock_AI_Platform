@@ -239,3 +239,120 @@ scoring-only, `enforce_compression_floor` default-False). The M12 freeze
 remains the default; this carve-out does not reopen M12 for any other change.
 
 ---
+
+## 22.26 consolidation_base score recalibration (pending sign-off)
+
+**Status: DRAFT — held for owner sign-off. Not yet implemented, not yet
+active.** Written per the diagnostics-first / no-pre-diagnostic-tuning
+principle: this AD exists *because* 5-date empirical data now supports a
+calibration decision that was explicitly deferred pending exactly this data
+(see `funnel_diagnostics_2026-07-10.md` §Architect notes and the
+2026-06-11/18/26, 07-02/08 campaign).
+
+**Problem:** `consolidation_base` validator pass rate is pinned at 1.2–2.6%
+across 5 independent trading dates spanning both low-RVOL (0.76–0.87) and
+high-RVOL (1.56–1.83) regimes — unlike `breakout`, whose pass rate swings an
+order of magnitude with RVOL (4.4–8.1% low-vol vs. 59.0–68.2% high-vol),
+`consolidation_base` shows **no regime sensitivity at all**. This rules out
+"quiet market" as an explanation.
+
+The routed-population `setup_score` distribution for `consolidation_base` is
+stationary and sits entirely below the shared 55.0 pass threshold on every
+date:
+
+| Date | n | p25 | p50 | p75 | max |
+|---|--:|--:|--:|--:|--:|
+| 2026-06-11 | 630 | 40.69 | 44.86 | 48.18 | 66.87 |
+| 2026-06-18 | 598 | 37.94 | 42.49 | 45.41 | 71.38 |
+| 2026-06-26 | 612 | 40.71 | 44.17 | 47.39 | 69.06 |
+| 2026-07-02 | 642 | 39.37 | 43.34 | 46.27 | 85.39 |
+| 2026-07-08 | 633 | 38.66 | 41.51 | 44.88 | 77.78 |
+
+Median sits 10–13 points below threshold on every date; even p75 (top
+quartile of the *routed* population, before any validation) never clears
+48.2 — 6.8+ points short of 55.0. `score_below_threshold` is consistently the
+#2 or #3 failure reason (17–24% of failures) alongside
+`range_tightness_too_low` (38–43%) and `price_above_base_high` (20–33%),
+which are separate, apparently well-behaved gates showing no evidence of the
+same miscalibration.
+
+**Root-cause framing (not yet confirmed at code level — see open item
+below):** two non-exclusive explanations fit the data: (1) the
+`consolidation_base` scoring formula's output scale does not match the 55.0
+threshold's intended scale (formula produces systematically lower values
+than the other three setups' scorers, which sit comfortably above their
+thresholds on the same dates — see the 07-10 report §6: pullback p50=74.98,
+trend_continuation p50=66.13 against the same 55.0 threshold); (2) the 55.0
+threshold was calibrated against an earlier/different version of the
+`consolidation_base` scoring formula and was never re-validated after a
+formula change.
+
+**Options:**
+
+- **Option 1 — Rescale/recalibrate the `consolidation_base` scorer.** Adjust
+  the scoring formula's output range so its distribution sits in the same
+  rough band as the other three setups' scorers (all cluster with p50 in the
+  low-to-high 60s–70s against the shared 55.0 threshold). Keeps a single
+  shared pass threshold across all setups — simpler mental model, but
+  requires identifying exactly which scoring sub-components are responsible
+  for the scale gap and confirming the fix doesn't change *relative* ranking
+  within `consolidation_base` candidates (only the absolute scale).
+- **Option 2 — Give `consolidation_base` its own threshold.** Leave the
+  scorer as-is; set a setup-specific pass threshold calibrated to its actual
+  distribution (e.g., in the 45–48 range, informed by the p75 ceiling
+  above). Smaller, safer change (config-only, no formula code touched) but
+  breaks the "one shared 55.0 threshold" simplicity and requires deciding
+  the new threshold value defensibly rather than by feel.
+
+**Architect's leaning (not a decision):** Option 1. `range_tightness_too_low`
+and `price_above_base_high` are separately-gating and show no sign of the
+same problem, which suggests the score component specifically is the
+outlier needing correction — not that `consolidation_base` as a setup type
+is inherently harder to qualify for. Rescaling the scorer to match the other
+three setups' bands preserves the "one shared threshold across setups"
+design and avoids introducing a fifth calibration knob (`consolidation_base`
+would be the only setup with its own bespoke threshold under Option 2). This
+is a lean, not a final call — flagging for owner sign-off since it touches
+the scoring formula, which is closer to core logic than a config value.
+
+**Impact if Option 1 is chosen:**
+- Touches `consolidation_base` scoring formula code (frozen-module
+  implications — not part of the original AD-22.24 migration exemption;
+  needs its own frozen-module carve-out, narrow and scoped to this formula
+  only, same pattern as AD-22.25's M12 carve-out).
+- Requires before/after golden-diff-style validation: rescaled scores must
+  preserve relative ranking order among `consolidation_base` candidates
+  (i.e., a candidate that scored higher than another before rescaling must
+  still score higher after) — this is a scale transform, not a re-ranking.
+- `risk_label_config` and any downstream consumer of `setup_score` for
+  `consolidation_base` (ranking, diversification) should be checked for any
+  hardcoded assumption about the setup's score range.
+
+**Impact if Option 2 is chosen:**
+- Config-only change to `consolidation_base`'s entry in `setup_configs`
+  (`setup_consolidation_base_v1`) — no code/formula change, no
+  frozen-module question.
+- Exact threshold value needs to be picked defensibly — recommend deriving
+  from a percentile target (e.g., "threshold = p75 minus small margin" or
+  similar) rather than an arbitrary round number, and validating against a
+  few additional out-of-sample dates before locking it in.
+
+**Not decided here (explicitly out of scope for this AD):**
+- The exact rescaled formula or exact new threshold value — that's
+  implementation detail for whichever option is chosen, done in a follow-up
+  coder note after sign-off.
+- Any change to `range_tightness_too_low` or `price_above_base_high` gates —
+  no evidence in the campaign data that these need adjustment.
+- Any change to `breakout`'s RVOL gate — separately confirmed as correctly
+  calibrated by the same campaign (see campaign verdict, 2026-07-15).
+
+**Decision required from owner:** Option 1 (rescale scorer) vs. Option 2
+(per-setup threshold) vs. defer pending additional data (e.g., out-of-sample
+dates in a non-bull regime, since all 5 campaign dates were classified
+`bull`).
+
+**Once decided:** this entry updates from DRAFT to the owner's final
+decision, and a scoped coder note is written for implementation — including
+the frozen-module carve-out language if Option 1 is chosen.
+
+---

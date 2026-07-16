@@ -1,0 +1,1143 @@
+INFO tools.backfill_prod_history: Removing stale backfill lock (pid=22976 is not alive)
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=True path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.universe.universe_snapshot: apply_snapshot start db_role=prod source=file as_of_date=2026-07-10 snapshot_month=2026-07-01 input_rows=3980
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.universe.universe_snapshot: apply_snapshot done status=success inserted=0 updated=3980 marked_inactive=70 snapshot_rows=3980 skipped=0
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=True path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.benchmarks.benchmark_etf_loader: load start db_role=prod start_date=2026-07-09 end_date=2026-07-10 symbols_requested=63
+INFO app.providers.yahoo_provider: fetching price history ticker=SPY start=2026-07-09 end=2026-07-10 (vendor_end=2026-07-11)
+INFO app.providers.yahoo_provider: mapped 2 price bar(s) for ticker=SPY status=success
+INFO app.services.benchmarks.benchmark_etf_loader: symbol SPY loaded symbol_type=benchmark bars=2
+INFO app.providers.yahoo_provider: fetching price history ticker=QQQ start=2026-07-09 end=2026-07-10 (vendor_end=2026-07-11)
+INFO app.providers.yahoo_provider: mapped 2 price bar(s) for ticker=QQQ status=success
+INFO app.services.benchmarks.benchmark_etf_loader: symbol QQQ loaded symbol_type=benchmark bars=2
+INFO app.providers.yahoo_provider: fetching price history ticker=^VIX start=2026-07-09 end=2026-07-10 (vendor_end=2026-07-11)
+INFO app.providers.yahoo_provider: mapped 2 price bar(s) for ticker=^VIX status=success
+INFO app.services.benchmarks.benchmark_etf_loader: symbol ^VIX loaded symbol_type=index bars=2
+INFO app.providers.yahoo_provider: fetching price history ticker=XLB start=2026-07-09 end=2026-07-10 (vendor_end=2026-07-11)
+INFO app.providers.yahoo_provider: mapped 2 price bar(s) for ticker=XLB status=success
+INFO app.services.benchmarks.benchmark_etf_loader: symbol XLB loaded symbol_type=etf bars=2
+INFO app.providers.yahoo_provider: fetching price history ticker=XLC start=2026-07-09 end=2026-07-10 (vendor_end=2026-07-11)
+INFO app.providers.yahoo_provider: mapped 2 price bar(s) for ticker=XLC status=success
+INFO app.services.benchmarks.benchmark_etf_loader: symbol XLC loaded symbol_type=etf bars=2
+INFO app.providers.yahoo_provider: fetching price history ticker=XLE start=2026-07-09 end=2026-07-10 (vendor_end=2026-07-11)
+INFO app.providers.yahoo_provider: mapped 2 price bar(s) for ticker=XLE status=success
+INFO app.services.benchmarks.benchmark_etf_loader: symbol XLE loaded symbol_type=etf bars=2
+INFO app.providers.yahoo_provider: fetching price history ticker=XLF start=2026-07-09 end=2026-07-10 (vendor_end=2026-07-11)
+INFO app.providers.yahoo_provider: mapped 2 price bar(s) for ticker=XLF status=success
+INFO app.services.benchmarks.benchmark_etf_loader: symbol XLF loaded symbol_type=etf bars=2
+INFO app.providers.yahoo_provider: fetching price history ticker=XLI start=2026-07-09 end=2026-07-10 (vendor_end=2026-07-11)
+INFO app.providers.yahoo_provider: mapped 2 price bar(s) for ticker=XLI status=success
+INFO app.services.benchmarks.benchmark_etf_loader: symbol XLI loaded symbol_type=etf bars=2
+INFO app.providers.yahoo_provider: fetching price history ticker=XLK start=2026-07-09 end=2026-07-10 (vendor_end=2026-07-11)
+INFO app.providers.yahoo_provider: mapped 2 price bar(s) for ticker=XLK status=success
+INFO app.services.benchmarks.benchmark_etf_loader: symbol XLK loaded symbol_type=etf bars=2
+INFO app.providers.yahoo_provider: fetching price history ticker=XLP start=2026-07-09 end=2026-07-10 (vendor_end=2026-07-11)
+INFO app.providers.yahoo_provider: mapped 2 price bar(s) for ticker=XLP status=success
+INFO app.services.benchmarks.benchmark_etf_loader: symbol XLP loaded symbol_type=etf bars=2
+INFO app.providers.yahoo_provider: fetching price history ticker=XLU start=2026-07-09 end=2026-07-10 (vendor_end=2026-07-11)
+INFO app.providers.yahoo_provider: mapped 2 price bar(s) for ticker=XLU status=success
+INFO app.services.benchmarks.benchmark_etf_loader: symbol XLU loaded symbol_type=etf bars=2
+INFO app.providers.yahoo_provider: fetching price history ticker=XLV start=2026-07-09 end=2026-07-10 (vendor_end=2026-07-11)
+INFO app.providers.yahoo_provider: mapped 2 price bar(s) for ticker=XLV status=success
+INFO app.services.benchmarks.benchmark_etf_loader: symbol XLV loaded symbol_type=etf bars=2
+INFO app.providers.yahoo_provider: fetching price history ticker=XLY start=2026-07-09 end=2026-07-10 (vendor_end=2026-07-11)
+INFO app.providers.yahoo_provider: mapped 2 price bar(s) for ticker=XLY status=success
+INFO app.services.benchmarks.benchmark_etf_loader: symbol XLY loaded symbol_type=etf bars=2
+INFO app.providers.yahoo_provider: fetching price history ticker=XLRE start=2026-07-09 end=2026-07-10 (vendor_end=2026-07-11)
+INFO app.providers.yahoo_provider: mapped 2 price bar(s) for ticker=XLRE status=success
+INFO app.services.benchmarks.benchmark_etf_loader: symbol XLRE loaded symbol_type=etf bars=2
+INFO app.providers.yahoo_provider: fetching price history ticker=COPX start=2026-07-09 end=2026-07-10 (vendor_end=2026-07-11)
+INFO app.providers.yahoo_provider: mapped 2 price bar(s) for ticker=COPX status=success
+INFO app.services.benchmarks.benchmark_etf_loader: symbol COPX loaded symbol_type=etf bars=2
+INFO app.providers.yahoo_provider: fetching price history ticker=GDX start=2026-07-09 end=2026-07-10 (vendor_end=2026-07-11)
+INFO app.providers.yahoo_provider: mapped 2 price bar(s) for ticker=GDX status=success
+INFO app.services.benchmarks.benchmark_etf_loader: symbol GDX loaded symbol_type=etf bars=2
+INFO app.providers.yahoo_provider: fetching price history ticker=MOO start=2026-07-09 end=2026-07-10 (vendor_end=2026-07-11)
+INFO app.providers.yahoo_provider: mapped 2 price bar(s) for ticker=MOO status=success
+INFO app.services.benchmarks.benchmark_etf_loader: symbol MOO loaded symbol_type=etf bars=2
+INFO app.providers.yahoo_provider: fetching price history ticker=PICK start=2026-07-09 end=2026-07-10 (vendor_end=2026-07-11)
+INFO app.providers.yahoo_provider: mapped 2 price bar(s) for ticker=PICK status=success
+INFO app.services.benchmarks.benchmark_etf_loader: symbol PICK loaded symbol_type=etf bars=2
+INFO app.providers.yahoo_provider: fetching price history ticker=SIL start=2026-07-09 end=2026-07-10 (vendor_end=2026-07-11)
+INFO app.providers.yahoo_provider: mapped 2 price bar(s) for ticker=SIL status=success
+INFO app.services.benchmarks.benchmark_etf_loader: symbol SIL loaded symbol_type=etf bars=2
+INFO app.providers.yahoo_provider: fetching price history ticker=SLX start=2026-07-09 end=2026-07-10 (vendor_end=2026-07-11)
+INFO app.providers.yahoo_provider: mapped 2 price bar(s) for ticker=SLX status=success
+INFO app.services.benchmarks.benchmark_etf_loader: symbol SLX loaded symbol_type=etf bars=2
+INFO app.providers.yahoo_provider: fetching price history ticker=WOOD start=2026-07-09 end=2026-07-10 (vendor_end=2026-07-11)
+INFO app.providers.yahoo_provider: mapped 2 price bar(s) for ticker=WOOD status=success
+INFO app.services.benchmarks.benchmark_etf_loader: symbol WOOD loaded symbol_type=etf bars=2
+INFO app.providers.yahoo_provider: fetching price history ticker=ESPO start=2026-07-09 end=2026-07-10 (vendor_end=2026-07-11)
+INFO app.providers.yahoo_provider: mapped 2 price bar(s) for ticker=ESPO status=success
+INFO app.services.benchmarks.benchmark_etf_loader: symbol ESPO loaded symbol_type=etf bars=2
+INFO app.providers.yahoo_provider: fetching price history ticker=FDN start=2026-07-09 end=2026-07-10 (vendor_end=2026-07-11)
+INFO app.providers.yahoo_provider: mapped 2 price bar(s) for ticker=FDN status=success
+INFO app.services.benchmarks.benchmark_etf_loader: symbol FDN loaded symbol_type=etf bars=2
+INFO app.providers.yahoo_provider: fetching price history ticker=IYZ start=2026-07-09 end=2026-07-10 (vendor_end=2026-07-11)
+INFO app.providers.yahoo_provider: mapped 2 price bar(s) for ticker=IYZ status=success
+INFO app.services.benchmarks.benchmark_etf_loader: symbol IYZ loaded symbol_type=etf bars=2
+INFO app.providers.yahoo_provider: fetching price history ticker=PEJ start=2026-07-09 end=2026-07-10 (vendor_end=2026-07-11)
+INFO app.providers.yahoo_provider: mapped 2 price bar(s) for ticker=PEJ status=success
+INFO app.services.benchmarks.benchmark_etf_loader: symbol PEJ loaded symbol_type=etf bars=2
+INFO app.providers.yahoo_provider: fetching price history ticker=CARZ start=2026-07-09 end=2026-07-10 (vendor_end=2026-07-11)
+INFO app.providers.yahoo_provider: mapped 2 price bar(s) for ticker=CARZ status=success
+INFO app.services.benchmarks.benchmark_etf_loader: symbol CARZ loaded symbol_type=etf bars=2
+INFO app.providers.yahoo_provider: fetching price history ticker=IBUY start=2026-07-09 end=2026-07-10 (vendor_end=2026-07-11)
+INFO app.providers.yahoo_provider: mapped 2 price bar(s) for ticker=IBUY status=success
+INFO app.services.benchmarks.benchmark_etf_loader: symbol IBUY loaded symbol_type=etf bars=2
+INFO app.providers.yahoo_provider: fetching price history ticker=ITB start=2026-07-09 end=2026-07-10 (vendor_end=2026-07-11)
+INFO app.providers.yahoo_provider: mapped 2 price bar(s) for ticker=ITB status=success
+INFO app.services.benchmarks.benchmark_etf_loader: symbol ITB loaded symbol_type=etf bars=2
+INFO app.providers.yahoo_provider: fetching price history ticker=XRT start=2026-07-09 end=2026-07-10 (vendor_end=2026-07-11)
+INFO app.providers.yahoo_provider: mapped 2 price bar(s) for ticker=XRT status=success
+INFO app.services.benchmarks.benchmark_etf_loader: symbol XRT loaded symbol_type=etf bars=2
+INFO app.providers.yahoo_provider: fetching price history ticker=PBJ start=2026-07-09 end=2026-07-10 (vendor_end=2026-07-11)
+INFO app.providers.yahoo_provider: mapped 2 price bar(s) for ticker=PBJ status=success
+INFO app.services.benchmarks.benchmark_etf_loader: symbol PBJ loaded symbol_type=etf bars=2
+INFO app.providers.yahoo_provider: fetching price history ticker=AMLP start=2026-07-09 end=2026-07-10 (vendor_end=2026-07-11)
+INFO app.providers.yahoo_provider: mapped 2 price bar(s) for ticker=AMLP status=success
+INFO app.services.benchmarks.benchmark_etf_loader: symbol AMLP loaded symbol_type=etf bars=2
+INFO app.providers.yahoo_provider: fetching price history ticker=CRAK start=2026-07-09 end=2026-07-10 (vendor_end=2026-07-11)
+INFO app.providers.yahoo_provider: mapped 2 price bar(s) for ticker=CRAK status=success
+INFO app.services.benchmarks.benchmark_etf_loader: symbol CRAK loaded symbol_type=etf bars=2
+INFO app.providers.yahoo_provider: fetching price history ticker=OIH start=2026-07-09 end=2026-07-10 (vendor_end=2026-07-11)
+INFO app.providers.yahoo_provider: mapped 2 price bar(s) for ticker=OIH status=success
+INFO app.services.benchmarks.benchmark_etf_loader: symbol OIH loaded symbol_type=etf bars=2
+INFO app.providers.yahoo_provider: fetching price history ticker=URA start=2026-07-09 end=2026-07-10 (vendor_end=2026-07-11)
+INFO app.providers.yahoo_provider: mapped 2 price bar(s) for ticker=URA status=success
+INFO app.services.benchmarks.benchmark_etf_loader: symbol URA loaded symbol_type=etf bars=2
+INFO app.providers.yahoo_provider: fetching price history ticker=XOP start=2026-07-09 end=2026-07-10 (vendor_end=2026-07-11)
+INFO app.providers.yahoo_provider: mapped 2 price bar(s) for ticker=XOP status=success
+INFO app.services.benchmarks.benchmark_etf_loader: symbol XOP loaded symbol_type=etf bars=2
+INFO app.providers.yahoo_provider: fetching price history ticker=IAI start=2026-07-09 end=2026-07-10 (vendor_end=2026-07-11)
+INFO app.providers.yahoo_provider: mapped 2 price bar(s) for ticker=IAI status=success
+INFO app.services.benchmarks.benchmark_etf_loader: symbol IAI loaded symbol_type=etf bars=2
+INFO app.providers.yahoo_provider: fetching price history ticker=IAK start=2026-07-09 end=2026-07-10 (vendor_end=2026-07-11)
+INFO app.providers.yahoo_provider: mapped 2 price bar(s) for ticker=IAK status=success
+INFO app.services.benchmarks.benchmark_etf_loader: symbol IAK loaded symbol_type=etf bars=2
+INFO app.providers.yahoo_provider: fetching price history ticker=KBE start=2026-07-09 end=2026-07-10 (vendor_end=2026-07-11)
+INFO app.providers.yahoo_provider: mapped 2 price bar(s) for ticker=KBE status=success
+INFO app.services.benchmarks.benchmark_etf_loader: symbol KBE loaded symbol_type=etf bars=2
+INFO app.providers.yahoo_provider: fetching price history ticker=KRE start=2026-07-09 end=2026-07-10 (vendor_end=2026-07-11)
+INFO app.providers.yahoo_provider: mapped 2 price bar(s) for ticker=KRE status=success
+INFO app.services.benchmarks.benchmark_etf_loader: symbol KRE loaded symbol_type=etf bars=2
+INFO app.providers.yahoo_provider: fetching price history ticker=REM start=2026-07-09 end=2026-07-10 (vendor_end=2026-07-11)
+INFO app.providers.yahoo_provider: mapped 2 price bar(s) for ticker=REM status=success
+INFO app.services.benchmarks.benchmark_etf_loader: symbol REM loaded symbol_type=etf bars=2
+INFO app.providers.yahoo_provider: fetching price history ticker=IHE start=2026-07-09 end=2026-07-10 (vendor_end=2026-07-11)
+INFO app.providers.yahoo_provider: mapped 2 price bar(s) for ticker=IHE status=success
+INFO app.services.benchmarks.benchmark_etf_loader: symbol IHE loaded symbol_type=etf bars=2
+INFO app.providers.yahoo_provider: fetching price history ticker=IHF start=2026-07-09 end=2026-07-10 (vendor_end=2026-07-11)
+INFO app.providers.yahoo_provider: mapped 2 price bar(s) for ticker=IHF status=success
+INFO app.services.benchmarks.benchmark_etf_loader: symbol IHF loaded symbol_type=etf bars=2
+INFO app.providers.yahoo_provider: fetching price history ticker=IHI start=2026-07-09 end=2026-07-10 (vendor_end=2026-07-11)
+INFO app.providers.yahoo_provider: mapped 2 price bar(s) for ticker=IHI status=success
+INFO app.services.benchmarks.benchmark_etf_loader: symbol IHI loaded symbol_type=etf bars=2
+INFO app.providers.yahoo_provider: fetching price history ticker=XBI start=2026-07-09 end=2026-07-10 (vendor_end=2026-07-11)
+INFO app.providers.yahoo_provider: mapped 2 price bar(s) for ticker=XBI status=success
+INFO app.services.benchmarks.benchmark_etf_loader: symbol XBI loaded symbol_type=etf bars=2
+INFO app.providers.yahoo_provider: fetching price history ticker=BOAT start=2026-07-09 end=2026-07-10 (vendor_end=2026-07-11)
+INFO app.providers.yahoo_provider: mapped 2 price bar(s) for ticker=BOAT status=success
+INFO app.services.benchmarks.benchmark_etf_loader: symbol BOAT loaded symbol_type=etf bars=2
+INFO app.providers.yahoo_provider: fetching price history ticker=IFRA start=2026-07-09 end=2026-07-10 (vendor_end=2026-07-11)
+INFO app.providers.yahoo_provider: mapped 2 price bar(s) for ticker=IFRA status=success
+INFO app.services.benchmarks.benchmark_etf_loader: symbol IFRA loaded symbol_type=etf bars=2
+INFO app.providers.yahoo_provider: fetching price history ticker=ITA start=2026-07-09 end=2026-07-10 (vendor_end=2026-07-11)
+INFO app.providers.yahoo_provider: mapped 2 price bar(s) for ticker=ITA status=success
+INFO app.services.benchmarks.benchmark_etf_loader: symbol ITA loaded symbol_type=etf bars=2
+INFO app.providers.yahoo_provider: fetching price history ticker=IYT start=2026-07-09 end=2026-07-10 (vendor_end=2026-07-11)
+INFO app.providers.yahoo_provider: mapped 2 price bar(s) for ticker=IYT status=success
+INFO app.services.benchmarks.benchmark_etf_loader: symbol IYT loaded symbol_type=etf bars=2
+INFO app.providers.yahoo_provider: fetching price history ticker=JETS start=2026-07-09 end=2026-07-10 (vendor_end=2026-07-11)
+INFO app.providers.yahoo_provider: mapped 2 price bar(s) for ticker=JETS status=success
+INFO app.services.benchmarks.benchmark_etf_loader: symbol JETS loaded symbol_type=etf bars=2
+INFO app.providers.yahoo_provider: fetching price history ticker=PAVE start=2026-07-09 end=2026-07-10 (vendor_end=2026-07-11)
+INFO app.providers.yahoo_provider: mapped 2 price bar(s) for ticker=PAVE status=success
+INFO app.services.benchmarks.benchmark_etf_loader: symbol PAVE loaded symbol_type=etf bars=2
+INFO app.providers.yahoo_provider: fetching price history ticker=XHB start=2026-07-09 end=2026-07-10 (vendor_end=2026-07-11)
+INFO app.providers.yahoo_provider: mapped 2 price bar(s) for ticker=XHB status=success
+INFO app.services.benchmarks.benchmark_etf_loader: symbol XHB loaded symbol_type=etf bars=2
+INFO app.providers.yahoo_provider: fetching price history ticker=XME start=2026-07-09 end=2026-07-10 (vendor_end=2026-07-11)
+INFO app.providers.yahoo_provider: mapped 2 price bar(s) for ticker=XME status=success
+INFO app.services.benchmarks.benchmark_etf_loader: symbol XME loaded symbol_type=etf bars=2
+INFO app.providers.yahoo_provider: fetching price history ticker=DESK start=2026-07-09 end=2026-07-10 (vendor_end=2026-07-11)
+INFO app.providers.yahoo_provider: mapped 2 price bar(s) for ticker=DESK status=success
+INFO app.services.benchmarks.benchmark_etf_loader: symbol DESK loaded symbol_type=etf bars=2
+INFO app.providers.yahoo_provider: fetching price history ticker=INDS start=2026-07-09 end=2026-07-10 (vendor_end=2026-07-11)
+INFO app.providers.yahoo_provider: mapped 2 price bar(s) for ticker=INDS status=success
+INFO app.services.benchmarks.benchmark_etf_loader: symbol INDS loaded symbol_type=etf bars=2
+INFO app.providers.yahoo_provider: fetching price history ticker=REZ start=2026-07-09 end=2026-07-10 (vendor_end=2026-07-11)
+INFO app.providers.yahoo_provider: mapped 2 price bar(s) for ticker=REZ status=success
+INFO app.services.benchmarks.benchmark_etf_loader: symbol REZ loaded symbol_type=etf bars=2
+INFO app.providers.yahoo_provider: fetching price history ticker=SRVR start=2026-07-09 end=2026-07-10 (vendor_end=2026-07-11)
+INFO app.providers.yahoo_provider: mapped 2 price bar(s) for ticker=SRVR status=success
+INFO app.services.benchmarks.benchmark_etf_loader: symbol SRVR loaded symbol_type=etf bars=2
+INFO app.providers.yahoo_provider: fetching price history ticker=VNQ start=2026-07-09 end=2026-07-10 (vendor_end=2026-07-11)
+INFO app.providers.yahoo_provider: mapped 2 price bar(s) for ticker=VNQ status=success
+INFO app.services.benchmarks.benchmark_etf_loader: symbol VNQ loaded symbol_type=etf bars=2
+INFO app.providers.yahoo_provider: fetching price history ticker=IGV start=2026-07-09 end=2026-07-10 (vendor_end=2026-07-11)
+INFO app.providers.yahoo_provider: mapped 2 price bar(s) for ticker=IGV status=success
+INFO app.services.benchmarks.benchmark_etf_loader: symbol IGV loaded symbol_type=etf bars=2
+INFO app.providers.yahoo_provider: fetching price history ticker=SOXX start=2026-07-09 end=2026-07-10 (vendor_end=2026-07-11)
+INFO app.providers.yahoo_provider: mapped 2 price bar(s) for ticker=SOXX status=success
+INFO app.services.benchmarks.benchmark_etf_loader: symbol SOXX loaded symbol_type=etf bars=2
+INFO app.providers.yahoo_provider: fetching price history ticker=TAN start=2026-07-09 end=2026-07-10 (vendor_end=2026-07-11)
+INFO app.providers.yahoo_provider: mapped 2 price bar(s) for ticker=TAN status=success
+INFO app.services.benchmarks.benchmark_etf_loader: symbol TAN loaded symbol_type=etf bars=2
+INFO app.providers.yahoo_provider: fetching price history ticker=ICLN start=2026-07-09 end=2026-07-10 (vendor_end=2026-07-11)
+INFO app.providers.yahoo_provider: mapped 2 price bar(s) for ticker=ICLN status=success
+INFO app.services.benchmarks.benchmark_etf_loader: symbol ICLN loaded symbol_type=etf bars=2
+INFO app.providers.yahoo_provider: fetching price history ticker=IDU start=2026-07-09 end=2026-07-10 (vendor_end=2026-07-11)
+INFO app.providers.yahoo_provider: mapped 2 price bar(s) for ticker=IDU status=success
+INFO app.services.benchmarks.benchmark_etf_loader: symbol IDU loaded symbol_type=etf bars=2
+INFO app.providers.yahoo_provider: fetching price history ticker=PHO start=2026-07-09 end=2026-07-10 (vendor_end=2026-07-11)
+INFO app.providers.yahoo_provider: mapped 2 price bar(s) for ticker=PHO status=success
+INFO app.services.benchmarks.benchmark_etf_loader: symbol PHO loaded symbol_type=etf bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.benchmarks.benchmark_etf_loader: load done status=success symbols_loaded=63 symbols_skipped=0 price_rows_written=126 ticker_master_upserted=63 sector_etf_map_seeded=0
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=True path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.providers.yahoo_provider: batch download tickers=50 start=2026-07-09 end=2026-07-10 (vendor_end=2026-07-11)
+[                       0%                       ][**                     4%                       ]  2 of 50 completed[***                    6%                       ]  3 of 50 completed[****                   8%                       ]  4 of 50 completed[*****                 10%                       ]  5 of 50 completed[******                12%                       ]  6 of 50 completed[*******               14%                       ]  7 of 50 completed[********              16%                       ]  8 of 50 completed[*********             18%                       ]  9 of 50 completed[**********            20%                       ]  10 of 50 completed[***********           22%                       ]  11 of 50 completed[************          24%                       ]  12 of 50 completed[************          26%                       ]  13 of 50 completed[*************         28%                       ]  14 of 50 completed[**************        30%                       ]  15 of 50 completed[***************       32%                       ]  16 of 50 completed[****************      34%                       ]  17 of 50 completed[*****************     36%                       ]  18 of 50 completed[******************    38%                       ]  19 of 50 completed[*******************   40%                       ]  20 of 50 completed[********************  42%                       ]  21 of 50 completed[********************* 44%                       ]  22 of 50 completed[**********************46%                       ]  23 of 50 completed[**********************48%                       ]  24 of 50 completed[**********************50%                       ]  25 of 50 completed[**********************52%                       ]  26 of 50 completed[**********************54%*                      ]  27 of 50 completed[**********************56%**                     ]  28 of 50 completed[**********************58%***                    ]  29 of 50 completed[**********************60%****                   ]  30 of 50 completed[**********************62%*****                  ]  31 of 50 completed[**********************64%******                 ]  32 of 50 completed[**********************66%*******                ]  33 of 50 completed[**********************68%********               ]  34 of 50 completed[**********************70%*********              ]  35 of 50 completed[**********************72%**********             ]  36 of 50 completed[**********************74%***********            ]  37 of 50 completed[**********************76%***********            ]  38 of 50 completed[**********************78%************           ]  39 of 50 completed[**********************80%*************          ]  40 of 50 completed[**********************82%**************         ]  41 of 50 completed[**********************84%***************        ]  42 of 50 completed[**********************86%****************       ]  43 of 50 completed[**********************88%*****************      ]  44 of 50 completed[**********************90%******************     ]  45 of 50 completed[**********************92%*******************    ]  46 of 50 completed[**********************94%********************   ]  47 of 50 completed[**********************96%*********************  ]  48 of 50 completed[**********************98%********************** ]  49 of 50 completed[*********************100%***********************]  50 of 50 completed[*********************100%***********************]  50 of 50 completed
+INFO app.providers.yahoo_provider: batch mapped tickers=50 total_bars=100 status=success
+INFO app.services.ingestion.daily_price_ingestion: ingest start db_role=prod start_date=2026-07-09 end_date=2026-07-10
+INFO app.services.ingestion.daily_price_ingestion: ingest tickers_requested=1
+INFO app.services.ingestion.daily_price_ingestion: ticker VVR loaded bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.ingestion.daily_price_ingestion: ingest done status=success tickers_loaded=1 tickers_skipped=0 price_rows_written=2 repair_queue_enqueued=0
+INFO app.services.ingestion.daily_price_ingestion: ingest start db_role=prod start_date=2026-07-09 end_date=2026-07-10
+INFO app.services.ingestion.daily_price_ingestion: ingest tickers_requested=1
+INFO app.services.ingestion.daily_price_ingestion: ticker VVV loaded bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.ingestion.daily_price_ingestion: ingest done status=success tickers_loaded=1 tickers_skipped=0 price_rows_written=2 repair_queue_enqueued=0
+INFO app.services.ingestion.daily_price_ingestion: ingest start db_role=prod start_date=2026-07-09 end_date=2026-07-10
+INFO app.services.ingestion.daily_price_ingestion: ingest tickers_requested=1
+INFO app.services.ingestion.daily_price_ingestion: ticker VVX loaded bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.ingestion.daily_price_ingestion: ingest done status=success tickers_loaded=1 tickers_skipped=0 price_rows_written=2 repair_queue_enqueued=0
+INFO app.services.ingestion.daily_price_ingestion: ingest start db_role=prod start_date=2026-07-09 end_date=2026-07-10
+INFO app.services.ingestion.daily_price_ingestion: ingest tickers_requested=1
+INFO app.services.ingestion.daily_price_ingestion: ticker VWAV loaded bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.ingestion.daily_price_ingestion: ingest done status=success tickers_loaded=1 tickers_skipped=0 price_rows_written=2 repair_queue_enqueued=0
+INFO app.services.ingestion.daily_price_ingestion: ingest start db_role=prod start_date=2026-07-09 end_date=2026-07-10
+INFO app.services.ingestion.daily_price_ingestion: ingest tickers_requested=1
+INFO app.services.ingestion.daily_price_ingestion: ticker VYGR loaded bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.ingestion.daily_price_ingestion: ingest done status=success tickers_loaded=1 tickers_skipped=0 price_rows_written=2 repair_queue_enqueued=0
+INFO app.services.ingestion.daily_price_ingestion: ingest start db_role=prod start_date=2026-07-09 end_date=2026-07-10
+INFO app.services.ingestion.daily_price_ingestion: ingest tickers_requested=1
+INFO app.services.ingestion.daily_price_ingestion: ticker VYNE loaded bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.ingestion.daily_price_ingestion: ingest done status=success tickers_loaded=1 tickers_skipped=0 price_rows_written=2 repair_queue_enqueued=0
+INFO app.services.ingestion.daily_price_ingestion: ingest start db_role=prod start_date=2026-07-09 end_date=2026-07-10
+INFO app.services.ingestion.daily_price_ingestion: ingest tickers_requested=1
+INFO app.services.ingestion.daily_price_ingestion: ticker VYX loaded bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.ingestion.daily_price_ingestion: ingest done status=success tickers_loaded=1 tickers_skipped=0 price_rows_written=2 repair_queue_enqueued=0
+INFO app.services.ingestion.daily_price_ingestion: ingest start db_role=prod start_date=2026-07-09 end_date=2026-07-10
+INFO app.services.ingestion.daily_price_ingestion: ingest tickers_requested=1
+INFO app.services.ingestion.daily_price_ingestion: ticker VZ loaded bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.ingestion.daily_price_ingestion: ingest done status=success tickers_loaded=1 tickers_skipped=0 price_rows_written=2 repair_queue_enqueued=0
+INFO app.services.ingestion.daily_price_ingestion: ingest start db_role=prod start_date=2026-07-09 end_date=2026-07-10
+INFO app.services.ingestion.daily_price_ingestion: ingest tickers_requested=1
+INFO app.services.ingestion.daily_price_ingestion: ticker W loaded bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.ingestion.daily_price_ingestion: ingest done status=success tickers_loaded=1 tickers_skipped=0 price_rows_written=2 repair_queue_enqueued=0
+INFO app.services.ingestion.daily_price_ingestion: ingest start db_role=prod start_date=2026-07-09 end_date=2026-07-10
+INFO app.services.ingestion.daily_price_ingestion: ingest tickers_requested=1
+INFO app.services.ingestion.daily_price_ingestion: ticker WAB loaded bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.ingestion.daily_price_ingestion: ingest done status=success tickers_loaded=1 tickers_skipped=0 price_rows_written=2 repair_queue_enqueued=0
+INFO app.services.ingestion.daily_price_ingestion: ingest start db_role=prod start_date=2026-07-09 end_date=2026-07-10
+INFO app.services.ingestion.daily_price_ingestion: ingest tickers_requested=1
+INFO app.services.ingestion.daily_price_ingestion: ticker WABC loaded bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.ingestion.daily_price_ingestion: ingest done status=success tickers_loaded=1 tickers_skipped=0 price_rows_written=2 repair_queue_enqueued=0
+INFO app.services.ingestion.daily_price_ingestion: ingest start db_role=prod start_date=2026-07-09 end_date=2026-07-10
+INFO app.services.ingestion.daily_price_ingestion: ingest tickers_requested=1
+INFO app.services.ingestion.daily_price_ingestion: ticker WAFD loaded bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.ingestion.daily_price_ingestion: ingest done status=success tickers_loaded=1 tickers_skipped=0 price_rows_written=2 repair_queue_enqueued=0
+INFO app.services.ingestion.daily_price_ingestion: ingest start db_role=prod start_date=2026-07-09 end_date=2026-07-10
+INFO app.services.ingestion.daily_price_ingestion: ingest tickers_requested=1
+INFO app.services.ingestion.daily_price_ingestion: ticker WAFDP loaded bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.ingestion.daily_price_ingestion: ingest done status=success tickers_loaded=1 tickers_skipped=0 price_rows_written=2 repair_queue_enqueued=0
+INFO app.services.ingestion.daily_price_ingestion: ingest start db_role=prod start_date=2026-07-09 end_date=2026-07-10
+INFO app.services.ingestion.daily_price_ingestion: ingest tickers_requested=1
+INFO app.services.ingestion.daily_price_ingestion: ticker WAL loaded bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.ingestion.daily_price_ingestion: ingest done status=success tickers_loaded=1 tickers_skipped=0 price_rows_written=2 repair_queue_enqueued=0
+INFO app.services.ingestion.daily_price_ingestion: ingest start db_role=prod start_date=2026-07-09 end_date=2026-07-10
+INFO app.services.ingestion.daily_price_ingestion: ingest tickers_requested=1
+INFO app.services.ingestion.daily_price_ingestion: ticker WALD loaded bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.ingestion.daily_price_ingestion: ingest done status=success tickers_loaded=1 tickers_skipped=0 price_rows_written=2 repair_queue_enqueued=0
+INFO app.services.ingestion.daily_price_ingestion: ingest start db_role=prod start_date=2026-07-09 end_date=2026-07-10
+INFO app.services.ingestion.daily_price_ingestion: ingest tickers_requested=1
+INFO app.services.ingestion.daily_price_ingestion: ticker WASH loaded bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.ingestion.daily_price_ingestion: ingest done status=success tickers_loaded=1 tickers_skipped=0 price_rows_written=2 repair_queue_enqueued=0
+INFO app.services.ingestion.daily_price_ingestion: ingest start db_role=prod start_date=2026-07-09 end_date=2026-07-10
+INFO app.services.ingestion.daily_price_ingestion: ingest tickers_requested=1
+INFO app.services.ingestion.daily_price_ingestion: ticker WAT loaded bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.ingestion.daily_price_ingestion: ingest done status=success tickers_loaded=1 tickers_skipped=0 price_rows_written=2 repair_queue_enqueued=0
+INFO app.services.ingestion.daily_price_ingestion: ingest start db_role=prod start_date=2026-07-09 end_date=2026-07-10
+INFO app.services.ingestion.daily_price_ingestion: ingest tickers_requested=1
+INFO app.services.ingestion.daily_price_ingestion: ticker WATT loaded bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.ingestion.daily_price_ingestion: ingest done status=success tickers_loaded=1 tickers_skipped=0 price_rows_written=2 repair_queue_enqueued=0
+INFO app.services.ingestion.daily_price_ingestion: ingest start db_role=prod start_date=2026-07-09 end_date=2026-07-10
+INFO app.services.ingestion.daily_price_ingestion: ingest tickers_requested=1
+INFO app.services.ingestion.daily_price_ingestion: ticker WAY loaded bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.ingestion.daily_price_ingestion: ingest done status=success tickers_loaded=1 tickers_skipped=0 price_rows_written=2 repair_queue_enqueued=0
+INFO app.services.ingestion.daily_price_ingestion: ingest start db_role=prod start_date=2026-07-09 end_date=2026-07-10
+INFO app.services.ingestion.daily_price_ingestion: ingest tickers_requested=1
+INFO app.services.ingestion.daily_price_ingestion: ticker WBD loaded bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.ingestion.daily_price_ingestion: ingest done status=success tickers_loaded=1 tickers_skipped=0 price_rows_written=2 repair_queue_enqueued=0
+INFO app.services.ingestion.daily_price_ingestion: ingest start db_role=prod start_date=2026-07-09 end_date=2026-07-10
+INFO app.services.ingestion.daily_price_ingestion: ingest tickers_requested=1
+INFO app.services.ingestion.daily_price_ingestion: ticker WBS loaded bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.ingestion.daily_price_ingestion: ingest done status=success tickers_loaded=1 tickers_skipped=0 price_rows_written=2 repair_queue_enqueued=0
+INFO app.services.ingestion.daily_price_ingestion: ingest start db_role=prod start_date=2026-07-09 end_date=2026-07-10
+INFO app.services.ingestion.daily_price_ingestion: ingest tickers_requested=1
+INFO app.services.ingestion.daily_price_ingestion: ticker WBTN loaded bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.ingestion.daily_price_ingestion: ingest done status=success tickers_loaded=1 tickers_skipped=0 price_rows_written=2 repair_queue_enqueued=0
+INFO app.services.ingestion.daily_price_ingestion: ingest start db_role=prod start_date=2026-07-09 end_date=2026-07-10
+INFO app.services.ingestion.daily_price_ingestion: ingest tickers_requested=1
+INFO app.services.ingestion.daily_price_ingestion: ticker WCC loaded bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.ingestion.daily_price_ingestion: ingest done status=success tickers_loaded=1 tickers_skipped=0 price_rows_written=2 repair_queue_enqueued=0
+INFO app.services.ingestion.daily_price_ingestion: ingest start db_role=prod start_date=2026-07-09 end_date=2026-07-10
+INFO app.services.ingestion.daily_price_ingestion: ingest tickers_requested=1
+INFO app.services.ingestion.daily_price_ingestion: ticker WD loaded bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.ingestion.daily_price_ingestion: ingest done status=success tickers_loaded=1 tickers_skipped=0 price_rows_written=2 repair_queue_enqueued=0
+INFO app.services.ingestion.daily_price_ingestion: ingest start db_role=prod start_date=2026-07-09 end_date=2026-07-10
+INFO app.services.ingestion.daily_price_ingestion: ingest tickers_requested=1
+INFO app.services.ingestion.daily_price_ingestion: ticker WDAY loaded bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.ingestion.daily_price_ingestion: ingest done status=success tickers_loaded=1 tickers_skipped=0 price_rows_written=2 repair_queue_enqueued=0
+INFO app.services.ingestion.daily_price_ingestion: ingest start db_role=prod start_date=2026-07-09 end_date=2026-07-10
+INFO app.services.ingestion.daily_price_ingestion: ingest tickers_requested=1
+INFO app.services.ingestion.daily_price_ingestion: ticker WDC loaded bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.ingestion.daily_price_ingestion: ingest done status=success tickers_loaded=1 tickers_skipped=0 price_rows_written=2 repair_queue_enqueued=0
+INFO app.services.ingestion.daily_price_ingestion: ingest start db_role=prod start_date=2026-07-09 end_date=2026-07-10
+INFO app.services.ingestion.daily_price_ingestion: ingest tickers_requested=1
+INFO app.services.ingestion.daily_price_ingestion: ticker WDFC loaded bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.ingestion.daily_price_ingestion: ingest done status=success tickers_loaded=1 tickers_skipped=0 price_rows_written=2 repair_queue_enqueued=0
+INFO app.services.ingestion.daily_price_ingestion: ingest start db_role=prod start_date=2026-07-09 end_date=2026-07-10
+INFO app.services.ingestion.daily_price_ingestion: ingest tickers_requested=1
+INFO app.services.ingestion.daily_price_ingestion: ticker WEAV loaded bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.ingestion.daily_price_ingestion: ingest done status=success tickers_loaded=1 tickers_skipped=0 price_rows_written=2 repair_queue_enqueued=0
+INFO app.services.ingestion.daily_price_ingestion: ingest start db_role=prod start_date=2026-07-09 end_date=2026-07-10
+INFO app.services.ingestion.daily_price_ingestion: ingest tickers_requested=1
+INFO app.services.ingestion.daily_price_ingestion: ticker WEC loaded bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.ingestion.daily_price_ingestion: ingest done status=success tickers_loaded=1 tickers_skipped=0 price_rows_written=2 repair_queue_enqueued=0
+INFO app.services.ingestion.daily_price_ingestion: ingest start db_role=prod start_date=2026-07-09 end_date=2026-07-10
+INFO app.services.ingestion.daily_price_ingestion: ingest tickers_requested=1
+INFO app.services.ingestion.daily_price_ingestion: ticker WELL loaded bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.ingestion.daily_price_ingestion: ingest done status=success tickers_loaded=1 tickers_skipped=0 price_rows_written=2 repair_queue_enqueued=0
+INFO app.services.ingestion.daily_price_ingestion: ingest start db_role=prod start_date=2026-07-09 end_date=2026-07-10
+INFO app.services.ingestion.daily_price_ingestion: ingest tickers_requested=1
+INFO app.services.ingestion.daily_price_ingestion: ticker WEN loaded bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.ingestion.daily_price_ingestion: ingest done status=success tickers_loaded=1 tickers_skipped=0 price_rows_written=2 repair_queue_enqueued=0
+INFO app.services.ingestion.daily_price_ingestion: ingest start db_role=prod start_date=2026-07-09 end_date=2026-07-10
+INFO app.services.ingestion.daily_price_ingestion: ingest tickers_requested=1
+INFO app.services.ingestion.daily_price_ingestion: ticker WENN loaded bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.ingestion.daily_price_ingestion: ingest done status=success tickers_loaded=1 tickers_skipped=0 price_rows_written=2 repair_queue_enqueued=0
+INFO app.services.ingestion.daily_price_ingestion: ingest start db_role=prod start_date=2026-07-09 end_date=2026-07-10
+INFO app.services.ingestion.daily_price_ingestion: ingest tickers_requested=1
+INFO app.services.ingestion.daily_price_ingestion: ticker WERN loaded bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.ingestion.daily_price_ingestion: ingest done status=success tickers_loaded=1 tickers_skipped=0 price_rows_written=2 repair_queue_enqueued=0
+INFO app.services.ingestion.daily_price_ingestion: ingest start db_role=prod start_date=2026-07-09 end_date=2026-07-10
+INFO app.services.ingestion.daily_price_ingestion: ingest tickers_requested=1
+INFO app.services.ingestion.daily_price_ingestion: ticker WEST loaded bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.ingestion.daily_price_ingestion: ingest done status=success tickers_loaded=1 tickers_skipped=0 price_rows_written=2 repair_queue_enqueued=0
+INFO app.services.ingestion.daily_price_ingestion: ingest start db_role=prod start_date=2026-07-09 end_date=2026-07-10
+INFO app.services.ingestion.daily_price_ingestion: ingest tickers_requested=1
+INFO app.services.ingestion.daily_price_ingestion: ticker WEX loaded bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.ingestion.daily_price_ingestion: ingest done status=success tickers_loaded=1 tickers_skipped=0 price_rows_written=2 repair_queue_enqueued=0
+INFO app.services.ingestion.daily_price_ingestion: ingest start db_role=prod start_date=2026-07-09 end_date=2026-07-10
+INFO app.services.ingestion.daily_price_ingestion: ingest tickers_requested=1
+INFO app.services.ingestion.daily_price_ingestion: ticker WEYS loaded bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.ingestion.daily_price_ingestion: ingest done status=success tickers_loaded=1 tickers_skipped=0 price_rows_written=2 repair_queue_enqueued=0
+INFO app.services.ingestion.daily_price_ingestion: ingest start db_role=prod start_date=2026-07-09 end_date=2026-07-10
+INFO app.services.ingestion.daily_price_ingestion: ingest tickers_requested=1
+INFO app.services.ingestion.daily_price_ingestion: ticker WFC loaded bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.ingestion.daily_price_ingestion: ingest done status=success tickers_loaded=1 tickers_skipped=0 price_rows_written=2 repair_queue_enqueued=0
+INFO app.services.ingestion.daily_price_ingestion: ingest start db_role=prod start_date=2026-07-09 end_date=2026-07-10
+INFO app.services.ingestion.daily_price_ingestion: ingest tickers_requested=1
+INFO app.services.ingestion.daily_price_ingestion: ticker WFCF loaded bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.ingestion.daily_price_ingestion: ingest done status=success tickers_loaded=1 tickers_skipped=0 price_rows_written=2 repair_queue_enqueued=0
+INFO app.services.ingestion.daily_price_ingestion: ingest start db_role=prod start_date=2026-07-09 end_date=2026-07-10
+INFO app.services.ingestion.daily_price_ingestion: ingest tickers_requested=1
+INFO app.services.ingestion.daily_price_ingestion: ticker WFRD loaded bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.ingestion.daily_price_ingestion: ingest done status=success tickers_loaded=1 tickers_skipped=0 price_rows_written=2 repair_queue_enqueued=0
+INFO app.services.ingestion.daily_price_ingestion: ingest start db_role=prod start_date=2026-07-09 end_date=2026-07-10
+INFO app.services.ingestion.daily_price_ingestion: ingest tickers_requested=1
+INFO app.services.ingestion.daily_price_ingestion: ticker WGO loaded bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.ingestion.daily_price_ingestion: ingest done status=success tickers_loaded=1 tickers_skipped=0 price_rows_written=2 repair_queue_enqueued=0
+INFO app.services.ingestion.daily_price_ingestion: ingest start db_role=prod start_date=2026-07-09 end_date=2026-07-10
+INFO app.services.ingestion.daily_price_ingestion: ingest tickers_requested=1
+INFO app.services.ingestion.daily_price_ingestion: ticker WGRX loaded bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.ingestion.daily_price_ingestion: ingest done status=success tickers_loaded=1 tickers_skipped=0 price_rows_written=2 repair_queue_enqueued=0
+INFO app.services.ingestion.daily_price_ingestion: ingest start db_role=prod start_date=2026-07-09 end_date=2026-07-10
+INFO app.services.ingestion.daily_price_ingestion: ingest tickers_requested=1
+INFO app.services.ingestion.daily_price_ingestion: ticker WGS loaded bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.ingestion.daily_price_ingestion: ingest done status=success tickers_loaded=1 tickers_skipped=0 price_rows_written=2 repair_queue_enqueued=0
+INFO app.services.ingestion.daily_price_ingestion: ingest start db_role=prod start_date=2026-07-09 end_date=2026-07-10
+INFO app.services.ingestion.daily_price_ingestion: ingest tickers_requested=1
+INFO app.services.ingestion.daily_price_ingestion: ticker WH loaded bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.ingestion.daily_price_ingestion: ingest done status=success tickers_loaded=1 tickers_skipped=0 price_rows_written=2 repair_queue_enqueued=0
+INFO app.services.ingestion.daily_price_ingestion: ingest start db_role=prod start_date=2026-07-09 end_date=2026-07-10
+INFO app.services.ingestion.daily_price_ingestion: ingest tickers_requested=1
+INFO app.services.ingestion.daily_price_ingestion: ticker WHD loaded bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.ingestion.daily_price_ingestion: ingest done status=success tickers_loaded=1 tickers_skipped=0 price_rows_written=2 repair_queue_enqueued=0
+INFO app.services.ingestion.daily_price_ingestion: ingest start db_role=prod start_date=2026-07-09 end_date=2026-07-10
+INFO app.services.ingestion.daily_price_ingestion: ingest tickers_requested=1
+INFO app.services.ingestion.daily_price_ingestion: ticker WHF loaded bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.ingestion.daily_price_ingestion: ingest done status=success tickers_loaded=1 tickers_skipped=0 price_rows_written=2 repair_queue_enqueued=0
+INFO app.services.ingestion.daily_price_ingestion: ingest start db_role=prod start_date=2026-07-09 end_date=2026-07-10
+INFO app.services.ingestion.daily_price_ingestion: ingest tickers_requested=1
+INFO app.services.ingestion.daily_price_ingestion: ticker WHG loaded bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.ingestion.daily_price_ingestion: ingest done status=success tickers_loaded=1 tickers_skipped=0 price_rows_written=2 repair_queue_enqueued=0
+INFO app.services.ingestion.daily_price_ingestion: ingest start db_role=prod start_date=2026-07-09 end_date=2026-07-10
+INFO app.services.ingestion.daily_price_ingestion: ingest tickers_requested=1
+INFO app.services.ingestion.daily_price_ingestion: ticker WHLR loaded bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.ingestion.daily_price_ingestion: ingest done status=success tickers_loaded=1 tickers_skipped=0 price_rows_written=2 repair_queue_enqueued=0
+INFO app.services.ingestion.daily_price_ingestion: ingest start db_role=prod start_date=2026-07-09 end_date=2026-07-10
+INFO app.services.ingestion.daily_price_ingestion: ingest tickers_requested=1
+INFO app.services.ingestion.daily_price_ingestion: ticker WHR loaded bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.ingestion.daily_price_ingestion: ingest done status=success tickers_loaded=1 tickers_skipped=0 price_rows_written=2 repair_queue_enqueued=0
+INFO app.services.ingestion.daily_price_ingestion: ingest start db_role=prod start_date=2026-07-09 end_date=2026-07-10
+INFO app.services.ingestion.daily_price_ingestion: ingest tickers_requested=1
+INFO app.services.ingestion.daily_price_ingestion: ticker WHWK loaded bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.ingestion.daily_price_ingestion: ingest done status=success tickers_loaded=1 tickers_skipped=0 price_rows_written=2 repair_queue_enqueued=0
+INFO app.services.ingestion.daily_price_ingestion: ingest start db_role=prod start_date=2026-07-09 end_date=2026-07-10
+INFO app.services.ingestion.daily_price_ingestion: ingest tickers_requested=1
+INFO app.services.ingestion.daily_price_ingestion: ticker WINA loaded bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.ingestion.daily_price_ingestion: ingest done status=success tickers_loaded=1 tickers_skipped=0 price_rows_written=2 repair_queue_enqueued=0
+INFO app.providers.yahoo_provider: batch download tickers=50 start=2026-07-09 end=2026-07-10 (vendor_end=2026-07-11)
+[                       0%                       ][**                     4%                       ]  2 of 50 completed[***                    6%                       ]  3 of 50 completed[****                   8%                       ]  4 of 50 completed[*****                 10%                       ]  5 of 50 completed[******                12%                       ]  6 of 50 completed[*******               14%                       ]  7 of 50 completed[********              16%                       ]  8 of 50 completed[*********             18%                       ]  9 of 50 completed[**********            20%                       ]  10 of 50 completed[***********           22%                       ]  11 of 50 completed[************          24%                       ]  12 of 50 completed[************          26%                       ]  13 of 50 completed[*************         28%                       ]  14 of 50 completed[**************        30%                       ]  15 of 50 completed[***************       32%                       ]  16 of 50 completed[****************      34%                       ]  17 of 50 completed[*****************     36%                       ]  18 of 50 completed[******************    38%                       ]  19 of 50 completed[*******************   40%                       ]  20 of 50 completed[********************  42%                       ]  21 of 50 completed[********************* 44%                       ]  22 of 50 completed[**********************46%                       ]  23 of 50 completed[**********************48%                       ]  24 of 50 completed[**********************50%                       ]  25 of 50 completed[**********************52%                       ]  26 of 50 completed[**********************54%*                      ]  27 of 50 completed[**********************56%**                     ]  28 of 50 completed[**********************58%***                    ]  29 of 50 completed[**********************60%****                   ]  30 of 50 completed[**********************62%*****                  ]  31 of 50 completed[**********************64%******                 ]  32 of 50 completed[**********************66%*******                ]  33 of 50 completed[**********************68%********               ]  34 of 50 completed[**********************70%*********              ]  35 of 50 completed[**********************72%**********             ]  36 of 50 completed[**********************74%***********            ]  37 of 50 completed[**********************76%***********            ]  38 of 50 completed[**********************78%************           ]  39 of 50 completed[**********************80%*************          ]  40 of 50 completed[**********************82%**************         ]  41 of 50 completed[**********************84%***************        ]  42 of 50 completed[**********************86%****************       ]  43 of 50 completed[**********************88%*****************      ]  44 of 50 completed[**********************90%******************     ]  45 of 50 completed[**********************92%*******************    ]  46 of 50 completed[**********************94%********************   ]  47 of 50 completed[**********************96%*********************  ]  48 of 50 completed[**********************98%********************** ]  49 of 50 completed[*********************100%***********************]  50 of 50 completed[*********************100%***********************]  50 of 50 completed
+INFO app.providers.yahoo_provider: batch mapped tickers=50 total_bars=100 status=success
+INFO app.services.ingestion.daily_price_ingestion: ingest start db_role=prod start_date=2026-07-09 end_date=2026-07-10
+INFO app.services.ingestion.daily_price_ingestion: ingest tickers_requested=1
+INFO app.services.ingestion.daily_price_ingestion: ticker WING loaded bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.ingestion.daily_price_ingestion: ingest done status=success tickers_loaded=1 tickers_skipped=0 price_rows_written=2 repair_queue_enqueued=0
+INFO app.services.ingestion.daily_price_ingestion: ingest start db_role=prod start_date=2026-07-09 end_date=2026-07-10
+INFO app.services.ingestion.daily_price_ingestion: ingest tickers_requested=1
+INFO app.services.ingestion.daily_price_ingestion: ticker WK loaded bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.ingestion.daily_price_ingestion: ingest done status=success tickers_loaded=1 tickers_skipped=0 price_rows_written=2 repair_queue_enqueued=0
+INFO app.services.ingestion.daily_price_ingestion: ingest start db_role=prod start_date=2026-07-09 end_date=2026-07-10
+INFO app.services.ingestion.daily_price_ingestion: ingest tickers_requested=1
+INFO app.services.ingestion.daily_price_ingestion: ticker WKC loaded bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.ingestion.daily_price_ingestion: ingest done status=success tickers_loaded=1 tickers_skipped=0 price_rows_written=2 repair_queue_enqueued=0
+INFO app.services.ingestion.daily_price_ingestion: ingest start db_role=prod start_date=2026-07-09 end_date=2026-07-10
+INFO app.services.ingestion.daily_price_ingestion: ingest tickers_requested=1
+INFO app.services.ingestion.daily_price_ingestion: ticker WKHS loaded bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.ingestion.daily_price_ingestion: ingest done status=success tickers_loaded=1 tickers_skipped=0 price_rows_written=2 repair_queue_enqueued=0
+INFO app.services.ingestion.daily_price_ingestion: ingest start db_role=prod start_date=2026-07-09 end_date=2026-07-10
+INFO app.services.ingestion.daily_price_ingestion: ingest tickers_requested=1
+INFO app.services.ingestion.daily_price_ingestion: ticker WLDN loaded bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.ingestion.daily_price_ingestion: ingest done status=success tickers_loaded=1 tickers_skipped=0 price_rows_written=2 repair_queue_enqueued=0
+INFO app.services.ingestion.daily_price_ingestion: ingest start db_role=prod start_date=2026-07-09 end_date=2026-07-10
+INFO app.services.ingestion.daily_price_ingestion: ingest tickers_requested=1
+INFO app.services.ingestion.daily_price_ingestion: ticker WLFC loaded bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.ingestion.daily_price_ingestion: ingest done status=success tickers_loaded=1 tickers_skipped=0 price_rows_written=2 repair_queue_enqueued=0
+INFO app.services.ingestion.daily_price_ingestion: ingest start db_role=prod start_date=2026-07-09 end_date=2026-07-10
+INFO app.services.ingestion.daily_price_ingestion: ingest tickers_requested=1
+INFO app.services.ingestion.daily_price_ingestion: ticker WLII loaded bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.ingestion.daily_price_ingestion: ingest done status=success tickers_loaded=1 tickers_skipped=0 price_rows_written=2 repair_queue_enqueued=0
+INFO app.services.ingestion.daily_price_ingestion: ingest start db_role=prod start_date=2026-07-09 end_date=2026-07-10
+INFO app.services.ingestion.daily_price_ingestion: ingest tickers_requested=1
+INFO app.services.ingestion.daily_price_ingestion: ticker WLK loaded bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.ingestion.daily_price_ingestion: ingest done status=success tickers_loaded=1 tickers_skipped=0 price_rows_written=2 repair_queue_enqueued=0
+INFO app.services.ingestion.daily_price_ingestion: ingest start db_role=prod start_date=2026-07-09 end_date=2026-07-10
+INFO app.services.ingestion.daily_price_ingestion: ingest tickers_requested=1
+INFO app.services.ingestion.daily_price_ingestion: ticker WLTH loaded bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.ingestion.daily_price_ingestion: ingest done status=success tickers_loaded=1 tickers_skipped=0 price_rows_written=2 repair_queue_enqueued=0
+INFO app.services.ingestion.daily_price_ingestion: ingest start db_role=prod start_date=2026-07-09 end_date=2026-07-10
+INFO app.services.ingestion.daily_price_ingestion: ingest tickers_requested=1
+INFO app.services.ingestion.daily_price_ingestion: ticker WLY loaded bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.ingestion.daily_price_ingestion: ingest done status=success tickers_loaded=1 tickers_skipped=0 price_rows_written=2 repair_queue_enqueued=0
+INFO app.services.ingestion.daily_price_ingestion: ingest start db_role=prod start_date=2026-07-09 end_date=2026-07-10
+INFO app.services.ingestion.daily_price_ingestion: ingest tickers_requested=1
+INFO app.services.ingestion.daily_price_ingestion: ticker WLYB loaded bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.ingestion.daily_price_ingestion: ingest done status=success tickers_loaded=1 tickers_skipped=0 price_rows_written=2 repair_queue_enqueued=0
+INFO app.services.ingestion.daily_price_ingestion: ingest start db_role=prod start_date=2026-07-09 end_date=2026-07-10
+INFO app.services.ingestion.daily_price_ingestion: ingest tickers_requested=1
+INFO app.services.ingestion.daily_price_ingestion: ticker WM loaded bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.ingestion.daily_price_ingestion: ingest done status=success tickers_loaded=1 tickers_skipped=0 price_rows_written=2 repair_queue_enqueued=0
+INFO app.services.ingestion.daily_price_ingestion: ingest start db_role=prod start_date=2026-07-09 end_date=2026-07-10
+INFO app.services.ingestion.daily_price_ingestion: ingest tickers_requested=1
+INFO app.services.ingestion.daily_price_ingestion: ticker WMB loaded bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.ingestion.daily_price_ingestion: ingest done status=success tickers_loaded=1 tickers_skipped=0 price_rows_written=2 repair_queue_enqueued=0
+INFO app.services.ingestion.daily_price_ingestion: ingest start db_role=prod start_date=2026-07-09 end_date=2026-07-10
+INFO app.services.ingestion.daily_price_ingestion: ingest tickers_requested=1
+INFO app.services.ingestion.daily_price_ingestion: ticker WMG loaded bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.ingestion.daily_price_ingestion: ingest done status=success tickers_loaded=1 tickers_skipped=0 price_rows_written=2 repair_queue_enqueued=0
+INFO app.services.ingestion.daily_price_ingestion: ingest start db_role=prod start_date=2026-07-09 end_date=2026-07-10
+INFO app.services.ingestion.daily_price_ingestion: ingest tickers_requested=1
+INFO app.services.ingestion.daily_price_ingestion: ticker WMK loaded bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.ingestion.daily_price_ingestion: ingest done status=success tickers_loaded=1 tickers_skipped=0 price_rows_written=2 repair_queue_enqueued=0
+INFO app.services.ingestion.daily_price_ingestion: ingest start db_role=prod start_date=2026-07-09 end_date=2026-07-10
+INFO app.services.ingestion.daily_price_ingestion: ingest tickers_requested=1
+INFO app.services.ingestion.daily_price_ingestion: ticker WMS loaded bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.ingestion.daily_price_ingestion: ingest done status=success tickers_loaded=1 tickers_skipped=0 price_rows_written=2 repair_queue_enqueued=0
+INFO app.services.ingestion.daily_price_ingestion: ingest start db_role=prod start_date=2026-07-09 end_date=2026-07-10
+INFO app.services.ingestion.daily_price_ingestion: ingest tickers_requested=1
+INFO app.services.ingestion.daily_price_ingestion: ticker WMT loaded bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.ingestion.daily_price_ingestion: ingest done status=success tickers_loaded=1 tickers_skipped=0 price_rows_written=2 repair_queue_enqueued=0
+INFO app.services.ingestion.daily_price_ingestion: ingest start db_role=prod start_date=2026-07-09 end_date=2026-07-10
+INFO app.services.ingestion.daily_price_ingestion: ingest tickers_requested=1
+INFO app.services.ingestion.daily_price_ingestion: ticker WNC loaded bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.ingestion.daily_price_ingestion: ingest done status=success tickers_loaded=1 tickers_skipped=0 price_rows_written=2 repair_queue_enqueued=0
+INFO app.services.ingestion.daily_price_ingestion: ingest start db_role=prod start_date=2026-07-09 end_date=2026-07-10
+INFO app.services.ingestion.daily_price_ingestion: ingest tickers_requested=1
+INFO app.services.ingestion.daily_price_ingestion: ticker WNEB loaded bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.ingestion.daily_price_ingestion: ingest done status=success tickers_loaded=1 tickers_skipped=0 price_rows_written=2 repair_queue_enqueued=0
+INFO app.services.ingestion.daily_price_ingestion: ingest start db_role=prod start_date=2026-07-09 end_date=2026-07-10
+INFO app.services.ingestion.daily_price_ingestion: ingest tickers_requested=1
+INFO app.services.ingestion.daily_price_ingestion: ticker WOLF loaded bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.ingestion.daily_price_ingestion: ingest done status=success tickers_loaded=1 tickers_skipped=0 price_rows_written=2 repair_queue_enqueued=0
+INFO app.services.ingestion.daily_price_ingestion: ingest start db_role=prod start_date=2026-07-09 end_date=2026-07-10
+INFO app.services.ingestion.daily_price_ingestion: ingest tickers_requested=1
+INFO app.services.ingestion.daily_price_ingestion: ticker WOOF loaded bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.ingestion.daily_price_ingestion: ingest done status=success tickers_loaded=1 tickers_skipped=0 price_rows_written=2 repair_queue_enqueued=0
+INFO app.services.ingestion.daily_price_ingestion: ingest start db_role=prod start_date=2026-07-09 end_date=2026-07-10
+INFO app.services.ingestion.daily_price_ingestion: ingest tickers_requested=1
+INFO app.services.ingestion.daily_price_ingestion: ticker WOR loaded bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.ingestion.daily_price_ingestion: ingest done status=success tickers_loaded=1 tickers_skipped=0 price_rows_written=2 repair_queue_enqueued=0
+INFO app.services.ingestion.daily_price_ingestion: ingest start db_role=prod start_date=2026-07-09 end_date=2026-07-10
+INFO app.services.ingestion.daily_price_ingestion: ingest tickers_requested=1
+INFO app.services.ingestion.daily_price_ingestion: ticker WPC loaded bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.ingestion.daily_price_ingestion: ingest done status=success tickers_loaded=1 tickers_skipped=0 price_rows_written=2 repair_queue_enqueued=0
+INFO app.services.ingestion.daily_price_ingestion: ingest start db_role=prod start_date=2026-07-09 end_date=2026-07-10
+INFO app.services.ingestion.daily_price_ingestion: ingest tickers_requested=1
+INFO app.services.ingestion.daily_price_ingestion: ticker WRAP loaded bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.ingestion.daily_price_ingestion: ingest done status=success tickers_loaded=1 tickers_skipped=0 price_rows_written=2 repair_queue_enqueued=0
+INFO app.services.ingestion.daily_price_ingestion: ingest start db_role=prod start_date=2026-07-09 end_date=2026-07-10
+INFO app.services.ingestion.daily_price_ingestion: ingest tickers_requested=1
+INFO app.services.ingestion.daily_price_ingestion: ticker WRB loaded bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.ingestion.daily_price_ingestion: ingest done status=success tickers_loaded=1 tickers_skipped=0 price_rows_written=2 repair_queue_enqueued=0
+INFO app.services.ingestion.daily_price_ingestion: ingest start db_role=prod start_date=2026-07-09 end_date=2026-07-10
+INFO app.services.ingestion.daily_price_ingestion: ingest tickers_requested=1
+INFO app.services.ingestion.daily_price_ingestion: ticker WRBY loaded bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.ingestion.daily_price_ingestion: ingest done status=success tickers_loaded=1 tickers_skipped=0 price_rows_written=2 repair_queue_enqueued=0
+INFO app.services.ingestion.daily_price_ingestion: ingest start db_role=prod start_date=2026-07-09 end_date=2026-07-10
+INFO app.services.ingestion.daily_price_ingestion: ingest tickers_requested=1
+INFO app.services.ingestion.daily_price_ingestion: ticker WRLD loaded bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.ingestion.daily_price_ingestion: ingest done status=success tickers_loaded=1 tickers_skipped=0 price_rows_written=2 repair_queue_enqueued=0
+INFO app.services.ingestion.daily_price_ingestion: ingest start db_role=prod start_date=2026-07-09 end_date=2026-07-10
+INFO app.services.ingestion.daily_price_ingestion: ingest tickers_requested=1
+INFO app.services.ingestion.daily_price_ingestion: ticker WS loaded bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.ingestion.daily_price_ingestion: ingest done status=success tickers_loaded=1 tickers_skipped=0 price_rows_written=2 repair_queue_enqueued=0
+INFO app.services.ingestion.daily_price_ingestion: ingest start db_role=prod start_date=2026-07-09 end_date=2026-07-10
+INFO app.services.ingestion.daily_price_ingestion: ingest tickers_requested=1
+INFO app.services.ingestion.daily_price_ingestion: ticker WSBC loaded bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.ingestion.daily_price_ingestion: ingest done status=success tickers_loaded=1 tickers_skipped=0 price_rows_written=2 repair_queue_enqueued=0
+INFO app.services.ingestion.daily_price_ingestion: ingest start db_role=prod start_date=2026-07-09 end_date=2026-07-10
+INFO app.services.ingestion.daily_price_ingestion: ingest tickers_requested=1
+INFO app.services.ingestion.daily_price_ingestion: ticker WSBF loaded bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.ingestion.daily_price_ingestion: ingest done status=success tickers_loaded=1 tickers_skipped=0 price_rows_written=2 repair_queue_enqueued=0
+INFO app.services.ingestion.daily_price_ingestion: ingest start db_role=prod start_date=2026-07-09 end_date=2026-07-10
+INFO app.services.ingestion.daily_price_ingestion: ingest tickers_requested=1
+INFO app.services.ingestion.daily_price_ingestion: ticker WSBK loaded bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.ingestion.daily_price_ingestion: ingest done status=success tickers_loaded=1 tickers_skipped=0 price_rows_written=2 repair_queue_enqueued=0
+INFO app.services.ingestion.daily_price_ingestion: ingest start db_role=prod start_date=2026-07-09 end_date=2026-07-10
+INFO app.services.ingestion.daily_price_ingestion: ingest tickers_requested=1
+INFO app.services.ingestion.daily_price_ingestion: ticker WSC loaded bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.ingestion.daily_price_ingestion: ingest done status=success tickers_loaded=1 tickers_skipped=0 price_rows_written=2 repair_queue_enqueued=0
+INFO app.services.ingestion.daily_price_ingestion: ingest start db_role=prod start_date=2026-07-09 end_date=2026-07-10
+INFO app.services.ingestion.daily_price_ingestion: ingest tickers_requested=1
+INFO app.services.ingestion.daily_price_ingestion: ticker WSFS loaded bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.ingestion.daily_price_ingestion: ingest done status=success tickers_loaded=1 tickers_skipped=0 price_rows_written=2 repair_queue_enqueued=0
+INFO app.services.ingestion.daily_price_ingestion: ingest start db_role=prod start_date=2026-07-09 end_date=2026-07-10
+INFO app.services.ingestion.daily_price_ingestion: ingest tickers_requested=1
+INFO app.services.ingestion.daily_price_ingestion: ticker WSM loaded bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.ingestion.daily_price_ingestion: ingest done status=success tickers_loaded=1 tickers_skipped=0 price_rows_written=2 repair_queue_enqueued=0
+INFO app.services.ingestion.daily_price_ingestion: ingest start db_role=prod start_date=2026-07-09 end_date=2026-07-10
+INFO app.services.ingestion.daily_price_ingestion: ingest tickers_requested=1
+INFO app.services.ingestion.daily_price_ingestion: ticker WSO loaded bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.ingestion.daily_price_ingestion: ingest done status=success tickers_loaded=1 tickers_skipped=0 price_rows_written=2 repair_queue_enqueued=0
+INFO app.services.ingestion.daily_price_ingestion: ingest start db_role=prod start_date=2026-07-09 end_date=2026-07-10
+INFO app.services.ingestion.daily_price_ingestion: ingest tickers_requested=1
+INFO app.services.ingestion.daily_price_ingestion: ticker WSR loaded bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.ingestion.daily_price_ingestion: ingest done status=success tickers_loaded=1 tickers_skipped=0 price_rows_written=2 repair_queue_enqueued=0
+INFO app.services.ingestion.daily_price_ingestion: ingest start db_role=prod start_date=2026-07-09 end_date=2026-07-10
+INFO app.services.ingestion.daily_price_ingestion: ingest tickers_requested=1
+INFO app.services.ingestion.daily_price_ingestion: ticker WST loaded bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.ingestion.daily_price_ingestion: ingest done status=success tickers_loaded=1 tickers_skipped=0 price_rows_written=2 repair_queue_enqueued=0
+INFO app.services.ingestion.daily_price_ingestion: ingest start db_role=prod start_date=2026-07-09 end_date=2026-07-10
+INFO app.services.ingestion.daily_price_ingestion: ingest tickers_requested=1
+INFO app.services.ingestion.daily_price_ingestion: ticker WT loaded bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.ingestion.daily_price_ingestion: ingest done status=success tickers_loaded=1 tickers_skipped=0 price_rows_written=2 repair_queue_enqueued=0
+INFO app.services.ingestion.daily_price_ingestion: ingest start db_role=prod start_date=2026-07-09 end_date=2026-07-10
+INFO app.services.ingestion.daily_price_ingestion: ingest tickers_requested=1
+INFO app.services.ingestion.daily_price_ingestion: ticker WTBA loaded bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.ingestion.daily_price_ingestion: ingest done status=success tickers_loaded=1 tickers_skipped=0 price_rows_written=2 repair_queue_enqueued=0
+INFO app.services.ingestion.daily_price_ingestion: ingest start db_role=prod start_date=2026-07-09 end_date=2026-07-10
+INFO app.services.ingestion.daily_price_ingestion: ingest tickers_requested=1
+INFO app.services.ingestion.daily_price_ingestion: ticker WTFC loaded bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.ingestion.daily_price_ingestion: ingest done status=success tickers_loaded=1 tickers_skipped=0 price_rows_written=2 repair_queue_enqueued=0
+INFO app.services.ingestion.daily_price_ingestion: ingest start db_role=prod start_date=2026-07-09 end_date=2026-07-10
+INFO app.services.ingestion.daily_price_ingestion: ingest tickers_requested=1
+INFO app.services.ingestion.daily_price_ingestion: ticker WTI loaded bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.ingestion.daily_price_ingestion: ingest done status=success tickers_loaded=1 tickers_skipped=0 price_rows_written=2 repair_queue_enqueued=0
+INFO app.services.ingestion.daily_price_ingestion: ingest start db_role=prod start_date=2026-07-09 end_date=2026-07-10
+INFO app.services.ingestion.daily_price_ingestion: ingest tickers_requested=1
+INFO app.services.ingestion.daily_price_ingestion: ticker WTM loaded bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.ingestion.daily_price_ingestion: ingest done status=success tickers_loaded=1 tickers_skipped=0 price_rows_written=2 repair_queue_enqueued=0
+INFO app.services.ingestion.daily_price_ingestion: ingest start db_role=prod start_date=2026-07-09 end_date=2026-07-10
+INFO app.services.ingestion.daily_price_ingestion: ingest tickers_requested=1
+INFO app.services.ingestion.daily_price_ingestion: ticker WTRG loaded bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.ingestion.daily_price_ingestion: ingest done status=success tickers_loaded=1 tickers_skipped=0 price_rows_written=2 repair_queue_enqueued=0
+INFO app.services.ingestion.daily_price_ingestion: ingest start db_role=prod start_date=2026-07-09 end_date=2026-07-10
+INFO app.services.ingestion.daily_price_ingestion: ingest tickers_requested=1
+INFO app.services.ingestion.daily_price_ingestion: ticker WTS loaded bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.ingestion.daily_price_ingestion: ingest done status=success tickers_loaded=1 tickers_skipped=0 price_rows_written=2 repair_queue_enqueued=0
+INFO app.services.ingestion.daily_price_ingestion: ingest start db_role=prod start_date=2026-07-09 end_date=2026-07-10
+INFO app.services.ingestion.daily_price_ingestion: ingest tickers_requested=1
+INFO app.services.ingestion.daily_price_ingestion: ticker WTTR loaded bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.ingestion.daily_price_ingestion: ingest done status=success tickers_loaded=1 tickers_skipped=0 price_rows_written=2 repair_queue_enqueued=0
+INFO app.services.ingestion.daily_price_ingestion: ingest start db_role=prod start_date=2026-07-09 end_date=2026-07-10
+INFO app.services.ingestion.daily_price_ingestion: ingest tickers_requested=1
+INFO app.services.ingestion.daily_price_ingestion: ticker WU loaded bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.ingestion.daily_price_ingestion: ingest done status=success tickers_loaded=1 tickers_skipped=0 price_rows_written=2 repair_queue_enqueued=0
+INFO app.services.ingestion.daily_price_ingestion: ingest start db_role=prod start_date=2026-07-09 end_date=2026-07-10
+INFO app.services.ingestion.daily_price_ingestion: ingest tickers_requested=1
+INFO app.services.ingestion.daily_price_ingestion: ticker WULF loaded bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.ingestion.daily_price_ingestion: ingest done status=success tickers_loaded=1 tickers_skipped=0 price_rows_written=2 repair_queue_enqueued=0
+INFO app.services.ingestion.daily_price_ingestion: ingest start db_role=prod start_date=2026-07-09 end_date=2026-07-10
+INFO app.services.ingestion.daily_price_ingestion: ingest tickers_requested=1
+INFO app.services.ingestion.daily_price_ingestion: ticker WVVI loaded bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.ingestion.daily_price_ingestion: ingest done status=success tickers_loaded=1 tickers_skipped=0 price_rows_written=2 repair_queue_enqueued=0
+INFO app.services.ingestion.daily_price_ingestion: ingest start db_role=prod start_date=2026-07-09 end_date=2026-07-10
+INFO app.services.ingestion.daily_price_ingestion: ingest tickers_requested=1
+INFO app.services.ingestion.daily_price_ingestion: ticker WW loaded bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.ingestion.daily_price_ingestion: ingest done status=success tickers_loaded=1 tickers_skipped=0 price_rows_written=2 repair_queue_enqueued=0
+INFO app.services.ingestion.daily_price_ingestion: ingest start db_role=prod start_date=2026-07-09 end_date=2026-07-10
+INFO app.services.ingestion.daily_price_ingestion: ingest tickers_requested=1
+INFO app.services.ingestion.daily_price_ingestion: ticker WWD loaded bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.ingestion.daily_price_ingestion: ingest done status=success tickers_loaded=1 tickers_skipped=0 price_rows_written=2 repair_queue_enqueued=0
+INFO app.providers.yahoo_provider: batch download tickers=50 start=2026-07-09 end=2026-07-10 (vendor_end=2026-07-11)
+[                       0%                       ][**                     4%                       ]  2 of 50 completed[***                    6%                       ]  3 of 50 completed[****                   8%                       ]  4 of 50 completed[*****                 10%                       ]  5 of 50 completed[******                12%                       ]  6 of 50 completed[*******               14%                       ]  7 of 50 completed[********              16%                       ]  8 of 50 completed[*********             18%                       ]  9 of 50 completed[**********            20%                       ]  10 of 50 completed[***********           22%                       ]  11 of 50 completed[************          24%                       ]  12 of 50 completed[************          26%                       ]  13 of 50 completed[*************         28%                       ]  14 of 50 completed[**************        30%                       ]  15 of 50 completed[***************       32%                       ]  16 of 50 completed[****************      34%                       ]  17 of 50 completed[*****************     36%                       ]  18 of 50 completed[******************    38%                       ]  19 of 50 completed[*******************   40%                       ]  20 of 50 completed[********************  42%                       ]  21 of 50 completed[********************* 44%                       ]  22 of 50 completed[**********************46%                       ]  23 of 50 completed[**********************48%                       ]  24 of 50 completed[**********************50%                       ]  25 of 50 completed[**********************52%                       ]  26 of 50 completed[**********************54%*                      ]  27 of 50 completed[**********************56%**                     ]  28 of 50 completed[**********************58%***                    ]  29 of 50 completed[**********************60%****                   ]  30 of 50 completed[**********************62%*****                  ]  31 of 50 completed[**********************64%******                 ]  32 of 50 completed[**********************66%*******                ]  33 of 50 completed[**********************68%********               ]  34 of 50 completed[**********************70%*********              ]  35 of 50 completed[**********************72%**********             ]  36 of 50 completed[**********************74%***********            ]  37 of 50 completed[**********************76%***********            ]  38 of 50 completed[**********************78%************           ]  39 of 50 completed[**********************80%*************          ]  40 of 50 completed[**********************82%**************         ]  41 of 50 completed[**********************84%***************        ]  42 of 50 completed[**********************86%****************       ]  43 of 50 completed[**********************88%*****************      ]  44 of 50 completed[**********************90%******************     ]  45 of 50 completed[**********************92%*******************    ]  46 of 50 completed[**********************94%********************   ]  47 of 50 completed[**********************96%*********************  ]  48 of 50 completed[**********************98%********************** ]  49 of 50 completed[*********************100%***********************]  50 of 50 completed[*********************100%***********************]  50 of 50 completed
+INFO app.providers.yahoo_provider: batch mapped tickers=50 total_bars=100 status=success
+INFO app.services.ingestion.daily_price_ingestion: ingest start db_role=prod start_date=2026-07-09 end_date=2026-07-10
+INFO app.services.ingestion.daily_price_ingestion: ingest tickers_requested=1
+INFO app.services.ingestion.daily_price_ingestion: ticker WWR loaded bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.ingestion.daily_price_ingestion: ingest done status=success tickers_loaded=1 tickers_skipped=0 price_rows_written=2 repair_queue_enqueued=0
+INFO app.services.ingestion.daily_price_ingestion: ingest start db_role=prod start_date=2026-07-09 end_date=2026-07-10
+INFO app.services.ingestion.daily_price_ingestion: ingest tickers_requested=1
+INFO app.services.ingestion.daily_price_ingestion: ticker WWW loaded bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.ingestion.daily_price_ingestion: ingest done status=success tickers_loaded=1 tickers_skipped=0 price_rows_written=2 repair_queue_enqueued=0
+INFO app.services.ingestion.daily_price_ingestion: ingest start db_role=prod start_date=2026-07-09 end_date=2026-07-10
+INFO app.services.ingestion.daily_price_ingestion: ingest tickers_requested=1
+INFO app.services.ingestion.daily_price_ingestion: ticker WY loaded bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.ingestion.daily_price_ingestion: ingest done status=success tickers_loaded=1 tickers_skipped=0 price_rows_written=2 repair_queue_enqueued=0
+INFO app.services.ingestion.daily_price_ingestion: ingest start db_role=prod start_date=2026-07-09 end_date=2026-07-10
+INFO app.services.ingestion.daily_price_ingestion: ingest tickers_requested=1
+INFO app.services.ingestion.daily_price_ingestion: ticker WYFI loaded bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.ingestion.daily_price_ingestion: ingest done status=success tickers_loaded=1 tickers_skipped=0 price_rows_written=2 repair_queue_enqueued=0
+INFO app.services.ingestion.daily_price_ingestion: ingest start db_role=prod start_date=2026-07-09 end_date=2026-07-10
+INFO app.services.ingestion.daily_price_ingestion: ingest tickers_requested=1
+INFO app.services.ingestion.daily_price_ingestion: ticker WYNN loaded bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.ingestion.daily_price_ingestion: ingest done status=success tickers_loaded=1 tickers_skipped=0 price_rows_written=2 repair_queue_enqueued=0
+INFO app.services.ingestion.daily_price_ingestion: ingest start db_role=prod start_date=2026-07-09 end_date=2026-07-10
+INFO app.services.ingestion.daily_price_ingestion: ingest tickers_requested=1
+INFO app.services.ingestion.daily_price_ingestion: ticker WYY loaded bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.ingestion.daily_price_ingestion: ingest done status=success tickers_loaded=1 tickers_skipped=0 price_rows_written=2 repair_queue_enqueued=0
+INFO app.services.ingestion.daily_price_ingestion: ingest start db_role=prod start_date=2026-07-09 end_date=2026-07-10
+INFO app.services.ingestion.daily_price_ingestion: ingest tickers_requested=1
+INFO app.services.ingestion.daily_price_ingestion: ticker XAIR loaded bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.ingestion.daily_price_ingestion: ingest done status=success tickers_loaded=1 tickers_skipped=0 price_rows_written=2 repair_queue_enqueued=0
+INFO app.services.ingestion.daily_price_ingestion: ingest start db_role=prod start_date=2026-07-09 end_date=2026-07-10
+INFO app.services.ingestion.daily_price_ingestion: ingest tickers_requested=1
+INFO app.services.ingestion.daily_price_ingestion: ticker XBIO loaded bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.ingestion.daily_price_ingestion: ingest done status=success tickers_loaded=1 tickers_skipped=0 price_rows_written=2 repair_queue_enqueued=0
+INFO app.services.ingestion.daily_price_ingestion: ingest start db_role=prod start_date=2026-07-09 end_date=2026-07-10
+INFO app.services.ingestion.daily_price_ingestion: ingest tickers_requested=1
+INFO app.services.ingestion.daily_price_ingestion: ticker XBIT loaded bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.ingestion.daily_price_ingestion: ingest done status=success tickers_loaded=1 tickers_skipped=0 price_rows_written=2 repair_queue_enqueued=0
+INFO app.services.ingestion.daily_price_ingestion: ingest start db_role=prod start_date=2026-07-09 end_date=2026-07-10
+INFO app.services.ingestion.daily_price_ingestion: ingest tickers_requested=1
+INFO app.services.ingestion.daily_price_ingestion: ticker XBP loaded bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.ingestion.daily_price_ingestion: ingest done status=success tickers_loaded=1 tickers_skipped=0 price_rows_written=2 repair_queue_enqueued=0
+INFO app.services.ingestion.daily_price_ingestion: ingest start db_role=prod start_date=2026-07-09 end_date=2026-07-10
+INFO app.services.ingestion.daily_price_ingestion: ingest tickers_requested=1
+INFO app.services.ingestion.daily_price_ingestion: ticker XCBE loaded bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.ingestion.daily_price_ingestion: ingest done status=success tickers_loaded=1 tickers_skipped=0 price_rows_written=2 repair_queue_enqueued=0
+INFO app.services.ingestion.daily_price_ingestion: ingest start db_role=prod start_date=2026-07-09 end_date=2026-07-10
+INFO app.services.ingestion.daily_price_ingestion: ingest tickers_requested=1
+INFO app.services.ingestion.daily_price_ingestion: ticker XCUR loaded bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.ingestion.daily_price_ingestion: ingest done status=success tickers_loaded=1 tickers_skipped=0 price_rows_written=2 repair_queue_enqueued=0
+INFO app.services.ingestion.daily_price_ingestion: ingest start db_role=prod start_date=2026-07-09 end_date=2026-07-10
+INFO app.services.ingestion.daily_price_ingestion: ingest tickers_requested=1
+INFO app.services.ingestion.daily_price_ingestion: ticker XE loaded bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.ingestion.daily_price_ingestion: ingest done status=success tickers_loaded=1 tickers_skipped=0 price_rows_written=2 repair_queue_enqueued=0
+INFO app.services.ingestion.daily_price_ingestion: ingest start db_role=prod start_date=2026-07-09 end_date=2026-07-10
+INFO app.services.ingestion.daily_price_ingestion: ingest tickers_requested=1
+INFO app.services.ingestion.daily_price_ingestion: ticker XEL loaded bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.ingestion.daily_price_ingestion: ingest done status=success tickers_loaded=1 tickers_skipped=0 price_rows_written=2 repair_queue_enqueued=0
+INFO app.services.ingestion.daily_price_ingestion: ingest start db_role=prod start_date=2026-07-09 end_date=2026-07-10
+INFO app.services.ingestion.daily_price_ingestion: ingest tickers_requested=1
+INFO app.services.ingestion.daily_price_ingestion: ticker XELB loaded bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.ingestion.daily_price_ingestion: ingest done status=success tickers_loaded=1 tickers_skipped=0 price_rows_written=2 repair_queue_enqueued=0
+INFO app.services.ingestion.daily_price_ingestion: ingest start db_role=prod start_date=2026-07-09 end_date=2026-07-10
+INFO app.services.ingestion.daily_price_ingestion: ingest tickers_requested=1
+INFO app.services.ingestion.daily_price_ingestion: ticker XERS loaded bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.ingestion.daily_price_ingestion: ingest done status=success tickers_loaded=1 tickers_skipped=0 price_rows_written=2 repair_queue_enqueued=0
+INFO app.services.ingestion.daily_price_ingestion: ingest start db_role=prod start_date=2026-07-09 end_date=2026-07-10
+INFO app.services.ingestion.daily_price_ingestion: ingest tickers_requested=1
+INFO app.services.ingestion.daily_price_ingestion: ticker XFLT loaded bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.ingestion.daily_price_ingestion: ingest done status=success tickers_loaded=1 tickers_skipped=0 price_rows_written=2 repair_queue_enqueued=0
+INFO app.services.ingestion.daily_price_ingestion: ingest start db_role=prod start_date=2026-07-09 end_date=2026-07-10
+INFO app.services.ingestion.daily_price_ingestion: ingest tickers_requested=1
+INFO app.services.ingestion.daily_price_ingestion: ticker XFOR loaded bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.ingestion.daily_price_ingestion: ingest done status=success tickers_loaded=1 tickers_skipped=0 price_rows_written=2 repair_queue_enqueued=0
+INFO app.services.ingestion.daily_price_ingestion: ingest start db_role=prod start_date=2026-07-09 end_date=2026-07-10
+INFO app.services.ingestion.daily_price_ingestion: ingest tickers_requested=1
+INFO app.services.ingestion.daily_price_ingestion: ticker XGN loaded bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.ingestion.daily_price_ingestion: ingest done status=success tickers_loaded=1 tickers_skipped=0 price_rows_written=2 repair_queue_enqueued=0
+INFO app.services.ingestion.daily_price_ingestion: ingest start db_role=prod start_date=2026-07-09 end_date=2026-07-10
+INFO app.services.ingestion.daily_price_ingestion: ingest tickers_requested=1
+INFO app.services.ingestion.daily_price_ingestion: ticker XHLD loaded bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.ingestion.daily_price_ingestion: ingest done status=success tickers_loaded=1 tickers_skipped=0 price_rows_written=2 repair_queue_enqueued=0
+INFO app.services.ingestion.daily_price_ingestion: ingest start db_role=prod start_date=2026-07-09 end_date=2026-07-10
+INFO app.services.ingestion.daily_price_ingestion: ingest tickers_requested=1
+INFO app.services.ingestion.daily_price_ingestion: ticker XHR loaded bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.ingestion.daily_price_ingestion: ingest done status=success tickers_loaded=1 tickers_skipped=0 price_rows_written=2 repair_queue_enqueued=0
+INFO app.services.ingestion.daily_price_ingestion: ingest start db_role=prod start_date=2026-07-09 end_date=2026-07-10
+INFO app.services.ingestion.daily_price_ingestion: ingest tickers_requested=1
+INFO app.services.ingestion.daily_price_ingestion: ticker XLO loaded bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.ingestion.daily_price_ingestion: ingest done status=success tickers_loaded=1 tickers_skipped=0 price_rows_written=2 repair_queue_enqueued=0
+INFO app.services.ingestion.daily_price_ingestion: ingest start db_role=prod start_date=2026-07-09 end_date=2026-07-10
+INFO app.services.ingestion.daily_price_ingestion: ingest tickers_requested=1
+INFO app.services.ingestion.daily_price_ingestion: ticker XMAX loaded bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.ingestion.daily_price_ingestion: ingest done status=success tickers_loaded=1 tickers_skipped=0 price_rows_written=2 repair_queue_enqueued=0
+INFO app.services.ingestion.daily_price_ingestion: ingest start db_role=prod start_date=2026-07-09 end_date=2026-07-10
+INFO app.services.ingestion.daily_price_ingestion: ingest tickers_requested=1
+INFO app.services.ingestion.daily_price_ingestion: ticker XMTR loaded bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.ingestion.daily_price_ingestion: ingest done status=success tickers_loaded=1 tickers_skipped=0 price_rows_written=2 repair_queue_enqueued=0
+INFO app.services.ingestion.daily_price_ingestion: ingest start db_role=prod start_date=2026-07-09 end_date=2026-07-10
+INFO app.services.ingestion.daily_price_ingestion: ingest tickers_requested=1
+INFO app.services.ingestion.daily_price_ingestion: ticker XNCR loaded bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.ingestion.daily_price_ingestion: ingest done status=success tickers_loaded=1 tickers_skipped=0 price_rows_written=2 repair_queue_enqueued=0
+INFO app.services.ingestion.daily_price_ingestion: ingest start db_role=prod start_date=2026-07-09 end_date=2026-07-10
+INFO app.services.ingestion.daily_price_ingestion: ingest tickers_requested=1
+INFO app.services.ingestion.daily_price_ingestion: ticker XOM loaded bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.ingestion.daily_price_ingestion: ingest done status=success tickers_loaded=1 tickers_skipped=0 price_rows_written=2 repair_queue_enqueued=0
+INFO app.services.ingestion.daily_price_ingestion: ingest start db_role=prod start_date=2026-07-09 end_date=2026-07-10
+INFO app.services.ingestion.daily_price_ingestion: ingest tickers_requested=1
+INFO app.services.ingestion.daily_price_ingestion: ticker XOMA loaded bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.ingestion.daily_price_ingestion: ingest done status=success tickers_loaded=1 tickers_skipped=0 price_rows_written=2 repair_queue_enqueued=0
+INFO app.services.ingestion.daily_price_ingestion: ingest start db_role=prod start_date=2026-07-09 end_date=2026-07-10
+INFO app.services.ingestion.daily_price_ingestion: ingest tickers_requested=1
+INFO app.services.ingestion.daily_price_ingestion: ticker XOS loaded bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.ingestion.daily_price_ingestion: ingest done status=success tickers_loaded=1 tickers_skipped=0 price_rows_written=2 repair_queue_enqueued=0
+INFO app.services.ingestion.daily_price_ingestion: ingest start db_role=prod start_date=2026-07-09 end_date=2026-07-10
+INFO app.services.ingestion.daily_price_ingestion: ingest tickers_requested=1
+INFO app.services.ingestion.daily_price_ingestion: ticker XPEL loaded bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.ingestion.daily_price_ingestion: ingest done status=success tickers_loaded=1 tickers_skipped=0 price_rows_written=2 repair_queue_enqueued=0
+INFO app.services.ingestion.daily_price_ingestion: ingest start db_role=prod start_date=2026-07-09 end_date=2026-07-10
+INFO app.services.ingestion.daily_price_ingestion: ingest tickers_requested=1
+INFO app.services.ingestion.daily_price_ingestion: ticker XPER loaded bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.ingestion.daily_price_ingestion: ingest done status=success tickers_loaded=1 tickers_skipped=0 price_rows_written=2 repair_queue_enqueued=0
+INFO app.services.ingestion.daily_price_ingestion: ingest start db_role=prod start_date=2026-07-09 end_date=2026-07-10
+INFO app.services.ingestion.daily_price_ingestion: ingest tickers_requested=1
+INFO app.services.ingestion.daily_price_ingestion: ticker XPL loaded bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.ingestion.daily_price_ingestion: ingest done status=success tickers_loaded=1 tickers_skipped=0 price_rows_written=2 repair_queue_enqueued=0
+INFO app.services.ingestion.daily_price_ingestion: ingest start db_role=prod start_date=2026-07-09 end_date=2026-07-10
+INFO app.services.ingestion.daily_price_ingestion: ingest tickers_requested=1
+INFO app.services.ingestion.daily_price_ingestion: ticker XPO loaded bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.ingestion.daily_price_ingestion: ingest done status=success tickers_loaded=1 tickers_skipped=0 price_rows_written=2 repair_queue_enqueued=0
+INFO app.services.ingestion.daily_price_ingestion: ingest start db_role=prod start_date=2026-07-09 end_date=2026-07-10
+INFO app.services.ingestion.daily_price_ingestion: ingest tickers_requested=1
+INFO app.services.ingestion.daily_price_ingestion: ticker XPOF loaded bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.ingestion.daily_price_ingestion: ingest done status=success tickers_loaded=1 tickers_skipped=0 price_rows_written=2 repair_queue_enqueued=0
+INFO app.services.ingestion.daily_price_ingestion: ingest start db_role=prod start_date=2026-07-09 end_date=2026-07-10
+INFO app.services.ingestion.daily_price_ingestion: ingest tickers_requested=1
+INFO app.services.ingestion.daily_price_ingestion: ticker XPON loaded bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.ingestion.daily_price_ingestion: ingest done status=success tickers_loaded=1 tickers_skipped=0 price_rows_written=2 repair_queue_enqueued=0
+INFO app.services.ingestion.daily_price_ingestion: ingest start db_role=prod start_date=2026-07-09 end_date=2026-07-10
+INFO app.services.ingestion.daily_price_ingestion: ingest tickers_requested=1
+INFO app.services.ingestion.daily_price_ingestion: ticker XPRO loaded bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.ingestion.daily_price_ingestion: ingest done status=success tickers_loaded=1 tickers_skipped=0 price_rows_written=2 repair_queue_enqueued=0
+INFO app.services.ingestion.daily_price_ingestion: ingest start db_role=prod start_date=2026-07-09 end_date=2026-07-10
+INFO app.services.ingestion.daily_price_ingestion: ingest tickers_requested=1
+INFO app.services.ingestion.daily_price_ingestion: ticker XRAY loaded bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.ingestion.daily_price_ingestion: ingest done status=success tickers_loaded=1 tickers_skipped=0 price_rows_written=2 repair_queue_enqueued=0
+INFO app.services.ingestion.daily_price_ingestion: ingest start db_role=prod start_date=2026-07-09 end_date=2026-07-10
+INFO app.services.ingestion.daily_price_ingestion: ingest tickers_requested=1
+INFO app.services.ingestion.daily_price_ingestion: ticker XRN loaded bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.ingestion.daily_price_ingestion: ingest done status=success tickers_loaded=1 tickers_skipped=0 price_rows_written=2 repair_queue_enqueued=0
+INFO app.services.ingestion.daily_price_ingestion: ingest start db_role=prod start_date=2026-07-09 end_date=2026-07-10
+INFO app.services.ingestion.daily_price_ingestion: ingest tickers_requested=1
+INFO app.services.ingestion.daily_price_ingestion: ticker XRPN loaded bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.ingestion.daily_price_ingestion: ingest done status=success tickers_loaded=1 tickers_skipped=0 price_rows_written=2 repair_queue_enqueued=0
+INFO app.services.ingestion.daily_price_ingestion: ingest start db_role=prod start_date=2026-07-09 end_date=2026-07-10
+INFO app.services.ingestion.daily_price_ingestion: ingest tickers_requested=1
+INFO app.services.ingestion.daily_price_ingestion: ticker XRX loaded bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.ingestion.daily_price_ingestion: ingest done status=success tickers_loaded=1 tickers_skipped=0 price_rows_written=2 repair_queue_enqueued=0
+INFO app.services.ingestion.daily_price_ingestion: ingest start db_role=prod start_date=2026-07-09 end_date=2026-07-10
+INFO app.services.ingestion.daily_price_ingestion: ingest tickers_requested=1
+INFO app.services.ingestion.daily_price_ingestion: ticker XSLL loaded bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.ingestion.daily_price_ingestion: ingest done status=success tickers_loaded=1 tickers_skipped=0 price_rows_written=2 repair_queue_enqueued=0
+INFO app.services.ingestion.daily_price_ingestion: ingest start db_role=prod start_date=2026-07-09 end_date=2026-07-10
+INFO app.services.ingestion.daily_price_ingestion: ingest tickers_requested=1
+INFO app.services.ingestion.daily_price_ingestion: ticker XTIA loaded bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.ingestion.daily_price_ingestion: ingest done status=success tickers_loaded=1 tickers_skipped=0 price_rows_written=2 repair_queue_enqueued=0
+INFO app.services.ingestion.daily_price_ingestion: ingest start db_role=prod start_date=2026-07-09 end_date=2026-07-10
+INFO app.services.ingestion.daily_price_ingestion: ingest tickers_requested=1
+INFO app.services.ingestion.daily_price_ingestion: ticker XTNT loaded bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.ingestion.daily_price_ingestion: ingest done status=success tickers_loaded=1 tickers_skipped=0 price_rows_written=2 repair_queue_enqueued=0
+INFO app.services.ingestion.daily_price_ingestion: ingest start db_role=prod start_date=2026-07-09 end_date=2026-07-10
+INFO app.services.ingestion.daily_price_ingestion: ingest tickers_requested=1
+INFO app.services.ingestion.daily_price_ingestion: ticker XWEL loaded bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.ingestion.daily_price_ingestion: ingest done status=success tickers_loaded=1 tickers_skipped=0 price_rows_written=2 repair_queue_enqueued=0
+INFO app.services.ingestion.daily_price_ingestion: ingest start db_role=prod start_date=2026-07-09 end_date=2026-07-10
+INFO app.services.ingestion.daily_price_ingestion: ingest tickers_requested=1
+INFO app.services.ingestion.daily_price_ingestion: ticker XXII loaded bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.ingestion.daily_price_ingestion: ingest done status=success tickers_loaded=1 tickers_skipped=0 price_rows_written=2 repair_queue_enqueued=0
+INFO app.services.ingestion.daily_price_ingestion: ingest start db_role=prod start_date=2026-07-09 end_date=2026-07-10
+INFO app.services.ingestion.daily_price_ingestion: ingest tickers_requested=1
+INFO app.services.ingestion.daily_price_ingestion: ticker XYL loaded bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.ingestion.daily_price_ingestion: ingest done status=success tickers_loaded=1 tickers_skipped=0 price_rows_written=2 repair_queue_enqueued=0
+INFO app.services.ingestion.daily_price_ingestion: ingest start db_role=prod start_date=2026-07-09 end_date=2026-07-10
+INFO app.services.ingestion.daily_price_ingestion: ingest tickers_requested=1
+INFO app.services.ingestion.daily_price_ingestion: ticker XYZ loaded bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.ingestion.daily_price_ingestion: ingest done status=success tickers_loaded=1 tickers_skipped=0 price_rows_written=2 repair_queue_enqueued=0
+INFO app.services.ingestion.daily_price_ingestion: ingest start db_role=prod start_date=2026-07-09 end_date=2026-07-10
+INFO app.services.ingestion.daily_price_ingestion: ingest tickers_requested=1
+INFO app.services.ingestion.daily_price_ingestion: ticker YCBD loaded bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.ingestion.daily_price_ingestion: ingest done status=success tickers_loaded=1 tickers_skipped=0 price_rows_written=2 repair_queue_enqueued=0
+INFO app.services.ingestion.daily_price_ingestion: ingest start db_role=prod start_date=2026-07-09 end_date=2026-07-10
+INFO app.services.ingestion.daily_price_ingestion: ingest tickers_requested=1
+INFO app.services.ingestion.daily_price_ingestion: ticker YDES loaded bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.ingestion.daily_price_ingestion: ingest done status=success tickers_loaded=1 tickers_skipped=0 price_rows_written=2 repair_queue_enqueued=0
+INFO app.services.ingestion.daily_price_ingestion: ingest start db_role=prod start_date=2026-07-09 end_date=2026-07-10
+INFO app.services.ingestion.daily_price_ingestion: ingest tickers_requested=1
+INFO app.services.ingestion.daily_price_ingestion: ticker YELP loaded bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.ingestion.daily_price_ingestion: ingest done status=success tickers_loaded=1 tickers_skipped=0 price_rows_written=2 repair_queue_enqueued=0
+INFO app.services.ingestion.daily_price_ingestion: ingest start db_role=prod start_date=2026-07-09 end_date=2026-07-10
+INFO app.services.ingestion.daily_price_ingestion: ingest tickers_requested=1
+INFO app.services.ingestion.daily_price_ingestion: ticker YETI loaded bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.ingestion.daily_price_ingestion: ingest done status=success tickers_loaded=1 tickers_skipped=0 price_rows_written=2 repair_queue_enqueued=0
+INFO app.providers.yahoo_provider: batch download tickers=30 start=2026-07-09 end=2026-07-10 (vendor_end=2026-07-11)
+[                       0%                       ][***                    7%                       ]  2 of 30 completed[*****                 10%                       ]  3 of 30 completed[******                13%                       ]  4 of 30 completed[********              17%                       ]  5 of 30 completed[**********            20%                       ]  6 of 30 completed[***********           23%                       ]  7 of 30 completed[*************         27%                       ]  8 of 30 completed[**************        30%                       ]  9 of 30 completed[****************      33%                       ]  10 of 30 completed[******************    37%                       ]  11 of 30 completed[*******************   40%                       ]  12 of 30 completed[********************* 43%                       ]  13 of 30 completed[**********************47%                       ]  14 of 30 completed[**********************50%                       ]  15 of 30 completed[**********************53%                       ]  16 of 30 completed[**********************57%**                     ]  17 of 30 completed[**********************60%****                   ]  18 of 30 completed[**********************63%*****                  ]  19 of 30 completed[**********************67%*******                ]  20 of 30 completed[**********************70%*********              ]  21 of 30 completed[**********************73%**********             ]  22 of 30 completed[**********************77%************           ]  23 of 30 completed[**********************80%*************          ]  24 of 30 completed[**********************83%***************        ]  25 of 30 completed[**********************87%*****************      ]  26 of 30 completed[**********************90%******************     ]  27 of 30 completed[**********************93%********************   ]  28 of 30 completed[**********************97%********************** ]  29 of 30 completed[*********************100%***********************]  30 of 30 completed[*********************100%***********************]  30 of 30 completed
+INFO app.providers.yahoo_provider: batch mapped tickers=30 total_bars=60 status=success
+INFO app.services.ingestion.daily_price_ingestion: ingest start db_role=prod start_date=2026-07-09 end_date=2026-07-10
+INFO app.services.ingestion.daily_price_ingestion: ingest tickers_requested=1
+INFO app.services.ingestion.daily_price_ingestion: ticker YEXT loaded bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.ingestion.daily_price_ingestion: ingest done status=success tickers_loaded=1 tickers_skipped=0 price_rows_written=2 repair_queue_enqueued=0
+INFO app.services.ingestion.daily_price_ingestion: ingest start db_role=prod start_date=2026-07-09 end_date=2026-07-10
+INFO app.services.ingestion.daily_price_ingestion: ingest tickers_requested=1
+INFO app.services.ingestion.daily_price_ingestion: ticker YHC loaded bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.ingestion.daily_price_ingestion: ingest done status=success tickers_loaded=1 tickers_skipped=0 price_rows_written=2 repair_queue_enqueued=0
+INFO app.services.ingestion.daily_price_ingestion: ingest start db_role=prod start_date=2026-07-09 end_date=2026-07-10
+INFO app.services.ingestion.daily_price_ingestion: ingest tickers_requested=1
+INFO app.services.ingestion.daily_price_ingestion: ticker YHGJ loaded bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.ingestion.daily_price_ingestion: ingest done status=success tickers_loaded=1 tickers_skipped=0 price_rows_written=2 repair_queue_enqueued=0
+INFO app.services.ingestion.daily_price_ingestion: ingest start db_role=prod start_date=2026-07-09 end_date=2026-07-10
+INFO app.services.ingestion.daily_price_ingestion: ingest tickers_requested=1
+INFO app.services.ingestion.daily_price_ingestion: ticker YORW loaded bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.ingestion.daily_price_ingestion: ingest done status=success tickers_loaded=1 tickers_skipped=0 price_rows_written=2 repair_queue_enqueued=0
+INFO app.services.ingestion.daily_price_ingestion: ingest start db_role=prod start_date=2026-07-09 end_date=2026-07-10
+INFO app.services.ingestion.daily_price_ingestion: ingest tickers_requested=1
+INFO app.services.ingestion.daily_price_ingestion: ticker YOU loaded bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.ingestion.daily_price_ingestion: ingest done status=success tickers_loaded=1 tickers_skipped=0 price_rows_written=2 repair_queue_enqueued=0
+INFO app.services.ingestion.daily_price_ingestion: ingest start db_role=prod start_date=2026-07-09 end_date=2026-07-10
+INFO app.services.ingestion.daily_price_ingestion: ingest tickers_requested=1
+INFO app.services.ingestion.daily_price_ingestion: ticker YSWY loaded bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.ingestion.daily_price_ingestion: ingest done status=success tickers_loaded=1 tickers_skipped=0 price_rows_written=2 repair_queue_enqueued=0
+INFO app.services.ingestion.daily_price_ingestion: ingest start db_role=prod start_date=2026-07-09 end_date=2026-07-10
+INFO app.services.ingestion.daily_price_ingestion: ingest tickers_requested=1
+INFO app.services.ingestion.daily_price_ingestion: ticker YUM loaded bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.ingestion.daily_price_ingestion: ingest done status=success tickers_loaded=1 tickers_skipped=0 price_rows_written=2 repair_queue_enqueued=0
+INFO app.services.ingestion.daily_price_ingestion: ingest start db_role=prod start_date=2026-07-09 end_date=2026-07-10
+INFO app.services.ingestion.daily_price_ingestion: ingest tickers_requested=1
+INFO app.services.ingestion.daily_price_ingestion: ticker YUMC loaded bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.ingestion.daily_price_ingestion: ingest done status=success tickers_loaded=1 tickers_skipped=0 price_rows_written=2 repair_queue_enqueued=0
+INFO app.services.ingestion.daily_price_ingestion: ingest start db_role=prod start_date=2026-07-09 end_date=2026-07-10
+INFO app.services.ingestion.daily_price_ingestion: ingest tickers_requested=1
+INFO app.services.ingestion.daily_price_ingestion: ticker YYAI loaded bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.ingestion.daily_price_ingestion: ingest done status=success tickers_loaded=1 tickers_skipped=0 price_rows_written=2 repair_queue_enqueued=0
+INFO app.services.ingestion.daily_price_ingestion: ingest start db_role=prod start_date=2026-07-09 end_date=2026-07-10
+INFO app.services.ingestion.daily_price_ingestion: ingest tickers_requested=1
+INFO app.services.ingestion.daily_price_ingestion: ticker Z loaded bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.ingestion.daily_price_ingestion: ingest done status=success tickers_loaded=1 tickers_skipped=0 price_rows_written=2 repair_queue_enqueued=0
+INFO app.services.ingestion.daily_price_ingestion: ingest start db_role=prod start_date=2026-07-09 end_date=2026-07-10
+INFO app.services.ingestion.daily_price_ingestion: ingest tickers_requested=1
+INFO app.services.ingestion.daily_price_ingestion: ticker ZBH loaded bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.ingestion.daily_price_ingestion: ingest done status=success tickers_loaded=1 tickers_skipped=0 price_rows_written=2 repair_queue_enqueued=0
+INFO app.services.ingestion.daily_price_ingestion: ingest start db_role=prod start_date=2026-07-09 end_date=2026-07-10
+INFO app.services.ingestion.daily_price_ingestion: ingest tickers_requested=1
+INFO app.services.ingestion.daily_price_ingestion: ticker ZBIO loaded bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.ingestion.daily_price_ingestion: ingest done status=success tickers_loaded=1 tickers_skipped=0 price_rows_written=2 repair_queue_enqueued=0
+INFO app.services.ingestion.daily_price_ingestion: ingest start db_role=prod start_date=2026-07-09 end_date=2026-07-10
+INFO app.services.ingestion.daily_price_ingestion: ingest tickers_requested=1
+INFO app.services.ingestion.daily_price_ingestion: ticker ZBRA loaded bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.ingestion.daily_price_ingestion: ingest done status=success tickers_loaded=1 tickers_skipped=0 price_rows_written=2 repair_queue_enqueued=0
+INFO app.services.ingestion.daily_price_ingestion: ingest start db_role=prod start_date=2026-07-09 end_date=2026-07-10
+INFO app.services.ingestion.daily_price_ingestion: ingest tickers_requested=1
+INFO app.services.ingestion.daily_price_ingestion: ticker ZD loaded bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.ingestion.daily_price_ingestion: ingest done status=success tickers_loaded=1 tickers_skipped=0 price_rows_written=2 repair_queue_enqueued=0
+INFO app.services.ingestion.daily_price_ingestion: ingest start db_role=prod start_date=2026-07-09 end_date=2026-07-10
+INFO app.services.ingestion.daily_price_ingestion: ingest tickers_requested=1
+INFO app.services.ingestion.daily_price_ingestion: ticker ZEO loaded bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.ingestion.daily_price_ingestion: ingest done status=success tickers_loaded=1 tickers_skipped=0 price_rows_written=2 repair_queue_enqueued=0
+INFO app.services.ingestion.daily_price_ingestion: ingest start db_role=prod start_date=2026-07-09 end_date=2026-07-10
+INFO app.services.ingestion.daily_price_ingestion: ingest tickers_requested=1
+INFO app.services.ingestion.daily_price_ingestion: ticker ZETA loaded bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.ingestion.daily_price_ingestion: ingest done status=success tickers_loaded=1 tickers_skipped=0 price_rows_written=2 repair_queue_enqueued=0
+INFO app.services.ingestion.daily_price_ingestion: ingest start db_role=prod start_date=2026-07-09 end_date=2026-07-10
+INFO app.services.ingestion.daily_price_ingestion: ingest tickers_requested=1
+INFO app.services.ingestion.daily_price_ingestion: ticker ZG loaded bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.ingestion.daily_price_ingestion: ingest done status=success tickers_loaded=1 tickers_skipped=0 price_rows_written=2 repair_queue_enqueued=0
+INFO app.services.ingestion.daily_price_ingestion: ingest start db_role=prod start_date=2026-07-09 end_date=2026-07-10
+INFO app.services.ingestion.daily_price_ingestion: ingest tickers_requested=1
+INFO app.services.ingestion.daily_price_ingestion: ticker ZION loaded bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.ingestion.daily_price_ingestion: ingest done status=success tickers_loaded=1 tickers_skipped=0 price_rows_written=2 repair_queue_enqueued=0
+INFO app.services.ingestion.daily_price_ingestion: ingest start db_role=prod start_date=2026-07-09 end_date=2026-07-10
+INFO app.services.ingestion.daily_price_ingestion: ingest tickers_requested=1
+INFO app.services.ingestion.daily_price_ingestion: ticker ZIP loaded bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.ingestion.daily_price_ingestion: ingest done status=success tickers_loaded=1 tickers_skipped=0 price_rows_written=2 repair_queue_enqueued=0
+INFO app.services.ingestion.daily_price_ingestion: ingest start db_role=prod start_date=2026-07-09 end_date=2026-07-10
+INFO app.services.ingestion.daily_price_ingestion: ingest tickers_requested=1
+INFO app.services.ingestion.daily_price_ingestion: ticker ZM loaded bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.ingestion.daily_price_ingestion: ingest done status=success tickers_loaded=1 tickers_skipped=0 price_rows_written=2 repair_queue_enqueued=0
+INFO app.services.ingestion.daily_price_ingestion: ingest start db_role=prod start_date=2026-07-09 end_date=2026-07-10
+INFO app.services.ingestion.daily_price_ingestion: ingest tickers_requested=1
+INFO app.services.ingestion.daily_price_ingestion: ticker ZNB loaded bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.ingestion.daily_price_ingestion: ingest done status=success tickers_loaded=1 tickers_skipped=0 price_rows_written=2 repair_queue_enqueued=0
+INFO app.services.ingestion.daily_price_ingestion: ingest start db_role=prod start_date=2026-07-09 end_date=2026-07-10
+INFO app.services.ingestion.daily_price_ingestion: ingest tickers_requested=1
+INFO app.services.ingestion.daily_price_ingestion: ticker ZNTL loaded bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.ingestion.daily_price_ingestion: ingest done status=success tickers_loaded=1 tickers_skipped=0 price_rows_written=2 repair_queue_enqueued=0
+INFO app.services.ingestion.daily_price_ingestion: ingest start db_role=prod start_date=2026-07-09 end_date=2026-07-10
+INFO app.services.ingestion.daily_price_ingestion: ingest tickers_requested=1
+INFO app.services.ingestion.daily_price_ingestion: ticker ZS loaded bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.ingestion.daily_price_ingestion: ingest done status=success tickers_loaded=1 tickers_skipped=0 price_rows_written=2 repair_queue_enqueued=0
+INFO app.services.ingestion.daily_price_ingestion: ingest start db_role=prod start_date=2026-07-09 end_date=2026-07-10
+INFO app.services.ingestion.daily_price_ingestion: ingest tickers_requested=1
+INFO app.services.ingestion.daily_price_ingestion: ticker ZSQR loaded bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.ingestion.daily_price_ingestion: ingest done status=success tickers_loaded=1 tickers_skipped=0 price_rows_written=2 repair_queue_enqueued=0
+INFO app.services.ingestion.daily_price_ingestion: ingest start db_role=prod start_date=2026-07-09 end_date=2026-07-10
+INFO app.services.ingestion.daily_price_ingestion: ingest tickers_requested=1
+INFO app.services.ingestion.daily_price_ingestion: ticker ZTS loaded bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.ingestion.daily_price_ingestion: ingest done status=success tickers_loaded=1 tickers_skipped=0 price_rows_written=2 repair_queue_enqueued=0
+INFO app.services.ingestion.daily_price_ingestion: ingest start db_role=prod start_date=2026-07-09 end_date=2026-07-10
+INFO app.services.ingestion.daily_price_ingestion: ingest tickers_requested=1
+INFO app.services.ingestion.daily_price_ingestion: ticker ZUMZ loaded bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.ingestion.daily_price_ingestion: ingest done status=success tickers_loaded=1 tickers_skipped=0 price_rows_written=2 repair_queue_enqueued=0
+INFO app.services.ingestion.daily_price_ingestion: ingest start db_role=prod start_date=2026-07-09 end_date=2026-07-10
+INFO app.services.ingestion.daily_price_ingestion: ingest tickers_requested=1
+INFO app.services.ingestion.daily_price_ingestion: ticker ZVIA loaded bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.ingestion.daily_price_ingestion: ingest done status=success tickers_loaded=1 tickers_skipped=0 price_rows_written=2 repair_queue_enqueued=0
+INFO app.services.ingestion.daily_price_ingestion: ingest start db_role=prod start_date=2026-07-09 end_date=2026-07-10
+INFO app.services.ingestion.daily_price_ingestion: ingest tickers_requested=1
+INFO app.services.ingestion.daily_price_ingestion: ticker ZVRA loaded bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.ingestion.daily_price_ingestion: ingest done status=success tickers_loaded=1 tickers_skipped=0 price_rows_written=2 repair_queue_enqueued=0
+INFO app.services.ingestion.daily_price_ingestion: ingest start db_role=prod start_date=2026-07-09 end_date=2026-07-10
+INFO app.services.ingestion.daily_price_ingestion: ingest tickers_requested=1
+INFO app.services.ingestion.daily_price_ingestion: ticker ZWS loaded bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.ingestion.daily_price_ingestion: ingest done status=success tickers_loaded=1 tickers_skipped=0 price_rows_written=2 repair_queue_enqueued=0
+INFO app.services.ingestion.daily_price_ingestion: ingest start db_role=prod start_date=2026-07-09 end_date=2026-07-10
+INFO app.services.ingestion.daily_price_ingestion: ingest tickers_requested=1
+INFO app.services.ingestion.daily_price_ingestion: ticker ZYME loaded bars=2
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+INFO app.services.ingestion.daily_price_ingestion: ingest done status=success tickers_loaded=1 tickers_skipped=0 price_rows_written=2 repair_queue_enqueued=0
+INFO app.database.duckdb_manager: opening duckdb connection role=prod read_only=False path=D:\Python\Stock_AI_Platform\data\duckdb\prod.duckdb
+BACKFILL_DIAG: enter main
+BACKFILL_DIAG: pid=7844
+BACKFILL_DIAG: ppid=8504
+BACKFILL_DIAG: executable=D:\Python\Stock_AI_Platform\.venv\Scripts\python.exe
+BACKFILL_DIAG: base_executable=C:\Python314\python.exe
+BACKFILL_DIAG: venv_launcher_detected=True — 'D:\Python\Stock_AI_Platform\.venv\Scripts\python.exe' is the venv launcher stub; 'C:\Python314\python.exe' is the real interpreter. Two python.exe will appear in Get-CimInstance. Only the child (this process, real interpreter) does any work. This is normal Windows venv behaviour — only one process acquires the lock.
+BACKFILL_DIAG: argv=['tools/backfill_prod_history.py', '--start-date', '2026-07-09', '--end-date', '2026-07-10', '--tickers-file', 'data/input/backfill_tickers_common_only.csv', '--no-run-validation', '--no-run-mutation', '--no-run-features', '--no-run-regime']
+BACKFILL_DIAG: cwd=D:\Python\Stock_AI_Platform
+BACKFILL_DIAG: script_file=D:\Python\Stock_AI_Platform\tools\backfill_prod_history.py
+BACKFILL_DIAG: resolved_script_file=D:\Python\Stock_AI_Platform\tools\backfill_prod_history.py
+BACKFILL_DIAG: project_root=D:\Python\Stock_AI_Platform
+BACKFILL_DIAG: lock_path=D:\Python\Stock_AI_Platform\data\locks\prod_backfill_history.lock
+BACKFILL_DIAG: parent_exe='D:\\Python\\Stock_AI_Platform\\.venv\\Scripts\\python.exe'
+BACKFILL_DIAG: parent_is_python=True pid=7844 ppid=8504 — parent process is a Python executable (.venv launcher stub). Only I (pid=7844) will acquire the lock and do actual work. To confirm after lock acquisition: Get-Content .\data\locks\prod_backfill_history.lock | ConvertFrom-Json
+Starting prod historical backfill: pid=7844 start_date=2026-07-09 end_date=2026-07-10
+BACKFILL_DIAG: attempting lock pid=7844 lock_path=D:\Python\Stock_AI_Platform\data\locks\prod_backfill_history.lock
+BACKFILL_DIAG: lock exists pid=7844 existing_lock={"pid": 22976, "started_at": "2026-07-11T01:46:22.308907+00:00", "argv": ["--start-date", "2026-07-09", "--end-date", "2026-07-10", "--tickers-file", "data/input/backfill_tickers_common_only.csv", "--no-run-validation", "--no-run-mutation", "--no-run-features", "--no-run-regime"], "cwd": "D:\\Python\\Stock_AI_Platform"}
+BACKFILL_DIAG: lock acquired pid=7844 (after stale removal)
+Starting prod historical backfill: start_date=2026-07-09 end_date=2026-07-10 batch_size=50 dry_run=False
+Universe snapshot completed from file: tickers=3980 rows=3980
+Active stock tickers found: 3980
+Benchmark backfill completed: rows=126
+Building completeness-aware repair plan...
+Repair plan: complete=3800 need_repair=180 missing_dates=360 bad_rows=0
+Repairing 180 empty stock tickers: 2026-07-09→2026-07-10
+  Empty-stock batch 1/4: tickers=50 status=ok rows=100
+  Empty-stock batch 2/4: tickers=50 status=ok rows=100
+  Empty-stock batch 3/4: tickers=50 status=ok rows=100
+  Empty-stock batch 4/4: tickers=30 status=ok rows=60
+SUCCESS: prod historical backfill completed (price_rows_written=360).
+BACKFILL_DIAG: lock released pid=7844

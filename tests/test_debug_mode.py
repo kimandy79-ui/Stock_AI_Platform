@@ -7,19 +7,21 @@ network, or orchestrator import ever occurs.
 
 Key design decision captured here
 -----------------------------------
-``_ScopedStep3UniversalProxy.screen()`` calls the real engine with the
-**standard Step3ScreeningEngine.screen() signature** — no ``tickers`` kwarg is
-added to the public API.  Ticker filtering is applied inside the real engine at
-the private ``_read()`` level via a dynamic subclass created by the default
-factory.  Offline tests verify:
+``_ScopedStep3UniversalProxy.run()`` calls the real
+``Step3UniversalEligibilityEngine`` with the **standard setup-mode ``run()``
+signature** (``signal_date``, ``db_role``, ``run_id``, ``setup_configs``) — no
+``tickers`` kwarg is added to the public API.  Ticker filtering is applied
+inside the real engine at the private ``_read_features()`` level via a dynamic
+subclass created by the default factory.  Offline tests verify:
 
   * The right engine type is injected for each preset.
   * ``selected_tickers`` on the proxy/engine match the sampled ticker list.
-  * ``proxy.screen()`` delegates to the real engine with the standard signature.
+  * ``proxy.run()`` delegates to the real engine with the standard signature,
+    matching exactly how ``PipelineOrchestrator._step_step3`` calls it.
 
-The actual Polars filter in ``_read()`` is tested only with a live duckdb /
-polars environment (integration tests) — it is out of scope for this offline
-suite.
+The actual Polars filter in ``_read_features()`` is tested only with a live
+duckdb / polars environment (integration tests) — it is out of scope for this
+offline suite.
 """
 
 from __future__ import annotations
@@ -143,7 +145,7 @@ class FakeScopedStep3Engine:
     def __init__(self, tickers: list[str]) -> None:
         self.selected_tickers = list(tickers)
 
-    def run(self, signal_date, setup_config_id, setup_config, db_role, run_id=None):
+    def run(self, signal_date, db_role="prod", run_id=None, setup_configs=None):
         return ServiceResult(service_result.STATUS_SUCCESS, run_id or "s3")
 
 
@@ -276,7 +278,10 @@ def test_scoped_feature_engine_exposes_selected_tickers():
 # signature (no tickers kwarg added to the public API).
 # --------------------------------------------------------------------------- #
 class _FakeRealStep3Engine:
-    """Mimics Step3UniversalEligibilityEngine.run() with its setup-mode signature."""
+    """Mimics Step3UniversalEligibilityEngine.run() with its ACTUAL current
+    signature: ``run(signal_date, db_role="prod", run_id=None, setup_configs=None)``.
+    No ``setup_config_id`` / ``setup_config`` — those were a stale strategy-mode
+    holdover the proxy carried until 2026-07-15 (see debug_mode_scoped_step3_signature_fix)."""
 
     def __init__(self):
         self.calls: list[dict] = []
@@ -284,41 +289,39 @@ class _FakeRealStep3Engine:
     def run(
         self,
         signal_date,
-        setup_config_id,
-        setup_config,
-        db_role,
+        db_role="prod",
         run_id=None,
+        setup_configs=None,
     ):
         self.calls.append({
             "signal_date": signal_date,
-            "setup_config_id": setup_config_id,
-            "setup_config": setup_config,
             "db_role": db_role,
             "run_id": run_id,
+            "setup_configs": setup_configs,
         })
         return ServiceResult(service_result.STATUS_SUCCESS, "s3")
 
 
-def test_scoped_step3_proxy_delegates_with_setup_mode_api():
-    """proxy.run() forwards args with the setup-mode Step3 signature."""
+def test_scoped_step3_proxy_delegates_with_real_step3_signature():
+    """proxy.run() forwards args with the real Step3 signature — the same call
+    shape PipelineOrchestrator._step_step3 uses: signal_date, db_role, run_id
+    only, no setup_config_id/setup_config."""
     real = _FakeRealStep3Engine()
     proxy = _ScopedStep3UniversalProxy(real, ["AAPL", "MSFT"])
     proxy.run(
         signal_date=RUN_DATE,
-        setup_config_id="setup_breakout_v1",
-        setup_config={"k": "v"},
         db_role="debug",
         run_id="t",
     )
     call = real.calls[-1]
     assert call["signal_date"] == RUN_DATE
-    assert call["setup_config_id"] == "setup_breakout_v1"
-    assert call["setup_config"] == {"k": "v"}
     assert call["db_role"] == "debug"
     assert call["run_id"] == "t"
-    # No legacy strategy_config / strategy_config_id kwargs.
+    # No legacy strategy_config / strategy_config_id / setup_config_id kwargs.
     assert "strategy_config" not in call
     assert "strategy_config_id" not in call
+    assert "setup_config_id" not in call
+    assert "setup_config" not in call
 
 
 def test_scoped_step3_proxy_exposes_selected_tickers():
@@ -329,7 +332,20 @@ def test_scoped_step3_proxy_exposes_selected_tickers():
 def test_scoped_step3_proxy_returns_real_engine_result():
     real = _FakeRealStep3Engine()
     proxy = _ScopedStep3UniversalProxy(real, ["A"])
-    result = proxy.run(RUN_DATE, "setup_breakout_v1", {}, "debug")
+    result = proxy.run(RUN_DATE, "debug")
+    assert result.status == service_result.STATUS_SUCCESS
+
+
+def test_scoped_step3_proxy_matches_orchestrator_call_shape_without_typeerror():
+    """Regression (found 2026-07-15): PipelineOrchestrator._step_step3 calls
+    eligibility_engine.run(signal_date=, db_role=, run_id=) — three kwargs,
+    nothing else. The proxy previously required setup_config_id/setup_config
+    with no defaults and crashed with TypeError on every scoped step3 debug run
+    (including the shipped config_tuning_test preset). Call it exactly the way
+    the real orchestrator does."""
+    real = _FakeRealStep3Engine()
+    proxy = _ScopedStep3UniversalProxy(real, ["AAPL"])
+    result = proxy.run(signal_date=RUN_DATE, db_role="debug", run_id="r1")
     assert result.status == service_result.STATUS_SUCCESS
 
 
@@ -747,3 +763,81 @@ def test_debug_metadata_records_setup_types() -> None:
     assert "setup_types" in dbg
     assert set(dbg["setup_types"]) == {"breakout", "trend_continuation"}
     assert "strategy_names" not in dbg
+
+
+# --------------------------------------------------------------------------- #
+# Regression: shipped config_tuning_test preset must not crash with TypeError
+# from a stale _ScopedStep3UniversalProxy.run() signature (found 2026-07-15).
+#
+# The controller-level FakeOrchestrator used above never actually calls
+# ``eligibility_engine.run()`` — it just records init/run kwargs — so it could
+# not have caught the original bug. This test wires an orchestrator stand-in
+# that DOES invoke the injected engine, the same way
+# PipelineOrchestrator._step_step3 does, and exercises the REAL
+# _ScopedStep3UniversalProxy (imported, not faked) end to end through
+# run_preset("config_tuning_test").
+# --------------------------------------------------------------------------- #
+class _FakeRealStep3EngineForPresetRun:
+    """Mimics Step3UniversalEligibilityEngine.run()'s real, current signature."""
+
+    def __init__(self) -> None:
+        self.calls: list[dict] = []
+
+    def run(self, signal_date, db_role="prod", run_id=None, setup_configs=None):
+        self.calls.append({
+            "signal_date": signal_date,
+            "db_role": db_role,
+            "run_id": run_id,
+            "setup_configs": setup_configs,
+        })
+        return ServiceResult(service_result.STATUS_SUCCESS, run_id or "s3")
+
+
+class _OrchestratorInvokesEligibilityEngine:
+    """Mimics PipelineOrchestrator._step_step3(): calls
+    ``eligibility_engine.run(signal_date=, db_role=, run_id=)`` — exactly those
+    three kwargs, nothing else."""
+
+    def __init__(self, **kwargs):
+        self.init_kwargs = kwargs
+
+    def run(self, **kwargs):
+        eligibility_engine = self.init_kwargs["eligibility_engine"]
+        step3_result = eligibility_engine.run(
+            signal_date=kwargs["run_date"],
+            db_role=kwargs["db_role"],
+            run_id=kwargs.get("run_id"),
+        )
+        return ServiceResult(
+            status=step3_result.status,
+            run_id=str(kwargs.get("run_id") or "orch"),
+            rows_processed=step3_result.rows_processed,
+            metadata={"steps_completed": ["step3_universal_eligibility"]},
+        )
+
+
+def test_config_tuning_test_preset_exercises_real_scoped_step3_proxy_without_typeerror() -> None:
+    """The shipped config_tuning_test preset (start_step=step3, end_step=step5)
+    must complete without TypeError when step3 is scoped through the real
+    _ScopedStep3UniversalProxy and invoked exactly as the real orchestrator
+    invokes it. This is the path that crashed before the 2026-07-15 fix."""
+    fake_real_engine = _FakeRealStep3EngineForPresetRun()
+
+    controller = DebugModeController(
+        db_manager=object(),
+        provider=FakeProvider(["AAA", "BBB", "CCC"]),
+        orchestrator_factory=_OrchestratorInvokesEligibilityEngine,
+        setup_configs=FAKE_CONFIGS,
+        scoped_feature_engine_factory=lambda db, t: FakeScopedFeatureEngine(t),
+        scoped_screening_engine_factory=(
+            lambda db, t: _ScopedStep3UniversalProxy(fake_real_engine, t)
+        ),
+    )
+
+    result = controller.run_preset("config_tuning_test", RUN_DATE)
+
+    assert result.is_ok(), result.errors
+    assert fake_real_engine.calls, "the wrapped real engine's run() was never invoked"
+    call = fake_real_engine.calls[-1]
+    assert call["signal_date"] == RUN_DATE
+    assert call["db_role"] == DB_ROLE_DEBUG

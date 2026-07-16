@@ -391,17 +391,15 @@ class _ScopedStep3UniversalProxy:
     def run(
         self,
         signal_date: date,
-        setup_config_id: str,
-        setup_config: dict,
-        db_role: str,
+        db_role: str = "prod",
         run_id: str | None = None,
+        setup_configs: list[dict] | None = None,
     ) -> ServiceResult:
         return self._real.run(
             signal_date=signal_date,
-            setup_config_id=setup_config_id,
-            setup_config=setup_config,
             db_role=db_role,
             run_id=run_id,
+            setup_configs=setup_configs,
         )
 
 

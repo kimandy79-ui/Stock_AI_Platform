@@ -1,0 +1,21 @@
+BACKFILL_DIAG: enter main
+BACKFILL_DIAG: pid=23420
+BACKFILL_DIAG: ppid=16992
+BACKFILL_DIAG: executable=D:\Python\Stock_AI_Platform\.venv\Scripts\python.exe
+BACKFILL_DIAG: base_executable=C:\Python314\python.exe
+Traceback (most recent call last):
+  File "D:\Python\Stock_AI_Platform\tools\backfill_prod_history.py", line 2926, in <module>
+    raise SystemExit(main())
+                     ~~~~^^
+  File "D:\Python\Stock_AI_Platform\tools\backfill_prod_history.py", line 2750, in main
+    print(
+    ~~~~~^
+        f"BACKFILL_DIAG: venv_launcher_detected=True \u2014 "
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<4 lines>...
+        "This is normal Windows venv behaviour \u2014 only one process acquires the lock."
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+UnicodeEncodeError: 'cp949' codec can't encode character '\u2014' in position 43: illegal multibyte sequence
+EXIT_CODE=1
