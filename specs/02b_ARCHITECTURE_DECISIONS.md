@@ -240,10 +240,13 @@ remains the default; this carve-out does not reopen M12 for any other change.
 
 ---
 
-## 22.26 consolidation_base score recalibration (pending sign-off)
+## 22.26 consolidation_base score recalibration
 
-**Status: DRAFT — held for owner sign-off. Not yet implemented, not yet
-active.** Written per the diagnostics-first / no-pre-diagnostic-tuning
+**Status: IMPLEMENTED (2026-07-15) — Option 1 (rescale scorer).** Independently
+re-verified 2026-07-15 (diff match, fresh test runs, fresh stash-based
+isolation proof, fresh empirical spot-check against stored data — see
+`reports/AD-22.26_reverification_2026-07-15.md`). Written per the
+diagnostics-first / no-pre-diagnostic-tuning
 principle: this AD exists *because* 5-date empirical data now supports a
 calibration decision that was explicitly deferred pending exactly this data
 (see `funnel_diagnostics_2026-07-10.md` §Architect notes and the
@@ -275,6 +278,30 @@ quartile of the *routed* population, before any validation) never clears
 `range_tightness_too_low` (38–43%) and `price_above_base_high` (20–33%),
 which are separate, apparently well-behaved gates showing no evidence of the
 same miscalibration.
+
+### Regime scope of this evidence
+
+All empirical data behind this ADR (the 5-date campaign plus the confirmatory
+6th date) classifies as `bull` regime — no `neutral`, `bear`, `high_risk`, or
+`extreme_risk` date has been diagnosed. A check of existing price history
+(2026-07-15) found no currently-usable non-bull date: the only VIX≥25 window
+in loaded data (March 2026, peak VIX 31.05 on 2026-03-27) predates the
+252-bar `feature_ready` floor (2026-06-02), so the universe would be mostly
+`feature_not_ready` if diagnosed against that period — the same failure mode
+already documented in the Part A backfill findings. Extending price history
+to make that period usable was declined as disproportionate cost for one
+historical data point (same reasoning as the earlier RVOL campaign's
+Option A decision).
+
+This does not block a decision here — `range_tightness_too_low` and
+`price_above_base_high` show no regime-dependence in their mechanism (pure
+price-structure gates), and the score-scale mismatch is stationary across
+every RVOL regime tested, which is suggestive but not conclusive that it is
+also regime-stable. Whichever option is chosen should be treated as
+**validated under bull regime only**, with an explicit follow-up: re-check
+the chosen fix (rescaled scorer or per-setup threshold) the first time a
+live date after 2026-06-02 classifies as `neutral`, `bear`, `high_risk`, or
+`extreme_risk`.
 
 **Root-cause framing (not yet confirmed at code level — see open item
 below):** two non-exclusive explanations fit the data: (1) the
@@ -328,6 +355,18 @@ the scoring formula, which is closer to core logic than a config value.
   `consolidation_base` (ranking, diversification) should be checked for any
   hardcoded assumption about the setup's score range.
 
+### Frozen-module exemption (granted 2026-07-15)
+
+A narrow exemption to frozen-module discipline is granted for this work,
+scoped strictly to: the `consolidation_base` setup_score formula/weighting
+inside `m14_setup_validators.py` (or wherever the scoring computation
+actually lives — confirm exact location as part of Part B below). No other
+setup's scoring, no gate logic (range_tightness, price_above_base_high, or
+any other consolidation_base validator check), and no schema change are
+covered by this exemption. Scope ends at the scoring formula's output value;
+everything downstream (threshold comparison, ranking, disposition) is
+unaffected and not exempted.
+
 **Impact if Option 2 is chosen:**
 - Config-only change to `consolidation_base`'s entry in `setup_configs`
   (`setup_consolidation_base_v1`) — no code/formula change, no
@@ -346,13 +385,63 @@ the scoring formula, which is closer to core logic than a config value.
 - Any change to `breakout`'s RVOL gate — separately confirmed as correctly
   calibrated by the same campaign (see campaign verdict, 2026-07-15).
 
-**Decision required from owner:** Option 1 (rescale scorer) vs. Option 2
-(per-setup threshold) vs. defer pending additional data (e.g., out-of-sample
-dates in a non-bull regime, since all 5 campaign dates were classified
-`bull`).
+**Decision:** Option 1. See implementation note "§22.26 Decided (Option 1):
+Investigate + Propose Rescale Approach" (coder note, 2026-07-15) for design
+and rollout.
 
-**Once decided:** this entry updates from DRAFT to the owner's final
-decision, and a scoped coder note is written for implementation — including
-the frozen-module carve-out language if Option 1 is chosen.
+### Implementation summary (2026-07-15)
+
+Full derivation, diff, and validation live in
+`reports/ad_22_26_option1_rescale_implementation_2026-07-15.md`; re-verified
+independently 2026-07-15 in `reports/AD-22.26_reverification_2026-07-15.md`.
+Condensed here so the decision record is self-contained without duplicating
+either report in full:
+
+- **Transform:** `new_score = clamp(0.52 * penalized_score + 48.0, 0, 100)`,
+  applied once, as the final step of `validate_consolidation_base()` only —
+  after the existing `penalized_score = _clamp(raw_score + earnings_pen +
+  macro_pen + fundamentals_adj)` line, not to `raw_score` or any individual
+  scoring component. `breakout`/`pullback`/`trend_continuation` are untouched
+  (confirmed byte-identical both by the original stash comparison and by an
+  independent re-run).
+- **Constants:** anchored at `f(100)=100` (ceiling maps to itself, keeping
+  the transform clamp-free over the whole domain) and `f(43.27)≈70.5`
+  (5-date campaign mean p50 mapped to the mean of pullback/trend_continuation
+  p50 from the same campaign) — a defensible anchor pair, not an arbitrary
+  round number, though the campaign-mean-vs-single-date mixing noted in the
+  original coder note means the exact constants are a close approximation,
+  not a uniquely-derivable pair.
+- **Ordering proof:** the transform is strictly increasing (slope 0.52 > 0),
+  so it preserves relative ranking among `consolidation_base` candidates
+  exactly. Verified exhaustively (every integer pair in [0,100], and a
+  1001-point fractional grid) in `TestConsolidationBaseRescaleAD2226`.
+- **Clamp-never-fires:** `f(0)=48.0` and `f(100)=100.0` are the actual min/max
+  outputs over the legal [0,100] input domain — the outer `clamp()` never
+  activates in practice.
+- **Empirical outcome:** aggregate `consolidation_base` pass rate across the
+  5 campaign dates rises from 1.86% to 21.57%; `score_below_threshold` drops
+  from 19.7% of the population to 0%, leaving `range_tightness_too_low`
+  (38.7%) and `price_above_base_high` (27.0%) as the sole effective gates —
+  matching the ADR's root-cause framing that the score component, not the
+  structural gates, was the outlier. Two of the five dates (2026-06-11,
+  2026-07-02) were independently recomputed from stored `step4_analysis` rows
+  during re-verification and matched exactly.
+- **Downstream-consumer findings:** `_derive_confidence`'s 75/50 thresholds
+  and Step 5's `_W_SETUP=0.40` / `setup_confirmation` (weight 0.10 by
+  default) are the only two places found with a hardcoded assumption about
+  `consolidation_base`'s score range; both were checked and produce the
+  intended effect (e.g. HTGC 2026-07-02: `setup_score` 59.29→78.83,
+  `proposal_score_raw` 59.09→66.91, `risk_score` 30.33→28.37, independently
+  reproduced during re-verification). `simulation_engine.py`,
+  `dashboard/data_access.py`, and `dashboard/ticker_report.py` pass
+  `setup_score` through without any range assumption.
+- **Known gaps (not yet closed):** the ~614 rows that flip
+  `score_below_threshold` → `passed` were stored with `disposition =
+  REJECTED` and no stop/target/RR/risk_score — determining their real
+  post-rescale disposition requires a live Step 4 → Step 5 re-run against the
+  5 campaign dates, not yet performed. Diversity-cap/ranking-pool interaction
+  from `consolidation_base`'s ~10x larger passing population is flagged but
+  not independently verified. Both are candidates for a follow-up coder note,
+  not blockers on this AD's IMPLEMENTED status.
 
 ---

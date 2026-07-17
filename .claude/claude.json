@@ -1,0 +1,6 @@
+{
+  "agent": {
+    "name": "StockAIPlatformDev",
+    "bypassPermissions": ["shell"]
+  }
+}

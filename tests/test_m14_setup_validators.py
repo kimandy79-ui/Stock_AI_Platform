@@ -39,6 +39,8 @@ from app.services.screening.m14_setup_validators import (
     CONFIDENCE_LOW,
     CONFIDENCE_MEDIUM,
     SetupValidationResult,
+    _CONSOLIDATION_BASE_RESCALE_A,
+    _CONSOLIDATION_BASE_RESCALE_B,
     validate_breakout,
     validate_consolidation_base,
     validate_pullback,
@@ -2218,3 +2220,148 @@ class TestEarningsHardBlockGate:
 
         for setup_type in ("breakout", "pullback", "trend_continuation"):
             assert "earnings_hard_block" not in DEFAULT_SETUP_CONFIGS[setup_type]["earnings"]
+
+
+# ===========================================================================
+# AD-22.26 (Option 1): consolidation_base setup_score output-scale rescale
+# ===========================================================================
+#
+# new_score = clamp(A * old_score + B), applied once, as the final step of
+# validate_consolidation_base only. A=0.52, B=48.0. See the constant
+# docstring in m14_setup_validators.py and reports/ad_22_26_option1_rescale_
+# implementation_2026-07-15.md for the full derivation and proof.
+
+class TestConsolidationBaseRescaleAD2226:
+    """Ordering-preservation and clamp-boundary proofs for the AD-22.26
+    rescale, plus isolation/confidence-shift checks."""
+
+    @staticmethod
+    def _rescale(old_score: float) -> float:
+        from app.services.screening.m14_setup_validators import _clamp
+        return _clamp(
+            _CONSOLIDATION_BASE_RESCALE_A * old_score + _CONSOLIDATION_BASE_RESCALE_B
+        )
+
+    def test_rescale_constants_match_approved_proposal(self) -> None:
+        assert _CONSOLIDATION_BASE_RESCALE_A == pytest.approx(0.52)
+        assert _CONSOLIDATION_BASE_RESCALE_B == pytest.approx(48.0)
+
+    # --- 1. Ordering preservation (B.4) -----------------------------------
+
+    def test_rescale_preserves_ordering_full_integer_domain(self) -> None:
+        """B.4's constraint, checked exhaustively: for every pair of integer
+        old_scores in [0,100], old_A > old_B must imply new_A > new_B, and
+        old_A == old_B must imply new_A == new_B. 101x101 pairwise checks,
+        not a handful of examples."""
+        scores = list(range(0, 101))
+        rescaled = {s: self._rescale(float(s)) for s in scores}
+        violations = [
+            (a, b) for a in scores for b in scores
+            if (a > b and not (rescaled[a] > rescaled[b]))
+            or (a == b and rescaled[a] != rescaled[b])
+        ]
+        assert violations == [], f"ordering violated for pairs: {violations[:10]}"
+
+    def test_rescale_preserves_ordering_fractional_domain(self) -> None:
+        """Same property at 0.1 resolution across the full domain (1001
+        points, strictly increasing sequence) -- catches any boundary or
+        floating-point issue the integer grid alone could miss."""
+        scores = [round(i * 0.1, 1) for i in range(0, 1001)]
+        rescaled = [self._rescale(s) for s in scores]
+        for i in range(1, len(rescaled)):
+            assert rescaled[i] > rescaled[i - 1], (
+                f"order violated at old_score {scores[i-1]}->{scores[i]}: "
+                f"new_score {rescaled[i-1]}->{rescaled[i]}"
+            )
+
+    # --- 2. Clamp-never-fires (B.4) ----------------------------------------
+
+    def test_clamp_lower_boundary_matches_proof(self) -> None:
+        """f(0) = 48.0 exactly -- the theoretical minimum input maps inside
+        [0,100] with no clamping."""
+        assert self._rescale(0.0) == pytest.approx(48.0)
+
+    def test_clamp_upper_boundary_matches_proof(self) -> None:
+        """f(100) = 100.0 exactly -- the ceiling-maps-to-itself anchor from
+        B.3, landing exactly on (not past) the clamp boundary."""
+        assert self._rescale(100.0) == pytest.approx(100.0)
+
+    def test_clamp_never_fires_across_full_domain(self) -> None:
+        """No old_score in [0,100] produces a pre-clamp value outside
+        [0,100] -- i.e. clamp(A*x+B, 0, 100) is provably a no-op for every
+        legal input, matching B.4 step 3. Checked by confirming the
+        clamped and unclamped forms agree at every integer point."""
+        for s in range(0, 101):
+            x = float(s)
+            unclamped = _CONSOLIDATION_BASE_RESCALE_A * x + _CONSOLIDATION_BASE_RESCALE_B
+            assert self._rescale(x) == pytest.approx(unclamped)
+            assert 0.0 <= unclamped <= 100.0
+
+    # --- 3. Isolation: other three setups untouched ------------------------
+
+    def test_other_setups_byte_identical_to_pre_ad2226(self) -> None:
+        """breakout/pullback/trend_continuation must be byte-identical to
+        the pre-AD-22.26 values -- pinned via git-stash diff against the
+        pre-change file (reports/ad_22_26_option1_rescale_implementation_
+        2026-07-15.md documents the stash-based verification). These three
+        code paths are not touched by the AD-22.26 diff at all, so any
+        future drift here is a real regression, not an expected rescale
+        side effect."""
+        r_bo = validate_breakout(_breakout_feat(), _breakout_config())
+        r_pb = validate_pullback(_pullback_feat(), _pullback_config())
+        r_tc = validate_trend_continuation(_tc_feat(), _tc_config())
+        assert r_bo.setup_score == pytest.approx(76.44444444444444)
+        assert r_pb.setup_score == pytest.approx(75.63470319634703)
+        assert r_tc.setup_score == pytest.approx(78.34649122807018)
+
+    def test_consolidation_base_component_scores_unaffected(self) -> None:
+        """The rescale touches only the final penalized_score -- individual
+        component_scores and the pre-rescale raw_score in evidence_json must
+        be unchanged from what the (untouched) component formulas produce."""
+        result = validate_consolidation_base(_cb_feat(), _cb_config())
+        ev = result.evidence_json
+        # raw_score is captured before earnings/macro/fundamentals penalties
+        # AND before the AD-22.26 rescale -- it must equal the weighted
+        # component sum, not the rescaled setup_score.
+        assert ev["raw_score"] == pytest.approx(74.95614961961115)
+        assert ev["raw_score"] != pytest.approx(result.setup_score)
+
+    # --- 4. Confidence-label shift (B.6, intentional) -----------------------
+
+    def test_confidence_shifts_from_medium_to_high_for_the_canonical_good_case(self) -> None:
+        """B.6 predicted this exact shift for the module's own canonical
+        good-path fixture: pre-rescale score 74.96 read as 'medium'
+        (< 75.0 high threshold); post-rescale score ~86.98 reads as 'high'.
+        This asserts the NEW, intended behavior -- not the old one."""
+        result = validate_consolidation_base(_cb_feat(), _cb_config())
+        assert result.setup_score == pytest.approx(86.9771978021978)
+        assert result.confidence == CONFIDENCE_HIGH
+
+    def test_confidence_shifts_from_low_to_medium_for_a_below_median_case(self) -> None:
+        """A candidate near the campaign's old p25 (~39-41, previously
+        'low' confidence, below the old 50.0 medium floor) should now read
+        'medium' post-rescale -- the fix is meant to lift the bulk of the
+        routed population out of 'low', not just the top of the range."""
+        # Depress every soft-scored component to land old raw_score ~40.
+        feat = _cb_feat(
+            support_level=None, resistance_level=None,  # support_resistance_clarity -> 0
+            breakout_proximity=None,                     # breakout_readiness driven by position only
+            close_raw=170.5, close_adj=170.5,             # near base_low -> weak breakout_readiness/stop_tightness
+            atr_compression_score=35.0,
+            volume_dry_up_score=35.0,
+            range_tightness_score=62.0,
+        )
+        result = validate_consolidation_base(feat, _cb_config())
+        old_equivalent = (result.setup_score - _CONSOLIDATION_BASE_RESCALE_B) / _CONSOLIDATION_BASE_RESCALE_A
+        assert 30.0 <= old_equivalent <= 50.0, (
+            f"fixture drifted outside the intended old-score band: {old_equivalent}"
+        )
+        assert result.confidence in (CONFIDENCE_MEDIUM, CONFIDENCE_HIGH)
+        assert result.confidence != CONFIDENCE_LOW
+
+    def test_min_setup_score_threshold_unchanged(self) -> None:
+        """The shared 55.0 pass threshold itself is untouched by this
+        change -- only the score's scale moved. min_setup_score stays a
+        config value, not something this AD touches."""
+        cfg = _cb_config()
+        assert cfg["validation"]["min_setup_score"] == 55

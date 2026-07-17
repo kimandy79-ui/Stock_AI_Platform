@@ -65,6 +65,20 @@ CONFIDENCE_LOW: Final[str] = "low"
 _CONFIDENCE_HIGH_THRESHOLD: Final[float] = 75.0
 _CONFIDENCE_MEDIUM_THRESHOLD: Final[float] = 50.0
 
+# AD-22.26 (Option 1, implemented 2026-07-15): consolidation_base's raw
+# penalized_score sits systematically below the shared 55.0 pass threshold
+# (campaign median 41.5-44.9 vs. pullback/trend_continuation's 66-75) because
+# its component formula has no floor tied to its own hard-check conditions,
+# unlike the other three setups. This affine rescale corrects the output
+# scale only — component weights and hard gates are untouched. Anchors:
+# f(100)=100 (ceiling maps to itself, which is what keeps the transform
+# clamp-free over the full [0,100] domain) and f(43.27)=~70.5 (campaign mean
+# p50 -> mean of pullback/trend_continuation p50 from the same campaign).
+# Strictly increasing (slope > 0) => preserves relative ordering among
+# consolidation_base candidates exactly; see tests/test_m14_setup_validators.py.
+_CONSOLIDATION_BASE_RESCALE_A: Final[float] = 0.52
+_CONSOLIDATION_BASE_RESCALE_B: Final[float] = 48.0
+
 
 def _derive_confidence(
     setup_score: float,
@@ -1471,6 +1485,11 @@ def validate_consolidation_base(
 
     raw_score = _apply_weights(components, weights)
     penalized_score = _clamp(raw_score + earnings_pen + macro_pen + fundamentals_adj)
+    # AD-22.26: output-scale rescale, applied last and only here (see constant
+    # docstring above) — not to raw_score or any individual component.
+    penalized_score = _clamp(
+        _CONSOLIDATION_BASE_RESCALE_A * penalized_score + _CONSOLIDATION_BASE_RESCALE_B
+    )
 
     setup_passed = setup_passed_hard and penalized_score >= min_setup_score
 
