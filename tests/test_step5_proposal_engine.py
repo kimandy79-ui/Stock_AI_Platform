@@ -1367,6 +1367,71 @@ class TestMultiRouteDedupe:
         # Only one should be in ranked (best route)
         assert len(multi_props) == 1
 
+    def test_family_normalized_route_wins_not_raw(self, tmp_db_paths):
+        """P1 fix (m15_ticker_best_dedup_prefamily_percentile_backlog.md):
+        dedup must pick the route with the higher PRE-DEDUP family-normalized
+        percentile rank, not the higher raw proposal_score_raw, when the two
+        disagree -- the exact scenario the backlog note (and the real
+        ARWR/ABCB cases from the P2-H investigation) describe.
+
+        MULTI's trend_continuation route has the higher raw score (setup_score
+        60 vs. breakout's 55, all else equal) -- old code would pick it. But
+        trend_continuation's family that day is a high-scoring cluster (80-86),
+        so MULTI's 60 sits at the BOTTOM of that family, while breakout's
+        family is a low-scoring cluster (30-36), so MULTI's 55 sits at the TOP
+        of its family. The fix must pick breakout despite its lower raw score.
+        """
+        db = dbm.DB_ROLE_PROD
+
+        # Breakout family: low setup_scores -> MULTI's 55 tops the family.
+        for i, sc in enumerate([30.0, 32.0, 34.0, 36.0]):
+            t = f"BRKF{i}"
+            _seed_ticker(db, t, sector=t, industry=t)
+            _seed_price(db, t, SIGNAL_DATE, 100.0, 100.0)
+            _seed_features(db, t, SIGNAL_DATE)
+            _seed_step4(db, t, SIGNAL_DATE, setup_type="breakout",
+                        setup_config_id="setup_breakout_v1", setup_score=sc)
+
+        # Trend_continuation family: high setup_scores -> MULTI's 60 sits at
+        # the bottom of the family.
+        for i, sc in enumerate([80.0, 82.0, 84.0, 86.0]):
+            t = f"TCNF{i}"
+            _seed_ticker(db, t, sector=t, industry=t)
+            _seed_price(db, t, SIGNAL_DATE, 100.0, 100.0)
+            _seed_features(db, t, SIGNAL_DATE)
+            _seed_step4(db, t, SIGNAL_DATE, setup_type="trend_continuation",
+                        setup_config_id="setup_trend_continuation_v1", setup_score=sc)
+
+        # MULTI: both routes, identical features/entry so proposal_score_raw
+        # differences track setup_score (the only varied input) directly.
+        _seed_ticker(db, "MULTI", sector="MultiSec", industry="MultiInd")
+        _seed_price(db, "MULTI", SIGNAL_DATE, 100.0, 100.0)
+        _seed_features(db, "MULTI", SIGNAL_DATE)
+        cid = str(uuid.uuid4())
+        rid = str(uuid.uuid4())
+        _seed_step4(db, "MULTI", SIGNAL_DATE, setup_type="breakout",
+                    setup_config_id="setup_breakout_v1", setup_score=55.0,
+                    candidate_id=cid, run_id=rid)
+        _seed_step4(db, "MULTI", SIGNAL_DATE, setup_type="trend_continuation",
+                    setup_config_id="setup_trend_continuation_v1", setup_score=60.0,
+                    candidate_id=cid, run_id=rid)
+
+        cfg = _minimal_risk_config(top_n=20, min_rr=1.0, max_sector=20, max_industry=20)
+        eng = _make_engine()
+        result = eng.propose(SIGNAL_DATE, risk_label_config=cfg,
+                             setup_configs=DEFAULT_SETUP_CONFIGS, db_role=db)
+        assert result.status == sr.STATUS_SUCCESS, result.errors
+
+        props = _read_proposals(db, SIGNAL_DATE)
+        multi_props = [p for p in props if p["ticker"] == "MULTI" and p["raw_rank"] is not None]
+        assert len(multi_props) == 1
+        assert multi_props[0]["setup_type"] == "breakout", (
+            f"expected family-normalized dedup to pick breakout (top of its "
+            f"own low-scoring family) over trend_continuation (higher raw "
+            f"score but bottom of its own high-scoring family); "
+            f"got {multi_props[0]['setup_type']}"
+        )
+
 
 class TestPerSetupCases:
     """One integration smoke test per setup type."""

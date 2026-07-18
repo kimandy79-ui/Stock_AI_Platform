@@ -1677,11 +1677,17 @@ class TestAtrStopFloorGate:
         assert not any("stop_below_atr_floor" in r for r in result.pass_fail_reasons)
 
     def test_pullback_stop_below_atr_floor_fails(self) -> None:
-        # support very close to close → stop_distance_atr << 0.5
-        # stop_distance_pct = (300 - 299) / 300 = 0.00333; atr_pct=0.025 → 0.133 < 0.5
+        # P2-F: gate now measures distance to min(support, swing_low, ema_area)
+        # - buffer_atr (Step5's real pullback stop basis), so all three
+        # candidates must sit tight to entry for a genuine floor failure.
+        # support: (300-299.5)/300=0.001667; swing_low: (300-299.4)/300=0.002;
+        # ema_area=min(305,299.3)=299.3 (ema20 excluded, >entry): (300-299.3)/300=0.00233
+        # min candidate=299.3; buffer_atr=0.25*(0.025*300)=1.875
+        # gate_stop=299.3-1.875=297.425; stop_atr=(300-297.425)/300/0.025=0.343<0.5
         feat = _pullback_feat(
             close_raw=300.0, close_adj=300.0,
-            support_level=299.0, atr_pct=0.025,
+            support_level=299.5, swing_low=299.4, ema20=305.0, ema50=299.3,
+            atr_pct=0.025,
         )
         result = validate_pullback(feat, _pullback_config())
         assert result.setup_passed is False
@@ -1694,6 +1700,24 @@ class TestAtrStopFloorGate:
             support_level=292.0, atr_pct=0.025,
         )
         result = validate_pullback(feat, _pullback_config())
+        assert not any("stop_below_atr_floor" in r for r in result.pass_fail_reasons)
+
+    def test_pullback_ema_area_below_support_rescues_gate(self) -> None:
+        # P2-F regression: support_raw alone is tight to entry (would have
+        # failed the old support-only gate), but ema_area_raw (min(ema20,
+        # ema50)) sits well below support — Step5's real stop would use that
+        # lower level, so the gate must now use it too and pass.
+        # Old (support-only) check: (300-299.5)/300/0.025 = 0.0667 < 0.5 → old gate fails.
+        # New check: candidates=[299.5(support), 260.0(ema_area)]; swing_low
+        # excluded (None). min=260.0; buffer_atr=1.875; gate_stop=258.125;
+        # stop_atr=(300-258.125)/300/0.025=5.58 >> 0.5 → passes.
+        feat = _pullback_feat(
+            close_raw=300.0, close_adj=300.0,
+            support_level=299.5, swing_low=None, ema20=270.0, ema50=260.0,
+            atr_pct=0.025,
+        )
+        result = validate_pullback(feat, _pullback_config())
+        assert result.evidence_json["ema_area_raw"] == pytest.approx(260.0)
         assert not any("stop_below_atr_floor" in r for r in result.pass_fail_reasons)
 
     def test_trend_continuation_stop_below_atr_floor_fails(self) -> None:
@@ -1711,6 +1735,20 @@ class TestAtrStopFloorGate:
         feat = _tc_feat(
             close_raw=500.0, close_adj=500.0,
             swing_low=460.0, atr_pct=0.025,   # atr_ratio=3.2 >> 0.5
+        )
+        result = validate_trend_continuation(feat, _tc_config())
+        assert not any("stop_below_atr_floor" in r for r in result.pass_fail_reasons)
+
+    def test_trend_continuation_buffer_atr_subtracted_before_floor(self) -> None:
+        # P2-F regression: gate now measures distance to swing_low_raw -
+        # buffer_atr (Step5's real trend_continuation stop), not raw
+        # swing_low distance. swing_low=494.375 gives a raw-distance ratio of
+        # exactly 0.45 (< 0.5 floor) — the pre-fix gate would have hard-failed
+        # here. buffer_atr = 0.25*(0.025*500) = 3.125 pushes the effective
+        # stop to 491.25, ratio 0.70 (> 0.5) — must now pass.
+        feat = _tc_feat(
+            close_raw=500.0, close_adj=500.0,
+            swing_low=494.375, atr_pct=0.025,
         )
         result = validate_trend_continuation(feat, _tc_config())
         assert not any("stop_below_atr_floor" in r for r in result.pass_fail_reasons)
@@ -1736,10 +1774,12 @@ class TestAtrStopFloorGate:
 
     def test_atr_floor_gate_doesnt_block_other_setups(self) -> None:
         """ATR floor failure on pullback does NOT prevent TC from evaluating."""
-        # Pullback: tiny stop → fails ATR floor
+        # Pullback: all three stop-basis candidates tight to entry → fails ATR floor
+        # (see test_pullback_stop_below_atr_floor_fails for the math).
         pb_feat = _pullback_feat(
             close_raw=300.0, close_adj=300.0,
-            support_level=299.5, atr_pct=0.025,
+            support_level=299.5, swing_low=299.4, ema20=305.0, ema50=299.3,
+            atr_pct=0.025,
         )
         pb_result = validate_pullback(pb_feat, _pullback_config())
         assert any("stop_below_atr_floor" in r for r in pb_result.pass_fail_reasons)

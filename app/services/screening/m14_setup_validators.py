@@ -700,6 +700,11 @@ def validate_pullback(
     rebound_required: bool = bool(val.get("rebound_required", True))
     min_rebound_slope: float = float(val.get("min_rebound_slope", 0.002))
     min_atr_stop_floor: float = float(val.get("min_atr_stop_floor_multiple", 0.5))
+    # P2-F: same defaults/keys as step5_proposal_engine._compute_stop_target's
+    # pullback branch — the stop-floor gate below is measured against that
+    # formula, so the constants must match.
+    k_atr_stop: float = float(val.get("k_atr_stop", 1.0))
+    buffer_atr_multiple: float = float(val.get("buffer_atr_multiple", 0.25))
     # rvol_is_hard MUST be False for pullback (AD-22.23)
     rvol_is_hard: bool = bool(val.get("rvol_is_hard", False))
     if rvol_is_hard:
@@ -741,6 +746,16 @@ def validate_pullback(
     if swing_low_adj is not None and close_adj is not None and swing_low_adj >= close_adj:
         swing_low_adj = None
         swing_low_raw = None
+
+    # ema_area_raw: min(ema20, ema50) raw-converted — same basis Step5's
+    # _compute_stop_target uses for the pullback stop (P2-F).
+    ema_area_raw: float | None = None
+    if ema20 is not None and ema50 is not None:
+        ema_area_raw = _raw_conv(min(ema20, ema50), close_raw, close_adj) if close_raw and close_adj else None
+    elif ema20 is not None:
+        ema_area_raw = _raw_conv(ema20, close_raw, close_adj) if close_raw and close_adj else None
+    elif ema50 is not None:
+        ema_area_raw = _raw_conv(ema50, close_raw, close_adj) if close_raw and close_adj else None
 
     entry_raw = close_raw
 
@@ -797,14 +812,27 @@ def validate_pullback(
         if not rebound_signal:
             hard_fails.append("pullback_no_rebound_confirmation")
 
-    # 6. Stop ≥ 0.5 ATR below entry (P1-1)
-    # Stop estimated as entry minus support (standard pullback stop placement)
-    if (
-        atr_pct is not None and atr_pct > 0
-        and support_raw is not None
-        and entry_raw is not None and entry_raw > 0
-    ):
-        stop_distance_pct = (entry_raw - support_raw) / entry_raw
+    # 6. Stop ≥ 0.5 ATR below entry (P1-1 / P2-F fix)
+    # Measured against the same stop basis Step5's _compute_stop_target uses
+    # for pullback: min(support_raw, swing_low_raw, ema_area_raw) - buffer_atr,
+    # falling back to the ATR stop when no structural candidate qualifies.
+    # MAINTENANCE-DEBT: duplicated formula, not a shared function — M14 must
+    # not import step5_proposal_engine.py (DB-importing M15 module; M14 runs
+    # before M15 and forbids DB access). Keep in sync with
+    # step5_proposal_engine._compute_stop_target's SETUP_PULLBACK branch if
+    # that formula changes.
+    if atr_pct is not None and atr_pct > 0 and entry_raw is not None and entry_raw > 0:
+        atr_raw = atr_pct * entry_raw
+        buffer_atr = buffer_atr_multiple * atr_raw
+        stop_basis_candidates = [
+            lvl for lvl in (support_raw, swing_low_raw, ema_area_raw)
+            if lvl is not None and lvl < entry_raw
+        ]
+        if stop_basis_candidates:
+            gate_stop_raw = min(stop_basis_candidates) - buffer_atr
+        else:
+            gate_stop_raw = entry_raw - k_atr_stop * atr_raw - buffer_atr
+        stop_distance_pct = (entry_raw - gate_stop_raw) / entry_raw
         stop_distance_atr = stop_distance_pct / atr_pct
         if stop_distance_atr < min_atr_stop_floor:
             hard_fails.append(
@@ -935,7 +963,9 @@ def validate_pullback(
         "next_resistance_adj": next_resistance_adj,
         "next_resistance_raw": next_resistance_raw,
         "swing_low_adj": swing_low_adj,
+        "swing_low_raw": swing_low_raw,
         "swing_high_raw": swing_high_raw,
+        "ema_area_raw": ema_area_raw,
         "rvol20": rvol20,
         "rvol_is_hard": False,  # always False for pullback (AD-22.23)
         "rvol_bonus": rvol_bonus,
@@ -1023,6 +1053,11 @@ def validate_trend_continuation(
     rvol_moderate_threshold: float = float(val.get("rvol_moderate_threshold", 1.2))
     min_setup_score: float = float(val.get("min_setup_score", 55))
     min_atr_stop_floor: float = float(val.get("min_atr_stop_floor_multiple", 0.5))
+    # P2-F: same defaults/keys as step5_proposal_engine._compute_stop_target's
+    # trend_continuation branch — the stop-floor gate below is measured
+    # against that formula, so the constants must match.
+    k_atr_stop: float = float(val.get("k_atr_stop", 1.0))
+    buffer_atr_multiple: float = float(val.get("buffer_atr_multiple", 0.25))
 
     # Feature extraction
     close_raw = _f(feat.get("close_raw"))
@@ -1110,14 +1145,23 @@ def validate_trend_continuation(
     elif abs(dist_ema50) > max_ext:
         hard_fails.append(f"too_extended_from_ema50({abs(dist_ema50):.3f}>{max_ext})")
 
-    # 7. Stop ≥ 0.5 ATR below entry (P1-1)
-    # Stop estimated as entry minus swing_low (standard trend continuation stop)
-    if (
-        atr_pct is not None and atr_pct > 0
-        and swing_low_raw is not None
-        and entry_raw is not None and entry_raw > 0
-    ):
-        stop_distance_pct = (entry_raw - swing_low_raw) / entry_raw
+    # 7. Stop ≥ 0.5 ATR below entry (P1-1 / P2-F fix)
+    # Measured against the same stop basis Step5's _compute_stop_target uses
+    # for trend_continuation: swing_low_raw - buffer_atr (falling back to the
+    # ATR stop when swing_low_raw is unusable), not raw swing_low distance.
+    # MAINTENANCE-DEBT: duplicated formula, not a shared function — M14 must
+    # not import step5_proposal_engine.py (DB-importing M15 module; M14 runs
+    # before M15 and forbids DB access). Keep in sync with
+    # step5_proposal_engine._compute_stop_target's SETUP_TREND_CONTINUATION
+    # branch if that formula changes.
+    if atr_pct is not None and atr_pct > 0 and entry_raw is not None and entry_raw > 0:
+        atr_raw = atr_pct * entry_raw
+        buffer_atr = buffer_atr_multiple * atr_raw
+        if swing_low_raw is not None and swing_low_raw < entry_raw:
+            gate_stop_raw = swing_low_raw - buffer_atr
+        else:
+            gate_stop_raw = entry_raw - k_atr_stop * atr_raw - buffer_atr
+        stop_distance_pct = (entry_raw - gate_stop_raw) / entry_raw
         stop_distance_atr = stop_distance_pct / atr_pct
         if stop_distance_atr < min_atr_stop_floor:
             hard_fails.append(

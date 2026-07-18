@@ -298,6 +298,30 @@ def _print_routing_detail(rpt: dict) -> None:
               f"consolidation-like candidates if both qualify.")
 
 
+def _print_co_occurring_failures(rpt: dict) -> None:
+    # P2-G: secondary breakdown — for each first-reported failure reason,
+    # which OTHER reasons also appear in that row's full hard_fails list.
+    # Source: explanation_json["hard_fails"], already fetched/parsed by
+    # build_report() — see _rpt_co_occurring_failure_reasons.
+    _h2("4b. CO-OCCURRING FAILURE REASONS  (behind first-reported reason)")
+    rows = rpt.get("co_occurring_failure_reasons", [])
+    if not rows:
+        print("    (no co-occurring reasons — every failing row's hard_fails "
+              "list has exactly one entry)")
+        return
+    current_key: tuple[str, str] | None = None
+    for r in rows:
+        key = (r["setup_type"], r["first_reason"])
+        if key != current_key:
+            print()
+            print(f"    {r['setup_type']} — first reason: {r['first_reason']}  "
+                  f"(cohort n={r['cohort_size']})")
+            current_key = key
+        pct_s = _pct_str(r["pct_of_first_reason_cohort"])
+        print(f"      co-occurring: {r['co_occurring_reason']:<40}  "
+              f"{r['count']:>5}  ({pct_s})")
+
+
 _EVIDENCE_ROUTED_FIELDS = [
     ("setup_score", "setup_score", 2),
 ]
@@ -575,6 +599,7 @@ def _print_report(rpt: dict) -> None:
     _print_failure_reasons(rpt)
     _print_s5_rejections(rpt)
     _print_routing_detail(rpt)
+    _print_co_occurring_failures(rpt)
     _print_evidence(rpt)
     _print_borderline(rpt)
     _print_layers(rpt)

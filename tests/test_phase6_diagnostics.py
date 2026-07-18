@@ -33,6 +33,7 @@ from app.services.diagnostics.funnel_diagnostics import (
     _sort_borderline_by_proximity,
     _rpt_eligibility_rejection_reasons,
     _rpt_s5_rejection_reasons,
+    _rpt_co_occurring_failure_reasons,
 )
 from app.utils.service_result import ServiceResult
 
@@ -805,6 +806,135 @@ def test_s5_diversity_cap_rejections_relabeled_in_report():
     assert "sector_cap" not in reasons
     # non-diversity reasons pass through unchanged
     assert "rvol_too_low" in reasons
+
+
+# --------------------------------------------------------------------------- #
+# P2-G (CODER_NOTE 2026-07-18): co-occurring failure reasons breakdown.
+# Source: explanation_json["hard_fails"] — the full per-row hard-fail list,
+# already fetched/parsed by build_report(). See
+# reports/P2_G_breakout_gate_ordering_investigation_2026-07-18.md.
+# --------------------------------------------------------------------------- #
+def _s4_hf_row(setup_type: str, hard_fails: list[str], setup_passed: bool = False) -> dict:
+    """A step4 row shaped like build_report()'s parsed s4 rows, carrying a
+    real ``hard_fails`` list under ``explanation_json`` (the field
+    ``_rpt_co_occurring_failure_reasons`` actually reads)."""
+    return {
+        "setup_type": setup_type,
+        "setup_passed": setup_passed,
+        "explanation_json": {"hard_fails": hard_fails},
+    }
+
+
+def test_co_occurring_reasons_empty_when_all_single_entry():
+    """Every failing row has exactly one hard_fails entry → no co-occurrence
+    to report, regardless of how many rows share the same first reason."""
+    s4 = [
+        _s4_hf_row("breakout", ["rvol_below_hard_threshold(1.0<1.5)"]),
+        _s4_hf_row("breakout", ["rvol_below_hard_threshold(0.8<1.5)"]),
+        _s4_hf_row("breakout", ["stop_below_atr_floor(stop_atr=0.2<0.5)"]),
+    ]
+    assert _rpt_co_occurring_failure_reasons(s4, None) == []
+
+
+def test_co_occurring_reasons_detects_genuine_co_occurrence():
+    """Multi-entry hard_fails lists produce a co-occurrence row keyed by
+    (setup_type, first_reason, co_occurring_reason)."""
+    s4 = [
+        _s4_hf_row("breakout", [
+            "rvol_below_hard_threshold(1.07<1.5)",
+            "stop_below_atr_floor(stop_atr=0.46<0.5)",
+        ]),
+        _s4_hf_row("breakout", ["rvol_below_hard_threshold(0.9<1.5)"]),  # single-entry, no co-occurrence
+    ]
+    result = _rpt_co_occurring_failure_reasons(s4, None)
+    assert len(result) == 1
+    row = result[0]
+    assert row["setup_type"] == "breakout"
+    assert row["first_reason"] == "rvol_below_hard_threshold"
+    assert row["co_occurring_reason"] == "stop_below_atr_floor"
+    assert row["count"] == 1
+
+
+def test_co_occurring_reasons_percentage_uses_first_reason_cohort_not_total_failures():
+    """pct_of_first_reason_cohort must be computed against the first-reason
+    cohort size (rows sharing that first reason), not the setup's overall
+    failure count — a setup_type with a much larger unrelated failure
+    population must not dilute the percentage."""
+    s4 = [
+        # RVOL-first cohort: 4 rows, 2 co-occur with stop_below_atr_floor
+        _s4_hf_row("breakout", [
+            "rvol_below_hard_threshold(1.0<1.5)", "stop_below_atr_floor(stop_atr=0.3<0.5)",
+        ]),
+        _s4_hf_row("breakout", [
+            "rvol_below_hard_threshold(0.9<1.5)", "stop_below_atr_floor(stop_atr=0.2<0.5)",
+        ]),
+        _s4_hf_row("breakout", ["rvol_below_hard_threshold(1.1<1.5)"]),
+        _s4_hf_row("breakout", ["rvol_below_hard_threshold(0.8<1.5)"]),
+        # A large, unrelated stop_below_atr_floor-first cohort — must not
+        # affect the RVOL-first cohort's percentage denominator.
+        *[_s4_hf_row("breakout", ["stop_below_atr_floor(stop_atr=0.1<0.5)"]) for _ in range(20)],
+    ]
+    result = _rpt_co_occurring_failure_reasons(s4, None)
+    assert len(result) == 1
+    row = result[0]
+    assert row["first_reason"] == "rvol_below_hard_threshold"
+    assert row["count"] == 2
+    assert row["cohort_size"] == 4  # NOT 24 (total failures) and NOT 20 (the other cohort)
+    assert row["pct_of_first_reason_cohort"] == pytest.approx(0.5)
+
+
+def test_co_occurring_reasons_row_with_no_hard_fails_skipped():
+    """A soft-score-only fail (empty hard_fails, e.g. score_below_threshold)
+    contributes no cohort membership and no co-occurrence — it simply has
+    nothing to break down."""
+    s4 = [
+        _s4_hf_row("breakout", []),
+        _s4_hf_row("breakout", [
+            "rvol_below_hard_threshold(1.0<1.5)", "stop_below_atr_floor(stop_atr=0.3<0.5)",
+        ]),
+    ]
+    result = _rpt_co_occurring_failure_reasons(s4, None)
+    assert len(result) == 1
+    assert result[0]["cohort_size"] == 1  # only the row with hard_fails counts
+
+
+def test_co_occurring_reasons_generalizes_across_setup_types():
+    """Not breakout-specific: any setup_type with multi-entry hard_fails
+    produces its own breakdown row."""
+    s4 = [
+        _s4_hf_row("pullback", [
+            "pullback_too_deep(0.18>0.12)", "stop_below_atr_floor(stop_atr=0.2<0.5)",
+        ]),
+        _s4_hf_row("consolidation_base", [
+            "range_duration_too_short(5<10)", "stop_below_atr_floor(stop_atr=0.1<0.3)",
+        ]),
+    ]
+    result = _rpt_co_occurring_failure_reasons(s4, None)
+    setups = {r["setup_type"] for r in result}
+    assert setups == {"pullback", "consolidation_base"}
+
+
+def test_co_occurring_reasons_respects_setup_type_filter():
+    s4 = [
+        _s4_hf_row("breakout", [
+            "rvol_below_hard_threshold(1.0<1.5)", "stop_below_atr_floor(stop_atr=0.3<0.5)",
+        ]),
+        _s4_hf_row("pullback", [
+            "pullback_too_deep(0.18>0.12)", "stop_below_atr_floor(stop_atr=0.2<0.5)",
+        ]),
+    ]
+    result = _rpt_co_occurring_failure_reasons(s4, "breakout")
+    assert len(result) == 1
+    assert result[0]["setup_type"] == "breakout"
+
+
+def test_co_occurring_reasons_passed_rows_excluded():
+    s4 = [
+        _s4_hf_row("breakout", [
+            "rvol_below_hard_threshold(1.0<1.5)", "stop_below_atr_floor(stop_atr=0.3<0.5)",
+        ], setup_passed=True),
+    ]
+    assert _rpt_co_occurring_failure_reasons(s4, None) == []
 
 
 def test_report_includes_eligibility_rejection_reasons():

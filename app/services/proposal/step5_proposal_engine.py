@@ -1466,6 +1466,38 @@ class Step5ProposalEngine:
                 "effective_risk_label": effective_risk_label,
             })
 
+        # P1 (ticker_best dedup fix,
+        # m15_ticker_best_dedup_prefamily_percentile_backlog.md): percentile-
+        # rank proposal_score_raw within each setup_type's full rankable
+        # population BEFORE dedup runs, so the ticker_best comparison below
+        # is itself family-normalized rather than comparing absolute raw
+        # scores across setup types with different score distributions --
+        # the same distortion class Part A/B correct downstream of dedup,
+        # left uncorrected at the dedup step itself until now (P2-H
+        # investigation, 2026-07-18: 142/2048 multi-routed candidates across
+        # 2 real high-RVOL dates got a different dedup winner under this
+        # comparison; 2 changed the final selected list).
+        # Distinct from Part A (confirmation_score, a per-candidate input
+        # feature, normalized before the composite formula) and Part B
+        # (proposal_score_raw re-ranked over the POST-dedup ticker_best
+        # survivors, drives the final cross-setup-type sort/selection) --
+        # this is a third, separate percentile-rank pass, over the PRE-dedup
+        # population (every rankable route, multiple per ticker allowed).
+        # Transient/comparison-only, like proposal_score_ranked below;
+        # proposal_score_raw/_final keep their existing stored (audit-trail)
+        # meaning unchanged -- this only changes which route's row is kept.
+        predup_ranked_by_type: dict[str, list[float]] = {}
+        for item in enriched:
+            if item["rankable"]:
+                predup_ranked_by_type.setdefault(item["setup_type"], []).append(item["proposal_score_raw"])
+        for _scores in predup_ranked_by_type.values():
+            _scores.sort()
+        for item in enriched:
+            if item["rankable"]:
+                item["proposal_score_predup_ranked"] = _percentile_rank(
+                    predup_ranked_by_type.get(item["setup_type"]) or [], item["proposal_score_raw"]
+                )
+
         # Dedupe multi-route
         ticker_best: dict[str, dict[str, Any]] = {}
         rejected_items: list[dict[str, Any]] = []
@@ -1474,7 +1506,10 @@ class Step5ProposalEngine:
                 rejected_items.append(item)
                 continue
             t = item["ticker"]
-            if t not in ticker_best or item["proposal_score_raw"] > ticker_best[t]["proposal_score_raw"]:
+            if (
+                t not in ticker_best
+                or item["proposal_score_predup_ranked"] > ticker_best[t]["proposal_score_predup_ranked"]
+            ):
                 ticker_best[t] = item
 
         # P1.4 Part B (M15 double-credit fix, defense-in-depth): percentile-

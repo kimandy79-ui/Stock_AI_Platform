@@ -730,6 +730,7 @@ class SetupModeFunnelDiagnosticsService:
         report["eligibility_rejection_reasons"] = _rpt_eligibility_rejection_reasons(s3)
         report["setup_funnel"]           = _rpt_setup_funnel(s3, s4, s5, setup_type_filter)
         report["failure_reasons"]        = _rpt_failure_reasons(s4, setup_type_filter)
+        report["co_occurring_failure_reasons"] = _rpt_co_occurring_failure_reasons(s4, setup_type_filter)
         report["s5_rejection_reasons"]   = _rpt_s5_rejection_reasons(s5)
         report["evidence_summaries"]     = _rpt_evidence(s4, s5, setup_type_filter)
         report["borderline_failures"]    = _rpt_borderline(s4, top_n_borderline, setup_type_filter)
@@ -1010,6 +1011,76 @@ def _rpt_failure_reasons(s4: list[dict], setup_type_filter: str | None) -> list[
             "threshold": ex[0][1] if ex else None,
             "direction": ex[0][2] if ex else None,
             "sample_tickers": [e[3] for e in ex],
+        })
+    return result
+
+
+def _rpt_co_occurring_failure_reasons(
+    s4: list[dict], setup_type_filter: str | None
+) -> list[dict]:
+    """P2-G secondary failure-reason breakdown: for each setup_type's failing
+    population, group by the FIRST ``hard_fails`` reason (the same value
+    reported as ``setup_fail_reason`` / surfaced by ``_rpt_failure_reasons``),
+    then report which OTHER reasons appear elsewhere in that row's full
+    ``hard_fails`` list.
+
+    Source: ``explanation_json["hard_fails"]`` — already fetched by
+    ``_SQL_S4_REPORT`` and already parsed into a dict at the ``build_report``
+    call site (``r["explanation_json"] = _parse_json_dict(...)``). No new
+    query, no schema change; ``m14_setup_validators.py`` writes this same
+    list into every validator's ``evidence_json["hard_fails"]``, which
+    ``step4_setup_validation_engine.py`` persists verbatim as
+    ``explanation_json`` (see P2-G investigation,
+    ``reports/P2_G_breakout_gate_ordering_investigation_2026-07-18.md``).
+
+    Generalizes across all four setup types: whichever setup's ``hard_fails``
+    happens to have more than one entry for a given row contributes to that
+    setup's breakdown — nothing breakout-specific here.
+
+    Percentages are against the first-reason cohort size (how many rows share
+    that same first reason), not the setup's total failure count — a
+    candidate whose first reason is X answers "given X, how often does Y also
+    apply", which needs the X-cohort as the denominator.
+    """
+    cohort_size: dict[tuple[str, str], int] = {}
+    co_counts: dict[tuple[str, str, str], int] = {}
+
+    for r in s4:
+        st = r.get("setup_type") or ""
+        if st not in ACTIVE_SETUP_TYPES:
+            continue
+        if setup_type_filter and st != setup_type_filter:
+            continue
+        if r["setup_passed"]:
+            continue
+        expl = r.get("explanation_json") or {}
+        hard_fails = expl.get("hard_fails") or []
+        if not hard_fails:
+            continue  # soft-score-only fail (no hard_fails entries) — nothing to break down
+        first_key, _ = _normalize_validation_reason(hard_fails[0])
+        cohort_k = (st, first_key)
+        cohort_size[cohort_k] = cohort_size.get(cohort_k, 0) + 1
+        seen_others: set[str] = set()
+        for hf in hard_fails[1:]:
+            other_key, _ = _normalize_validation_reason(hf)
+            if other_key in seen_others:
+                continue  # count each co-occurring category once per row
+            seen_others.add(other_key)
+            k = (st, first_key, other_key)
+            co_counts[k] = co_counts.get(k, 0) + 1
+
+    result = []
+    for (st, first_key, other_key), cnt in sorted(
+        co_counts.items(), key=lambda x: (x[0][0], x[0][1], -x[1])
+    ):
+        cohort_n = cohort_size.get((st, first_key), 0)
+        result.append({
+            "setup_type": st,
+            "first_reason": first_key,
+            "co_occurring_reason": other_key,
+            "count": cnt,
+            "cohort_size": cohort_n,
+            "pct_of_first_reason_cohort": _pct_f(cnt, cohort_n),
         })
     return result
 
