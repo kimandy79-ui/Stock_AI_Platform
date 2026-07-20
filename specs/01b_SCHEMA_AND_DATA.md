@@ -120,6 +120,7 @@ CREATE TABLE IF NOT EXISTS daily_features (
     ema20 DOUBLE,
     ema50 DOUBLE,
     ema200 DOUBLE,
+    ema150 DOUBLE,                -- v05 (2026-07-20), dormant
     ema_alignment_score DOUBLE,
     ema20_slope DOUBLE,
     ema50_slope DOUBLE,

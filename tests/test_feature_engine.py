@@ -398,9 +398,11 @@ def test_ema_roc_rvol_exact(tmp_db_paths: dict[str, Path]) -> None:
 
     expected_ema20 = _ema(closes, 20)[-1]
     expected_ema50 = _ema(closes, 50)[-1]
+    expected_ema150 = _ema(closes, 150)[-1]
     expected_ema200 = _ema(closes, 200)[-1]
     assert row["ema20"] == pytest.approx(expected_ema20, rel=1e-9)
     assert row["ema50"] == pytest.approx(expected_ema50, rel=1e-9)
+    assert row["ema150"] == pytest.approx(expected_ema150, rel=1e-9)
     assert row["ema200"] == pytest.approx(expected_ema200, rel=1e-9)
 
     expected_roc20 = closes[-1] / closes[-21] - 1.0
@@ -481,6 +483,45 @@ def test_ema_alignment_score_values(tmp_db_paths: dict[str, Path]) -> None:
     row = _fetch_feature(prod, "AAA")
     assert row["ema_alignment_score"] == pytest.approx(100.0)
     assert row["ema20"] > row["ema50"] > row["ema200"]
+    # ema150 is dormant (not read by ema_alignment_score or any validator),
+    # but should still land somewhere sane in a steady uptrend.
+    assert row["ema50"] > row["ema150"] > row["ema200"]
+
+
+# --------------------------------------------------------------------------- #
+# 6b. ema150 (features_v05, dormant) -- minimum-bar-count masking
+# --------------------------------------------------------------------------- #
+def test_ema150_null_below_minimum_bars(tmp_db_paths: dict[str, Path]) -> None:
+    """149 bars: one short of _MIN_BARS_EMA150 (150) -> ema150 stays NULL,
+    same masking convention as every other EWM-derived indicator."""
+    prod = tmp_db_paths[dbm.DB_ROLE_PROD]
+    days = _trading_days(date(2022, 6, 1), 149)
+    _seed_series(prod, "AAA", days, [100.0 + i * 0.1 for i in range(len(days))])
+    FeatureEngine().calculate(days[-1], days[-1])
+    row = _fetch_feature(prod, "AAA")
+    assert row["ema150"] is None
+
+
+def test_ema150_present_at_minimum_bars(tmp_db_paths: dict[str, Path]) -> None:
+    """Exactly 150 bars: the boundary bar itself -> ema150 is populated and
+    matches the same recursive EWM formula used for ema20/ema50/ema200."""
+    prod = tmp_db_paths[dbm.DB_ROLE_PROD]
+    days = _trading_days(date(2022, 6, 1), 150)
+    closes = [100.0 + i * 0.1 for i in range(len(days))]
+    _seed_series(prod, "AAA", days, closes)
+    FeatureEngine().calculate(days[-1], days[-1])
+    row = _fetch_feature(prod, "AAA")
+    expected_ema150 = _ema(closes, 150)[-1]
+    assert row["ema150"] == pytest.approx(expected_ema150, rel=1e-9)
+
+
+def test_ema150_dormant_not_in_required_columns() -> None:
+    """ema150 must not gate feature_ready -- it's dormant, unlike
+    ema20/ema50/ema200 (all in REQUIRED_FEATURE_COLUMNS). Landed as OPTIONAL,
+    same as the other dormant fields (rs_percentile_126d, market_cap,
+    vcp_sequence_score)."""
+    assert "ema150" not in femod.REQUIRED_FEATURE_COLUMNS
+    assert "ema150" in femod.OPTIONAL_FEATURE_COLUMNS
 
 
 # --------------------------------------------------------------------------- #

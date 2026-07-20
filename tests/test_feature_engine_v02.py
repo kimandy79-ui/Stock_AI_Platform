@@ -420,13 +420,14 @@ class TestSchemaCompatibility:
     def test_feature_schema_version_is_current(self, tmp_db_paths: dict) -> None:
         # P1.1 (2026-07-08): features_v02 -> features_v03.
         # P2.3/P2.4 (2026-07-10): features_v03 -> features_v04.
+        # 2026-07-20: features_v04 -> features_v05 (ema150, dormant).
         prod = tmp_db_paths[dbm.DB_ROLE_PROD]
         days = _trading_days(date(2022, 1, 3), 300)
         _seed_prices(prod, "AAA", days, [50.0 + i * 0.1 for i in range(len(days))])
         _seed_ticker_master(prod, "AAA")
         FeatureEngine().calculate(days[-1], days[-1])
         row = _fetch_feature(prod, "AAA")
-        assert row["feature_schema_version"] == "features_v04"
+        assert row["feature_schema_version"] == constants.FEATURE_SCHEMA_VERSION == "features_v05"
 
     def test_v02_columns_present_in_schema(self, tmp_db_paths: dict) -> None:
         prod = tmp_db_paths[dbm.DB_ROLE_PROD]

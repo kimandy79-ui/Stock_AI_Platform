@@ -16,9 +16,10 @@ Does NOT:
 
 Two distinct versions (never confused):
 - DATABASE_SCHEMA_VERSION = "schema_v02" — seeded into schema_versions.
-- FEATURE_SCHEMA_VERSION = "features_v04" — written into daily_features rows by M11
-  (P2.3/P2.4, 2026-07-10: adds market_cap + vcp_sequence_score; bumped from
-  features_v03, which added rs_percentile_126d on 2026-07-08).
+- FEATURE_SCHEMA_VERSION = "features_v05" — written into daily_features rows by M11
+  (2026-07-20: adds ema150, dormant; bumped from features_v04, which added
+  market_cap + vcp_sequence_score on 2026-07-10, itself bumped from features_v03,
+  which added rs_percentile_126d on 2026-07-08).
   Reinit, not migrate: daily_features is a derived table, rebuilt by M11 from
   daily_prices. Adding columns changes the CREATE TABLE only; existing rows are
   discarded by the wipe/backfill, never ALTERed in place.
@@ -163,6 +164,10 @@ _PROD_TABLE_DDL: Final[tuple[str, ...]] = (
         ema20 DOUBLE,
         ema50 DOUBLE,
         ema200 DOUBLE,
+        -- v05 (2026-07-20): dormant -- no validator or scoring path reads it
+        -- yet, pending a separate decision on trend_continuation's
+        -- "price>50MA>150MA>200MA" gate.
+        ema150 DOUBLE,
         ema_alignment_score DOUBLE,
         ema20_slope DOUBLE,
         ema50_slope DOUBLE,

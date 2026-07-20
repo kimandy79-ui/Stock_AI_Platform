@@ -13,6 +13,11 @@ P2.3/P2.4 (2026-07-10): bumped to features_v04 — adds vcp_sequence_score
 (progressive base contraction) and market_cap (shares_outstanding x close_raw).
 Both dormant: persisted, read by no validator or scoring path.
 
+2026-07-20 (Phase 1.5 RS/150MA follow-up, Item 2): bumped to features_v05 —
+adds ema150 (150-day EMA). Dormant: persisted, read by no validator or scoring
+path yet -- landed ahead of a separate, still-pending decision on whether/how
+to wire a trend_continuation "price>50MA>150MA>200MA" gate.
+
 Module 01 scope: definitions only. No database, provider, or trading logic.
 """
 
@@ -22,10 +27,11 @@ from typing import Final
 
 # --------------------------------------------------------------------------- #
 # Feature schema version (AD-22.8; bumped AD-22.19; bumped for P1.1; bumped for
-# P2.3/P2.4 -- adds vcp_sequence_score + market_cap).
+# P2.3/P2.4 -- adds vcp_sequence_score + market_cap; bumped 2026-07-20 for
+# ema150, dormant).
 # Zero-padded per DECISIONS_LOG.md to avoid lexicographic MAX bugs.
 # --------------------------------------------------------------------------- #
-FEATURE_SCHEMA_VERSION: Final[str] = "features_v04"
+FEATURE_SCHEMA_VERSION: Final[str] = "features_v05"
 
 # --------------------------------------------------------------------------- #
 # Database file names

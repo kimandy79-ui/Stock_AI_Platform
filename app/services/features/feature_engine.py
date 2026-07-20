@@ -1,6 +1,6 @@
-"""Module 11 — Feature Engine (features_v04).
+"""Module 11 — Feature Engine (features_v05).
 
-Computes ``daily_features`` rows (schema version ``features_v04``) from already-
+Computes ``daily_features`` rows (schema version ``features_v05``) from already-
 ingested, validated, and mutation-checked ``daily_prices`` data.  Runs after
 Module 10 (Mutation Detector) and before Module 12 (Market Regime Engine).
 
@@ -57,6 +57,19 @@ path, pending an explicit future decision (same discipline as
   retro-restated by later splits/dividends and would embed future corporate
   actions. NULL when the ticker has no share count knowable as of the cutoff.
 
+2026-07-20 (Phase 1.5 RS/150MA investigation, Item 2): ``features_v05`` adds
+one column over ``features_v04`` — also **dormant**.
+
+- ``ema150`` — 150-day EMA of ``close_adj``, same construction as
+  ``ema20``/``ema50``/``ema200`` (``ewm_mean(span=150, adjust=False)``, masked
+  to NULL below ``_MIN_BARS_EMA150`` bars). Landed as a bare field only, no
+  ``distance_to_ema150_pct`` companion and no gate anywhere — the Phase 1.5
+  investigation flagged that ``validate_trend_continuation``'s literature
+  intent ("price>50MA>150MA>200MA") requires this field and it didn't exist;
+  this closes that specific gap. Whether/how to wire a hard MA-stacking gate
+  is a separate, still-open decision (same discipline as
+  ``rs_percentile_126d``/``market_cap``/``vcp_sequence_score``).
+
 Scope
 -----
 - Reads ``daily_prices`` (``data_quality_status = 'ok'``) plus warmup history.
@@ -112,6 +125,7 @@ REQUIRED_MIN_BARS: Final[int] = 252
 # Per-indicator EWM minimum bars.
 _MIN_BARS_EMA20: Final[int] = 20
 _MIN_BARS_EMA50: Final[int] = 50
+_MIN_BARS_EMA150: Final[int] = 150
 _MIN_BARS_EMA200: Final[int] = 200
 _MIN_BARS_RSI14: Final[int] = 15
 _MIN_BARS_ATR14: Final[int] = 15
@@ -210,6 +224,8 @@ OPTIONAL_FEATURE_COLUMNS: Final[tuple[str, ...]] = (
     # v04 new (optional, dormant — no validator/scoring path reads either yet)
     "market_cap",
     "vcp_sequence_score",
+    # v05 new (optional, dormant — no validator/scoring path reads it yet)
+    "ema150",
 )
 
 # --------------------------------------------------------------------------- #
@@ -242,6 +258,7 @@ _FEATURE_PARAM_COLUMNS: Final[tuple[str, ...]] = (
     "ema20",
     "ema50",
     "ema200",
+    "ema150",
     "ema_alignment_score",
     "ema20_slope",
     "ema50_slope",
@@ -1211,6 +1228,7 @@ class FeatureEngine:
         _select_base = [
             "ticker", "date",
             *REQUIRED_FEATURE_COLUMNS,
+            "ema150",
             "distance_to_ema20_pct",
             "distance_to_ema50_pct",
             "distance_to_ema200_pct",
@@ -1417,6 +1435,8 @@ class FeatureEngine:
             "feature_ready": feature_ready,
             # v01 required
             **required,
+            # v05 dormant
+            "ema150": _sanitize(rec["ema150"]),
             # v01 optional EMAs
             "distance_to_ema20_pct": _sanitize(rec["distance_to_ema20_pct"]),
             "distance_to_ema50_pct": _sanitize(rec["distance_to_ema50_pct"]),
@@ -1602,6 +1622,7 @@ def _compute_features(prices: pl.DataFrame) -> pl.DataFrame:
     frame = frame.with_columns(
         pl.col("close_adj").ewm_mean(span=20, adjust=False).over("ticker").alias("_ema20_raw"),
         pl.col("close_adj").ewm_mean(span=50, adjust=False).over("ticker").alias("_ema50_raw"),
+        pl.col("close_adj").ewm_mean(span=150, adjust=False).over("ticker").alias("_ema150_raw"),
         pl.col("close_adj").ewm_mean(span=200, adjust=False).over("ticker").alias("_ema200_raw"),
         pl.when(pl.col("_delta") > 0).then(pl.col("_delta")).otherwise(0.0).fill_null(0.0).alias("_gain"),
         pl.when(pl.col("_delta") < 0).then(-pl.col("_delta")).otherwise(0.0).fill_null(0.0).alias("_loss"),
@@ -1641,6 +1662,7 @@ def _compute_features(prices: pl.DataFrame) -> pl.DataFrame:
     frame = frame.with_columns(
         pl.when(pl.col("bar_index") >= _MIN_BARS_EMA20).then(pl.col("_ema20_raw")).otherwise(None).alias("ema20"),
         pl.when(pl.col("bar_index") >= _MIN_BARS_EMA50).then(pl.col("_ema50_raw")).otherwise(None).alias("ema50"),
+        pl.when(pl.col("bar_index") >= _MIN_BARS_EMA150).then(pl.col("_ema150_raw")).otherwise(None).alias("ema150"),
         pl.when(pl.col("bar_index") >= _MIN_BARS_EMA200).then(pl.col("_ema200_raw")).otherwise(None).alias("ema200"),
         pl.col("atr14").rolling_mean(window_size=60, min_samples=60).over("ticker").alias("_atr_mean60"),
         pl.col("_ema20_raw").shift(5).over("ticker").alias("_ema20_lag5_raw"),

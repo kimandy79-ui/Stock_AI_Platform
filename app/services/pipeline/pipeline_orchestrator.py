@@ -7,17 +7,22 @@ Setup-mode step sequence (01d_MODULES_AND_PIPELINE.md §70):
   2. universe_ingestion            (recoverable)
   3. earnings_calendar_refresh     (recoverable) — skipped if calendar already updated today
   4. fundamentals_refresh          (recoverable) — Phase 4; skipped if already updated today
-  5. price_ingestion               (critical)
-  6. validation                    (critical)
-  7. mutation_detection            (recoverable)
-  8. feature_calculation           (critical)
-  9. market_regime_classification  (recoverable)
- 10. step3_universal_eligibility   (critical, ONCE per signal_date — M13)
- 11. step4_setup_validation        (critical, ONCE per signal_date — M14, iterates setup configs internally)
- 12. step5_proposals               (critical, ONCE per signal_date — M15)
- 13. outcome_queue_creation        (critical)
- 14. outcome_processing            (recoverable)
- 15. dashboard_materialization     (recoverable, V1 no-op)
+  5. insider_flag_refresh          (recoverable) — 2026-07-20; decoupled from fundamentals_refresh
+     (P2.7's SEC-EDGAR-native insider_trade_flag, ~82min at Step-4 scale, no longer paid
+     inline in fundamentals_refresh's per-ticker loop). Runs once the day's active-ticker
+     universe (universe_ingestion) and their ticker_fundamentals rows (fundamentals_refresh)
+     already exist; gated on compute_insider_flag.
+  6. price_ingestion               (critical)
+  7. validation                    (critical)
+  8. mutation_detection            (recoverable)
+  9. feature_calculation           (critical)
+ 10. market_regime_classification  (recoverable)
+ 11. step3_universal_eligibility   (critical, ONCE per signal_date — M13)
+ 12. step4_setup_validation        (critical, ONCE per signal_date — M14, iterates setup configs internally)
+ 13. step5_proposals               (critical, ONCE per signal_date — M15)
+ 14. outcome_queue_creation        (critical)
+ 15. outcome_processing            (recoverable)
+ 16. dashboard_materialization     (recoverable, V1 no-op)
 
 Hard boundaries:
 - No direct ``duckdb`` import.
@@ -76,6 +81,7 @@ STEP_NAMES: Final[tuple[str, ...]] = (
     "universe_ingestion",
     "earnings_calendar_refresh",
     "fundamentals_refresh",
+    "insider_flag_refresh",
     "price_ingestion",
     "validation",
     "mutation_detection",
@@ -107,6 +113,7 @@ RECOVERABLE_STEPS: Final[frozenset[str]] = frozenset(
         "universe_ingestion",
         "earnings_calendar_refresh",
         "fundamentals_refresh",
+        "insider_flag_refresh",
         "mutation_detection",
         "market_regime_classification",
         "outcome_queue_creation",   # M16 legacy API; full setup-mode migration is Phase 7
@@ -272,6 +279,29 @@ _SQL_FUNDAMENTALS_UPSERT: Final[str] = (
     "shares_outstanding = EXCLUDED.shares_outstanding, "
     "source_provider = EXCLUDED.source_provider, "
     "calculated_at = EXCLUDED.calculated_at"
+)
+
+# --------------------------------------------------------------------------- #
+# SQL — insider flag refresh (2026-07-20; used only by _step_insider_flag).
+# Decoupled from _step_fundamentals: reuses _SQL_EARNINGS_TICKERS (same
+# active-stock-ticker universe) but UPDATEs (not INSERTs) the row
+# fundamentals_refresh already created, so it's naturally idempotent on
+# resume/force_rerun -- no "already refreshed today" guard needed.
+# _SQL_INSIDER_FLAG_EXISTING_ROWS is read once up front to know which tickers
+# actually have a ticker_fundamentals row for run_date before spending an SEC
+# EDGAR insider lookup on one that can't be written anywhere (a ticker whose
+# fundamentals_refresh fetch failed that day never gets a row at all): DuckDB's
+# Python connection doesn't expose a portable post-UPDATE affected-row count
+# across the fakes this suite is tested against (same limitation noted in
+# config_recommender.py's status-update path), so this predicts and reports
+# the 0-row case up front instead of reactively inspecting each UPDATE.
+# --------------------------------------------------------------------------- #
+_SQL_INSIDER_FLAG_EXISTING_ROWS: Final[str] = (
+    "SELECT ticker FROM ticker_fundamentals WHERE as_of_date = ?"
+)
+_SQL_INSIDER_FLAG_UPDATE: Final[str] = (
+    "UPDATE ticker_fundamentals SET insider_trade_flag = ? "
+    "WHERE ticker = ? AND as_of_date = ?"
 )
 
 
@@ -553,6 +583,7 @@ class PipelineOrchestrator:
                     ("universe_ingestion",             self._step_universe),
                     ("earnings_calendar_refresh",      self._step_earnings),
                     ("fundamentals_refresh",            self._step_fundamentals),
+                    ("insider_flag_refresh",             self._step_insider_flag),
                     ("price_ingestion",                self._step_price),
                     ("validation",                     self._step_validation),
                     ("mutation_detection",             self._step_mutation),
@@ -686,8 +717,9 @@ class PipelineOrchestrator:
             return (
                 f"{SEC_USER_AGENT_ENV_VAR} is not set; fundamentals_refresh will use "
                 "yfinance_fallback for every ticker this run (reduced coverage: no "
-                "piotroski_f_score/altman_z_score). Set SEC_USER_AGENT to enable the "
-                "sec_edgar primary source."
+                "piotroski_f_score/altman_z_score), and insider_flag_refresh will warn "
+                "and skip every ticker (no fallback source for insider_trade_flag). "
+                "Set SEC_USER_AGENT to enable the sec_edgar primary source."
             )
         return None
 
@@ -1120,13 +1152,90 @@ class PipelineOrchestrator:
         return _lookup
 
     def _resolve_fundamentals_provider(self, db_role: str, run_date: date, log: Any):
-        """Injected provider as-is; otherwise a default one wired for this run."""
+        """Injected provider as-is; otherwise a default one wired for this run.
+
+        No ``insider_lookup`` is wired here (2026-07-20 step-decoupling coder
+        note): ``insider_trade_flag`` is now computed by its own
+        ``insider_flag_refresh`` step, after this one, via
+        ``_step_insider_flag``. ``EdgarFundamentalsProvider.get_fundamentals``
+        still accepts an ``insider_lookup`` and still passes an
+        ``insider_flag`` through to ``compute_fundamentals_from_companyfacts``
+        (harmless, defaults ``None``) -- it's simply never given a live one
+        during ``fundamentals_refresh`` anymore, so that field stays ``NULL``
+        here and is filled in by the later step instead.
+        """
         if self._fundamentals_provider is not None:
             return self._fundamentals_provider
-        from app.providers.edgar_provider import EdgarFundamentalsProvider
+        from app.providers.edgar_provider import EdgarFundamentalsProvider, build_sec_http_client
+
         return EdgarFundamentalsProvider(
-            price_lookup=self._make_price_lookup(db_role, run_date, log)
+            fetch_json=build_sec_http_client().get_json,
+            price_lookup=self._make_price_lookup(db_role, run_date, log),
         )
+
+    def _insider_flag_config(self, db_role: str, log: Any) -> dict[str, Any]:
+        """Active risk_label_config's insider-purchase-flag thresholds, or defaults."""
+        from app.providers import edgar_insider_provider as eip
+
+        defaults = {
+            "insider_purchase_lookback_days": eip.DEFAULT_LOOKBACK_DAYS,
+            "min_insider_transaction_value_usd": eip.DEFAULT_MIN_TRANSACTION_VALUE_USD,
+            "exclude_10b5_1": eip.DEFAULT_EXCLUDE_10B5_1,
+        }
+        try:
+            result = self._config_service.get_active_risk_label_config(db_role)
+            cfg = (result.metadata or {}).get("config_json") or {}
+            fundamentals_cfg = cfg.get("fundamentals") or {}
+        except Exception as exc:  # noqa: BLE001
+            log.warning(
+                "fundamentals_refresh: could not read risk_label_config for "
+                "insider flag thresholds: %s", exc,
+            )
+            return defaults
+        return {
+            "insider_purchase_lookback_days": int(
+                fundamentals_cfg.get(
+                    "insider_purchase_lookback_days",
+                    defaults["insider_purchase_lookback_days"],
+                )
+            ),
+            "min_insider_transaction_value_usd": float(
+                fundamentals_cfg.get(
+                    "min_insider_transaction_value_usd",
+                    defaults["min_insider_transaction_value_usd"],
+                )
+            ),
+            "exclude_10b5_1": bool(
+                fundamentals_cfg.get("exclude_10b5_1", defaults["exclude_10b5_1"])
+            ),
+        }
+
+    def _build_insider_lookup(self, db_role: str, log: Any, http_client: Any) -> Any:
+        """A ``(ticker, as_of_date, cik) -> bool | None`` closure, or ``None`` if disabled.
+
+        Gated on the ``compute_insider_flag`` pipeline flag -- unlike
+        ``price_lookup`` this isn't unconditionally built: each ticker costs
+        several extra SEC EDGAR requests (one ``submissions.json`` list plus
+        one per candidate Form 4), so an operator may want to shed that load
+        without a code change (e.g. during a SEC-side slowdown).
+        """
+        if not self._pipeline_flags(db_role, log)["compute_insider_flag"]:
+            return None
+        from app.providers import edgar_insider_provider as eip
+
+        cfg = self._insider_flag_config(db_role, log)
+
+        def _lookup(ticker: str, as_of_date: date, cik: str) -> bool | None:
+            return eip.fetch_insider_purchase_flag(
+                ticker, as_of_date, cik,
+                fetch_json=http_client.get_json,
+                fetch_filing_xml=http_client.get_text,
+                lookback_days=cfg["insider_purchase_lookback_days"],
+                min_transaction_value_usd=cfg["min_insider_transaction_value_usd"],
+                exclude_10b5_1=cfg["exclude_10b5_1"],
+            )
+
+        return _lookup
 
     def _step_fundamentals(self, run_date: date, db_role: str, run_id: str, log: Any):
         """Ensure ``ticker_fundamentals`` is refreshed for *run_date* (Phase 4).
@@ -1275,6 +1384,133 @@ class PipelineOrchestrator:
             metadata={"source_counts": source_counts, "source_summary": source_summary},
         )
 
+    def _step_insider_flag(self, run_date: date, db_role: str, run_id: str, log: Any):
+        """Populate ``ticker_fundamentals.insider_trade_flag`` for *run_date* (P2.7, decoupled).
+
+        Runs after ``fundamentals_refresh`` so both prerequisites already
+        exist: the active-ticker universe (``universe_ingestion``) and a
+        ``ticker_fundamentals`` row per successfully-fetched ticker
+        (``fundamentals_refresh``). Recoverable: any raised exception or
+        per-ticker failure is a warning, never a hard step failure (same
+        contract as ``_step_fundamentals``/``_step_earnings``), and this step
+        is not in ``CRITICAL_STEPS`` so ``_safe_step`` isolates it from the
+        overall run regardless.
+
+        UPDATEs (not INSERTs) an existing row, so it's naturally idempotent
+        on resume/force_rerun -- unlike ``_step_fundamentals`` there is no
+        "already refreshed today" guard here.
+        """
+        if not self._pipeline_flags(db_role, log)["compute_insider_flag"]:
+            log.info("insider_flag_refresh: compute_insider_flag disabled; skipping")
+            return ServiceResult(
+                status=service_result.STATUS_SUCCESS_WITH_WARNINGS,
+                run_id=run_id, rows_processed=0,
+                warnings=["insider_flag_refresh: disabled via compute_insider_flag=False"],
+            )
+
+        conn = self._db.connect(db_role)
+        try:
+            tickers: list[str] = [r[0] for r in conn.execute(_SQL_EARNINGS_TICKERS).fetchall()]
+        finally:
+            conn.close()
+
+        if not tickers:
+            log.warning("insider_flag_refresh: no active stock tickers found")
+            return ServiceResult(
+                status=service_result.STATUS_SUCCESS_WITH_WARNINGS,
+                run_id=run_id, rows_processed=0,
+                warnings=["insider_flag_refresh: no active stock tickers"],
+            )
+
+        conn = self._db.connect(db_role)
+        try:
+            cursor = conn.execute(_SQL_INSIDER_FLAG_EXISTING_ROWS, [run_date])
+            existing_rows: set[str] = {r[0] for r in cursor.fetchall()}
+        finally:
+            conn.close()
+
+        from app.providers.edgar_provider import EdgarFundamentalsProvider, build_sec_http_client
+
+        # This step's own client, built fresh here rather than reusing
+        # fundamentals_refresh's: the two steps no longer run concurrently
+        # against each other within one shared request budget (that was the
+        # reason the pre-decoupling code insisted on exactly one client), so
+        # each step owning its own is simpler and correct now. Within THIS
+        # step, one client still backs every request (CIK resolution,
+        # submissions.json, filing XML), so it isn't independently
+        # double-throttled either.
+        http_client = build_sec_http_client()
+        insider_lookup = self._build_insider_lookup(db_role, log, http_client)
+        cik_provider = EdgarFundamentalsProvider(fetch_json=http_client.get_json)
+
+        update_rows: list[tuple] = []
+        warnings: list[str] = []
+        missing_row_count = 0
+        for ticker in tickers:
+            if ticker not in existing_rows:
+                missing_row_count += 1
+                continue
+            try:
+                cik = cik_provider.resolve_cik(ticker)
+                if cik is None:
+                    warnings.append(
+                        f"insider_flag_refresh({ticker}): no SEC CIK mapping found"
+                    )
+                    continue
+                flag = insider_lookup(ticker, run_date, cik)
+            except Exception as exc:  # noqa: BLE001
+                warnings.append(f"insider_flag_refresh({ticker}) raised: {exc}")
+                continue
+            update_rows.append((flag, ticker, run_date))
+
+        if missing_row_count:
+            warnings.append(
+                f"insider_flag_refresh: {missing_row_count}/{len(tickers)} ticker(s) had no "
+                f"ticker_fundamentals row for {run_date}; UPDATE would affect 0 rows, skipped"
+            )
+
+        if not update_rows:
+            msg = "insider_flag_refresh: 0 rows updated"
+            log.warning(msg)
+            return ServiceResult(
+                status=service_result.STATUS_SUCCESS_WITH_WARNINGS,
+                run_id=run_id, rows_processed=0,
+                warnings=warnings or [msg],
+            )
+
+        import gc
+        gc.collect()  # release Windows mmap regions from read connections
+        conn = self._db.connect(db_role, read_only=False)
+        try:
+            conn.execute("BEGIN TRANSACTION")
+            try:
+                for row in update_rows:
+                    conn.execute(_SQL_INSIDER_FLAG_UPDATE, list(row))
+                conn.execute("COMMIT")
+            except Exception:
+                try:
+                    conn.execute("ROLLBACK")
+                except Exception:  # noqa: BLE001
+                    pass
+                raise
+        finally:
+            conn.close()
+
+        status = (
+            service_result.STATUS_SUCCESS_WITH_WARNINGS
+            if warnings else service_result.STATUS_SUCCESS
+        )
+        log.info(
+            "insider_flag_refresh: updated %d/%d ticker(s)",
+            len(update_rows), len(tickers),
+        )
+        return ServiceResult(
+            status=status,
+            run_id=run_id,
+            rows_processed=len(update_rows),
+            warnings=warnings,
+        )
+
     def _step_price(self, run_date: date, db_role: str, run_id: str, log: Any):
         return self._ingestion_engine.ingest(
             provider=self._provider,
@@ -1337,13 +1573,17 @@ class PipelineOrchestrator:
         )
 
     def _pipeline_flags(self, db_role: str, log: Any) -> dict[str, bool]:
-        """Read the two step5 orchestration flags from the ``pipeline`` runtime config.
+        """Read the pipeline orchestration flags from the ``pipeline`` runtime config.
 
-        Falls back to the safe defaults (fundamentals on, AI review off) if the
-        config can't be read, so a config problem can never silently enable paid
-        AI review calls.
+        Falls back to the safe defaults (fundamentals on, AI review off,
+        insider flag on) if the config can't be read, so a config problem can
+        never silently enable paid AI review calls.
         """
-        defaults = {"auto_invoke_fundamentals": True, "auto_invoke_ai_review": False}
+        defaults = {
+            "auto_invoke_fundamentals": True,
+            "auto_invoke_ai_review": False,
+            "compute_insider_flag": True,
+        }
         try:
             result = self._config_service.get_active_runtime_config(db_role, "pipeline")
             cfg = (result.metadata or {}).get("config_json") or {}
@@ -1356,6 +1596,9 @@ class PipelineOrchestrator:
             ),
             "auto_invoke_ai_review": bool(
                 cfg.get("auto_invoke_ai_review", defaults["auto_invoke_ai_review"])
+            ),
+            "compute_insider_flag": bool(
+                cfg.get("compute_insider_flag", defaults["compute_insider_flag"])
             ),
         }
 

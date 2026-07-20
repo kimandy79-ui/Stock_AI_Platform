@@ -460,7 +460,19 @@ DEFAULT_RISK_LABEL_CONFIG: Final[dict[str, Any]] = {
     # that double-counts the same five fields (M14 folds its own adjustment into
     # setup_score, which this formula already weights at _W_SETUP).
     # ConfigService.validate_setup_config enforces this.
-    "fundamentals": {"score_weight": 0.0},
+    # insider_purchase_lookback_days / min_insider_transaction_value_usd /
+    # exclude_10b5_1 (2026-07-18 insider_trade_flag coder notes; SEC-EDGAR-
+    # native as of the second note): thresholds for the Step-4-scale
+    # insider-purchase flag (informational/display only -- never scored,
+    # never wired into Step 4 eligibility/routing). Starting values per the
+    # project's "config, not hardcoded, no pre-diagnostic tuning" convention
+    # -- not tuned, just made overridable.
+    "fundamentals": {
+        "score_weight": 0.0,
+        "insider_purchase_lookback_days": 90,
+        "min_insider_transaction_value_usd": 10000.0,
+        "exclude_10b5_1": True,
+    },
     "buy_rules": {
         "min_rr_for_buy": 1.8,
         "allowed_buy_labels": ["low", "medium"],
@@ -545,6 +557,18 @@ DEFAULT_RUNTIME_CONFIGS: Final[dict[str, dict[str, Any]]] = {
         # (dates x candidates x passes). Turning it on also makes Step 5 run
         # twice per signal_date (see PipelineOrchestrator._step_step5).
         "auto_invoke_ai_review": False,
+        # compute_insider_flag (2026-07-18 insider_trade_flag coder note,
+        # SEC-EDGAR-native): run the insider-purchase lookup inside
+        # fundamentals_refresh, at the same Step-4 scale (~1,500 tickers) as
+        # the other 5 EDGAR fundamentals fields. ON by default -- purely
+        # informational/display, never scored, so there is no promote-to-BUY
+        # risk like auto_invoke_fundamentals's kill-switch guards against.
+        # Still a flag (not unconditional): each ticker costs several extra
+        # SEC EDGAR requests (one submissions.json list plus one per
+        # candidate Form 4), so an operator can disable it without touching
+        # code if SEC-side slowdowns or a bad day of errors make it worth
+        # temporarily shedding that load.
+        "compute_insider_flag": True,
     },
     "provider": {
         "provider_name": "yahoo",

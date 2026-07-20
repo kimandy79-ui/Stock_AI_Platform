@@ -258,6 +258,65 @@ def test_price_history_happy_path_maps_raw_and_adjusted() -> None:
 
 
 # --------------------------------------------------------------------------- #
+# 4b. split_ratio 0.0-sentinel translation (split-ratio convention fix, 2026-07-18)
+# --------------------------------------------------------------------------- #
+def test_split_ratio_zero_maps_to_none() -> None:
+    """yfinance's ``0.0`` 'no split today' sentinel is translated to ``None``
+    (missing), so ``daily_price_ingestion.py``'s existing missing-value
+    default (``split_ratio = 1``) fires correctly downstream instead of
+    ``0.0`` being written verbatim and tripping
+    ``MutationDetector.is_explicit_split()``'s ``!= 1`` check."""
+    frame = _price_frame(
+        rows=[
+            {
+                "Open": 100.0, "High": 110.0, "Low": 90.0, "Close": 100.0,
+                "Volume": 1_000_000, "Dividends": 0.0, "Stock Splits": 0.0,
+                "Adj Close": 100.0,
+            },
+        ],
+        dates=["2024-01-02"],
+    )
+    provider, fake = _make_provider()
+    fake.history_behavior["AAPL"] = frame
+
+    result = provider.get_price_history(
+        PriceHistoryRequest(ticker="AAPL", start_date=date(2024, 1, 1), end_date=date(2024, 1, 31))
+    )
+    bars = result.metadata["bars"]
+    assert len(bars) == 1
+    assert bars[0].split_ratio is None
+
+
+def test_split_ratio_nonzero_passes_through_unchanged() -> None:
+    """A real (non-zero) split ratio -- forward or reverse -- is passed
+    through unmodified, not translated."""
+    frame = _price_frame(
+        rows=[
+            {
+                "Open": 100.0, "High": 110.0, "Low": 90.0, "Close": 100.0,
+                "Volume": 1_000_000, "Dividends": 0.0, "Stock Splits": 2.0,
+                "Adj Close": 100.0,
+            },
+            {
+                "Open": 50.0, "High": 55.0, "Low": 45.0, "Close": 50.0,
+                "Volume": 900_000, "Dividends": 0.0, "Stock Splits": 0.5,
+                "Adj Close": 50.0,
+            },
+        ],
+        dates=["2024-01-02", "2024-01-03"],
+    )
+    provider, fake = _make_provider()
+    fake.history_behavior["AAPL"] = frame
+
+    result = provider.get_price_history(
+        PriceHistoryRequest(ticker="AAPL", start_date=date(2024, 1, 1), end_date=date(2024, 1, 31))
+    )
+    bars = result.metadata["bars"]
+    assert bars[0].split_ratio == 2.0
+    assert bars[1].split_ratio == 0.5
+
+
+# --------------------------------------------------------------------------- #
 # 5. Inclusive end-date handling
 # --------------------------------------------------------------------------- #
 def test_inclusive_end_date_calls_vendor_with_exclusive_end() -> None:

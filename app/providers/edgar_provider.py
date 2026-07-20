@@ -25,11 +25,19 @@ Field coverage (of the 8 :class:`FundamentalSnapshot` fields):
   injected (see :class:`EdgarFundamentalsProvider`); otherwise ``"unknown"``
   (a valid catalog value, not a failure) since EPS-to-price bucketing has no
   meaningful book-value-only substitute.
-- ``insider_trade_flag`` — always ``None`` from either source. SEC EDGAR
-  Form 4s are filed under the *insider's* own CIK, not the issuer's;
-  reliably resolving "which Form 4 filings reference this issuer" needs
-  EDGAR full-text search with query semantics this implementation cannot
-  verify with confidence from documentation alone.
+- ``insider_trade_flag`` (P2.7) — computed here *if* an ``insider_lookup``
+  callable is injected (see :class:`EdgarFundamentalsProvider`); otherwise
+  ``None``, same optional-injection shape as ``valuation_band``'s
+  ``price_lookup``. The original concern here -- that SEC EDGAR Form 4s are
+  filed under the *insider's* own CIK, not the issuer's, making
+  issuer-keyed lookup unverifiable without full-text search -- turned out
+  not to hold: ``data.sec.gov/submissions/CIK##########.json`` (the same
+  JSON-API generation this module already uses for ``companyfacts``)
+  reliably lists Form 4 filings for an issuer's own CIK, confirmed against
+  real filings (see ``reports/sec_edgar_issuer_ownership_lookup_investigation_2026-07-18.md``).
+  The default production ``insider_lookup`` (built by
+  ``pipeline_orchestrator.py``, not this module) lives in
+  :mod:`app.providers.edgar_insider_provider`.
 - ``institutional_ownership_delta`` — always ``None`` from either source.
   True institutional ownership requires aggregating 13F filings across
   *all* institutional filers for a given issuer, quarter over quarter — a
@@ -265,8 +273,15 @@ class _SecHttpClient:
         if remaining > 0:
             self._sleep(remaining)
 
-    def get_json(self, url: str) -> dict[str, Any]:
-        """GET *url* and return parsed JSON, honoring the retry/throttle policy."""
+    def _get(self, url: str) -> Any:
+        """GET *url*, honoring the retry/throttle policy, and return the raw response.
+
+        Shared by :meth:`get_json` and :meth:`get_text` so both request
+        shapes (companyfacts JSON, Form 4 XML) go through the *same*
+        throttle/retry state on the *same* session -- two independently
+        rate-limited clients would double SEC's effective request rate
+        against the same fair-access budget.
+        """
         session = self._ensure_session()
         attempt = 0
         while True:
@@ -286,7 +301,45 @@ class _SecHttpClient:
                 self._sleep(_RETRY_BACKOFF_BASE_SEC * (2 ** (attempt - 1)))
                 continue
             response.raise_for_status()
-            return response.json()
+            return response
+
+    def get_json(self, url: str) -> dict[str, Any]:
+        """GET *url* and return parsed JSON, honoring the retry/throttle policy."""
+        return self._get(url).json()
+
+    def get_text(self, url: str) -> str:
+        """GET *url* and return the raw response body as text.
+
+        Used for Form 4 XML filings (P2.7 insider_trade_flag) -- unlike
+        ``companyfacts``, filing documents are XML, not JSON, so
+        ``response.json()`` would fail on them.
+        """
+        return self._get(url).text
+
+
+def build_sec_http_client(
+    sec_user_agent: str | None = None,
+    requests_module: Any | None = None,
+    min_request_interval_sec: float | None = None,
+    max_retries: int | None = None,
+    sleep_fn: Callable[[float], None] | None = None,
+) -> _SecHttpClient:
+    """Build a :class:`_SecHttpClient`, exposed publicly so callers that need
+    to *share* one rate-limited/throttled session across multiple request
+    shapes (e.g. :class:`EdgarFundamentalsProvider`'s own ``companyfacts``
+    fetches and an externally-injected ``insider_lookup``'s ``submissions``/
+    filing-XML fetches) can build exactly one and pass its bound methods to
+    both, rather than each independently building its own client and
+    unknowingly doubling the effective request rate against SEC's shared
+    fair-access budget.
+    """
+    return _SecHttpClient(
+        user_agent=sec_user_agent,
+        requests_module=requests_module,
+        min_request_interval_sec=min_request_interval_sec,
+        max_retries=max_retries,
+        sleep_fn=sleep_fn,
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -579,12 +632,17 @@ def compute_fundamentals_from_companyfacts(
     as_of_date: date,
     *,
     price: float | None = None,
+    insider_flag: bool | None = None,
 ) -> FundamentalSnapshot:
     """Pure assembly of a :class:`FundamentalSnapshot` from raw EDGAR JSON.
 
-    ``insider_trade_flag`` and ``institutional_ownership_delta`` are always
-    ``None`` here (see module docstring for why). ``price`` is an optional
-    caller-supplied quote used only for ``valuation_band`` bucketing.
+    ``institutional_ownership_delta`` is always ``None`` here (see module
+    docstring for why). ``price`` is an optional caller-supplied quote used
+    only for ``valuation_band`` bucketing. ``insider_flag`` is an optional
+    caller-supplied, already-computed value (P2.7's SEC-EDGAR-native
+    ``insider_lookup``) threaded straight into the snapshot -- this function
+    does no I/O itself (same contract as ``price``), so the lookup must
+    already have run by the time it's passed in.
     """
     facts = company_facts.get("facts", {})
     us_gaap = facts.get("us-gaap", {})
@@ -637,7 +695,7 @@ def compute_fundamentals_from_companyfacts(
             operating_income=operating_income,
             revenues=revenues,
         ),
-        insider_trade_flag=None,
+        insider_trade_flag=insider_flag,
         institutional_ownership_delta=None,
         source_provider=PROVIDER_NAME,
     )
@@ -756,6 +814,19 @@ class EdgarFundamentalsProvider(MarketDataProvider):
         only (see module docstring). Omitted in production by default;
         ``valuation_band`` then reports ``"unknown"`` rather than reaching
         into another provider.
+    insider_lookup:
+        Optional ``Callable[[str, date, str], bool | None]`` for
+        ``insider_trade_flag`` (P2.7). Takes ``(ticker, as_of_date, cik)`` --
+        the ``cik`` is the same zero-padded value this provider already
+        resolves for ``companyfacts``, passed through rather than
+        re-resolved. Always ``None`` in production as of the 2026-07-20
+        step-decoupling coder note: ``pipeline_orchestrator.py``'s
+        ``fundamentals_refresh`` step no longer wires one in (the ~82min cost
+        moved to its own later ``insider_flag_refresh`` step, which calls
+        ``edgar_insider_provider.fetch_insider_purchase_flag`` directly rather
+        than through this provider). The parameter and the pass-through to
+        :func:`compute_fundamentals_from_companyfacts` are left in place --
+        harmless, and still exercised directly by this module's own tests.
     sec_user_agent:
         Explicit override for the ``SEC_USER_AGENT`` environment variable
         (mainly for tests).
@@ -786,6 +857,7 @@ class EdgarFundamentalsProvider(MarketDataProvider):
         fetch_json: Callable[[str], dict[str, Any]] | None = None,
         ticker_to_cik: Callable[[str], str | None] | None = None,
         price_lookup: Callable[[str, date], float | None] | None = None,
+        insider_lookup: Callable[[str, date, str], bool | None] | None = None,
         sec_user_agent: str | None = None,
         cache_path: Path | None = None,
         cache_ttl_seconds: int | None = None,
@@ -798,8 +870,8 @@ class EdgarFundamentalsProvider(MarketDataProvider):
         sleep_fn: Callable[[float], None] | None = None,
     ) -> None:
         if fetch_json is None:
-            http_client = _SecHttpClient(
-                user_agent=sec_user_agent,
+            http_client = build_sec_http_client(
+                sec_user_agent=sec_user_agent,
                 requests_module=requests_module,
                 min_request_interval_sec=min_request_interval_sec,
                 max_retries=max_retries,
@@ -809,6 +881,7 @@ class EdgarFundamentalsProvider(MarketDataProvider):
         self._fetch_json = fetch_json
         self._ticker_to_cik = ticker_to_cik or self._default_ticker_to_cik
         self._price_lookup = price_lookup
+        self._insider_lookup = insider_lookup
         self._cik_cache: dict[str, str] | None = None
         self._cache_path = (
             cache_path if cache_path is not None
@@ -889,8 +962,9 @@ class EdgarFundamentalsProvider(MarketDataProvider):
             url = _SEC_COMPANYFACTS_URL.format(cik=cik)
             company_facts = self._fetch_json(url)
             price = self._price_lookup(ticker, as_of_date) if self._price_lookup else None
+            insider_flag = self._safe_insider_lookup(ticker, as_of_date, cik, log)
             snapshot = compute_fundamentals_from_companyfacts(
-                company_facts, ticker, as_of_date, price=price
+                company_facts, ticker, as_of_date, price=price, insider_flag=insider_flag
             )
         except Exception as sec_exc:  # noqa: BLE001 - any SEC-path failure triggers fallback
             log.warning(
@@ -913,6 +987,29 @@ class EdgarFundamentalsProvider(MarketDataProvider):
                 _KEY_SOURCE_PROVIDER: snapshot.source_provider,
             },
         )
+
+    def _safe_insider_lookup(
+        self, ticker: str, as_of_date: date, cik: str, log: Any
+    ) -> bool | None:
+        """Call the injected ``insider_lookup``, isolated from the SEC-path
+        try/except in :meth:`get_fundamentals`.
+
+        Deliberately NOT called inline inside that try block (unlike
+        ``price_lookup``): a failure here must never discard the other 5
+        already-computed EDGAR fields or trigger a yfinance fallback, which
+        has zero ``piotroski_f_score``/``altman_z_score`` coverage at all --
+        that would be a strictly worse outcome caused by a failure in a
+        field that both coder notes are explicit is purely informational and
+        must never fail anything. Returns ``None`` (not a re-raised
+        exception) on any lookup failure, logged as a warning.
+        """
+        if self._insider_lookup is None:
+            return None
+        try:
+            return self._insider_lookup(ticker, as_of_date, cik)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("insider_trade_flag lookup failed ticker=%s: %s", ticker, exc)
+            return None
 
     def _fallback_or_fail(
         self, run_id: str, log: Any, ticker: str, as_of_date: date, sec_exc: Exception
@@ -966,6 +1063,17 @@ class EdgarFundamentalsProvider(MarketDataProvider):
     # company_tickers.json (large, effectively-static; must not be
     # re-fetched per ticker per run).
     # ------------------------------------------------------------------ #
+    def resolve_cik(self, ticker: str) -> str | None:
+        """Public wrapper around the injected/default ticker->CIK resolver.
+
+        Added for ``insider_flag_refresh`` (2026-07-20 step-decoupling coder
+        note): that step needs the same CIK resolution ``get_fundamentals``
+        already does internally, but isn't fetching ``companyfacts`` itself,
+        so it has no other reason to reach into this provider. Normalizes the
+        ticker first, same as ``get_fundamentals``.
+        """
+        return self._ticker_to_cik(normalize_ticker(ticker))
+
     def _default_ticker_to_cik(self, ticker: str) -> str | None:
         if self._cik_cache is None:
             self._cik_cache = self._load_ticker_map()
@@ -1052,6 +1160,7 @@ __all__ = [
     "extract_annual_series",
     "extract_metric_series",
     "resolve_sec_user_agent",
+    "build_sec_http_client",
     "PROVIDER_NAME",
     "FALLBACK_PROVIDER_NAME",
     "SEC_USER_AGENT_ENV_VAR",

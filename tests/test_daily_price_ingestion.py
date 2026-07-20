@@ -697,6 +697,44 @@ def test_dividend_and_split_defaults(tmp_db_paths: dict[str, Path]) -> None:
     assert prices[("AAPL", END)][P_SPLIT] == 1
 
 
+def test_real_yahoo_provider_split_zero_writes_default_one(
+    tmp_db_paths: dict[str, Path],
+) -> None:
+    """Cross-module integration (split-ratio convention fix, 2026-07-18): a
+    *real* ``YahooProvider`` (not the local ``_FakeProvider``), fed a frame
+    with yfinance's ``Stock Splits: 0.0`` 'no split' sentinel, now correctly
+    ends up writing ``split_ratio = 1.0`` to ``daily_prices`` -- proving the
+    provider's ``0.0`` -> ``None`` translation and this module's existing
+    ``None`` -> ``1`` default (``:566``) compose correctly end-to-end,
+    instead of ``0.0`` being written verbatim as before the fix.
+    """
+    from tests.test_yahoo_provider import FakeYF, _price_frame
+    from app.providers.yahoo_provider import YahooProvider
+
+    _seed_active_stocks(["AAPL"])
+    frame = _price_frame(
+        rows=[
+            {
+                "Open": 100.0, "High": 110.0, "Low": 90.0, "Close": 100.0,
+                "Volume": 1_000_000, "Dividends": 0.0, "Stock Splits": 0.0,
+                "Adj Close": 100.0,
+            },
+        ],
+        dates=[START.isoformat()],
+    )
+    fake_yf = FakeYF()
+    fake_yf.history_behavior["AAPL"] = frame
+    real_provider = YahooProvider(yf_module=fake_yf)
+
+    result = DailyPriceIngestionEngine().ingest(
+        real_provider, START, START, tickers=["AAPL"]
+    )
+    assert result.status == service_result.STATUS_SUCCESS, result.errors
+
+    prices = _price_rows()
+    assert prices[("AAPL", START)][P_SPLIT] == 1.0
+
+
 # --------------------------------------------------------------------------- #
 # 12. ticker_master is never written by Module 08
 # --------------------------------------------------------------------------- #

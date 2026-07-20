@@ -23,6 +23,7 @@ from pathlib import Path
 import duckdb
 import pytest
 
+from app.config import constants
 from app.database import duckdb_manager as dbm
 from app.providers import edgar_provider as ep
 from app.providers.provider_interface import FundamentalSnapshot
@@ -345,13 +346,20 @@ class TestMarketCapEndToEnd:
         FeatureEngine().calculate(days[-1], days[-1])
         assert _fetch_feature(prod, "AAA")["market_cap"] is None
 
-    def test_rows_are_features_v04(self, tmp_db_paths):
+    def test_rows_are_current_feature_schema_version(self, tmp_db_paths):
+        """Pinned to the constant, not a literal string -- P2.4 landed under
+        features_v04; a later bump (e.g. 2026-07-20's features_v05 for
+        ema150) must not make this test lie about which version rows land
+        under."""
         prod = tmp_db_paths[dbm.DB_ROLE_PROD]
         days = _trading_days(date(2022, 1, 3), 300)
         _seed_prices(prod, "AAA", days, [50.0 + i * 0.1 for i in range(len(days))])
         _seed_ticker_master(prod, "AAA")
         FeatureEngine().calculate(days[-1], days[-1])
-        assert _fetch_feature(prod, "AAA")["feature_schema_version"] == "features_v04"
+        assert (
+            _fetch_feature(prod, "AAA")["feature_schema_version"]
+            == constants.FEATURE_SCHEMA_VERSION
+        )
 
 
 # --------------------------------------------------------------------------- #

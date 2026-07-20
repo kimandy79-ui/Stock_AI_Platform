@@ -140,6 +140,11 @@ FEATURES_V03_COLUMNS: frozenset[str] = frozenset({
     "rs_percentile_126d",
 })
 
+# 2026-07-20: features_v05 adds exactly one column over v04.
+FEATURES_V05_COLUMNS: frozenset[str] = frozenset({
+    "ema150",
+})
+
 
 # --------------------------------------------------------------------------- #
 # Fixtures
@@ -428,7 +433,8 @@ class TestFeaturesV02Columns:
         # P1.1 (2026-07-08): bumped features_v02 -> features_v03.
         # P2.3/P2.4 (2026-07-10): bumped -> features_v04 (market_cap,
         # vcp_sequence_score).
-        assert constants.FEATURE_SCHEMA_VERSION == "features_v04"
+        # 2026-07-20: bumped -> features_v05 (ema150, dormant).
+        assert constants.FEATURE_SCHEMA_VERSION == "features_v05"
 
     @pytest.mark.parametrize("role", ["prod", "debug"])
     def test_features_v03_columns_exist(
@@ -447,6 +453,15 @@ class TestFeaturesV02Columns:
         cols = set(_columns(role, "daily_features"))
         missing = {"market_cap", "vcp_sequence_score"} - cols
         assert missing == set(), f"Missing features_v04 columns: {missing}"
+
+    @pytest.mark.parametrize("role", ["prod", "debug"])
+    def test_features_v05_columns_exist(
+        self, role: str, tmp_db_paths: dict[str, Path]
+    ) -> None:
+        sm.apply_schema(role)
+        cols = set(_columns(role, "daily_features"))
+        missing = FEATURES_V05_COLUMNS - cols
+        assert missing == set(), f"Missing features_v05 columns: {missing}"
 
     def test_feature_value_fits_column(self, tmp_db_paths: dict[str, Path]) -> None:
         sm.apply_prod_schema()

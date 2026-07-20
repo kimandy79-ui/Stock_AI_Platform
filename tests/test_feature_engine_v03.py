@@ -98,7 +98,8 @@ class TestFeatureSchemaVersionBump:
         FeatureEngine().calculate(days[-1], days[-1], tickers=["VBUMP"])
         row = _fetch_feature(prod, "VBUMP")
         # P2.3/P2.4 (2026-07-10): bumped features_v03 -> features_v04.
-        assert row["feature_schema_version"] == "features_v04" == constants.FEATURE_SCHEMA_VERSION
+        # 2026-07-20: bumped features_v04 -> features_v05 (ema150, dormant).
+        assert row["feature_schema_version"] == "features_v05" == constants.FEATURE_SCHEMA_VERSION
 
 
 class TestRsPercentile126dNullPropagation:

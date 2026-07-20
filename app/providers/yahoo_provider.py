@@ -619,7 +619,23 @@ class YahooProvider(MarketDataProvider):
             close_raw = self._to_float(self._cell(row, _COL_CLOSE, columns))
             volume_raw = self._to_int(self._cell(row, _COL_VOLUME, columns))
             dividend_amount = self._to_float(self._cell(row, _COL_DIVIDENDS, columns))
-            split_ratio = self._to_float(self._cell(row, _COL_SPLITS, columns))
+            # yfinance's "Stock Splits" column uses 0.0 as its own "no split
+            # occurred today" sentinel -- distinct from the platform schema's
+            # DEFAULT 1 convention for "no split" (SCHEMA_SPEC.md sec 3.7). A
+            # literal 0.0 ratio is not physically meaningful for a real split
+            # (a split never reduces shares-per-share to zero), so it is
+            # unambiguously the vendor's no-op sentinel, not a genuine event.
+            # Translated to None (missing) here so
+            # daily_price_ingestion.py's existing
+            # `split_ratio if split_ratio is not None else 1` default fires
+            # correctly downstream, instead of writing 0.0 verbatim and
+            # tripping MutationDetector.is_explicit_split()'s `!= 1` check on
+            # every ordinary non-split row. Narrow, ratified frozen-module
+            # exemption (2026-07-18): scoped strictly to this translation; no
+            # other provider logic changed. Forward-only -- does not
+            # retroactively correct already-stored rows.
+            _raw_split_ratio = self._to_float(self._cell(row, _COL_SPLITS, columns))
+            split_ratio = None if _raw_split_ratio == 0.0 else _raw_split_ratio
             adj_close = self._to_float(self._cell(row, _COL_ADJ_CLOSE, columns))
 
             open_adj, high_adj, low_adj, close_adj = self._adjusted_ohlc(
