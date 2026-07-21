@@ -9,6 +9,14 @@ from app.services.ai_review.ai_review_engine import (
     AiClientProtocol,
     AiReviewEngine,
     DefaultAiClient,
+    FallbackAiClient,
+    GeminiClient,
 )
 
-__all__ = ["AiReviewEngine", "AiClientProtocol", "DefaultAiClient"]
+__all__ = [
+    "AiReviewEngine",
+    "AiClientProtocol",
+    "DefaultAiClient",
+    "FallbackAiClient",
+    "GeminiClient",
+]

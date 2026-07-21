@@ -617,6 +617,42 @@ DEFAULT_RUNTIME_CONFIGS: Final[dict[str, dict[str, Any]]] = {
             "contrarian": {"provider": "openai", "model": "gpt-4o"},
             "audit": {"provider": "anthropic", "model": "claude-haiku-4-5"},
         },
+        # Send-time provider routing (2026-07-20 coder note). The multi_pass
+        # block above decides which provider/model M18 *records* on each
+        # ai_reviews row; this block decides which provider M19 actually
+        # *calls* at send time, and in what order. Primary is tried first;
+        # on any failure (missing key, network, non-2xx, rate limit,
+        # malformed body) the fallback is tried with the same prompt. The
+        # row's own provider is always appended as a last resort if it is not
+        # already in the chain, so a contrarian row recorded as "openai"
+        # stays reachable rather than being silently dropped.
+        #
+        # per_provider.model is the model used when that provider is NOT the
+        # row's own provider (the row's model is provider-specific and cannot
+        # be handed to a different vendor). When the chain entry matches the
+        # row's provider, the row's model wins.
+        #
+        # min_interval_s paces successive calls to the same provider.
+        # Gemini free tier publishes ~10 RPM / 1,500 RPD for Flash-tier
+        # models (Google no longer lists exact numbers in the public docs —
+        # they are per-project in AI Studio), so 6.0s == 10 RPM is the
+        # conservative floor. 0.0 disables pacing for a provider.
+        "routing": {
+            "primary": "gemini",
+            "fallback": "anthropic",
+            "per_provider": {
+                # gemini-3.5-flash, NOT gemini-2.5-flash. Verified by live
+                # call on 2026-07-20 with this project's own key: both
+                # gemini-2.5-flash and gemini-2.5-flash-lite return HTTP 404
+                # "no longer available to new users", even though the public
+                # model list and the ListModels endpoint still advertise them
+                # (they are grandfathered to pre-existing users only). Also
+                # verified working: gemini-3.1-flash-lite, gemini-3-flash-preview.
+                "gemini": {"model": "gemini-3.5-flash", "min_interval_s": 6.0},
+                "anthropic": {"model": "claude-sonnet-5", "min_interval_s": 0.0},
+                "openai": {"model": "gpt-4o", "min_interval_s": 0.0},
+            },
+        },
     },
     "export": {
         "price_window_bd_around_signal": 40,
