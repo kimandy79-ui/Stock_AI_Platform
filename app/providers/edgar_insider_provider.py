@@ -19,18 +19,28 @@ see that module's docstring for why sharing one client/throttle across both
 Two-request-shape design, confirmed by the SEC EDGAR investigation
 (`reports/sec_edgar_issuer_ownership_lookup_investigation_2026-07-18.md`):
 
-1. ``data.sec.gov/submissions/CIK##########.json`` -- lists an issuer's
-   recent filings, including ownership (Form 3/4/5) filings where this CIK
-   is the *issuer*, not just filings it submitted itself. Confirmed against
-   real AAPL/NVDA/GME filings, cross-checked against independently-sourced
-   FMP data for the same accession numbers. Exact ``form == "4"`` string
-   matching -- unlike the older ``browse-edgar?type=4`` HTML/atom interface,
-   which does *prefix* matching and pulls in ``"425"``/``"424B2"`` alongside
-   real Form 4s (a confirmed anomaly; this module deliberately does not use
-   that interface).
-2. The raw Form 4 XML at each candidate filing's ``primaryDocument`` path --
-   a plain, non-namespaced ``<ownershipDocument>`` schema giving the exact
-   transaction data needed: ``transactionCoding/transactionCode`` (SEC's
+1. ``data.sec.gov/submissions/CIK##########.json`` -- lists a CIK's recent
+   filings, including ownership (Form 3/4/5) filings this CIK did not submit
+   itself. Confirmed against real AAPL/NVDA/GME filings, cross-checked
+   against independently-sourced FMP data for the same accession numbers.
+   Exact ``form == "4"`` string matching -- unlike the older
+   ``browse-edgar?type=4`` HTML/atom interface, which does *prefix* matching
+   and pulls in ``"425"``/``"424B2"`` alongside real Form 4s (a confirmed
+   anomaly; this module deliberately does not use that interface).
+
+   Critically, that list mixes filings where the CIK is the **issuer** with
+   filings where it is merely a **reporting owner** of some *other* company
+   (``insiderTransactionForOwnerExists`` is a separate top-level flag from
+   ``insiderTransactionForIssuerExists``, and both can be set). The role is
+   not recoverable from ``submissions.json`` at all -- only from the filing
+   XML's ``<issuer><issuerCik>`` -- so the issuer check lives in step 2.
+2. The raw Form 4 XML at each candidate filing's ``primaryDocument`` path,
+   with the XSL-renderer directory prefix stripped (see
+   ``_raw_ownership_document_path``) -- a plain, non-namespaced
+   ``<ownershipDocument>`` schema giving the ``<issuer><issuerCik>`` needed
+   to confirm the requested CIK is this filing's *issuer* (see step 1), and
+   the exact transaction data needed:
+   ``transactionCoding/transactionCode`` (SEC's
    single-letter code, ``"P"`` for purchase -- the same vocabulary FMP's
    ``P-Purchase`` label was built from), ``transactionAmounts`` (shares,
    price), and a genuine bonus this module exploits that FMP's response
@@ -69,6 +79,13 @@ _FILING_XML_URL: Final[str] = (
 )
 
 _FORM_TYPE_TRANSACTION: Final[str] = "4"
+# ``primaryDocument`` for ownership filings points at the *XSL-rendered HTML*
+# view, not the raw XML -- e.g. "xslF345X05/wk-form4.xml". The renderer
+# directory name varies by form-schema version (xslF345X05, xslF345X06, ...).
+# Stripping that leading directory yields the raw <ownershipDocument> XML in
+# the same accession folder. Matched case-insensitively on the "xsl" prefix so
+# a future renderer version needs no code change.
+_XSL_RENDER_DIR_PREFIX: Final[str] = "xsl"
 _TRANSACTION_CODE_PURCHASE: Final[str] = "P"
 _TRUTHY_TOKENS: Final[frozenset[str]] = frozenset({"1", "true", "True", "TRUE"})
 
@@ -175,10 +192,17 @@ def fetch_insider_purchase_flag(
             url = _FILING_XML_URL.format(
                 cik_nolead=cik_nolead,
                 accession_nodash=accession.replace("-", ""),
-                doc=primary_doc,
+                doc=_raw_ownership_document_path(primary_doc),
             )
             xml_text = fetch_filing_xml(url)
-            if _is_qualifying_purchase(xml_text, min_transaction_value_usd, exclude_10b5_1):
+            if _is_qualifying_purchase(
+                xml_text,
+                min_transaction_value_usd,
+                exclude_10b5_1,
+                expected_cik=cik_padded,
+                ticker=ticker,
+                url=url,
+            ):
                 return True  # early exit -- no need to fetch remaining candidates
     except Exception as exc:  # noqa: BLE001 - any retrieval failure -> None, never a crash
         _LOG.warning(
@@ -189,19 +213,80 @@ def fetch_insider_purchase_flag(
     return False
 
 
+def _raw_ownership_document_path(primary_doc: str) -> str:
+    """Strip the XSL-renderer directory from a ``primaryDocument`` path.
+
+    ``submissions.json`` reports ownership filings' ``primaryDocument`` as the
+    *rendered HTML* view -- ``"xslF345X05/wk-form4.xml"`` -- which is not XML
+    and cannot be parsed as an ``<ownershipDocument>``. The raw XML sits at the
+    bare filename in the same accession folder, so the leading ``xsl*``
+    directory is dropped. Paths without such a prefix pass through unchanged.
+    """
+    head, sep, tail = primary_doc.partition("/")
+    if sep and tail and head.lower().startswith(_XSL_RENDER_DIR_PREFIX):
+        return tail
+    return primary_doc
+
+
 def _is_qualifying_purchase(
-    xml_text: str, min_transaction_value_usd: float, exclude_10b5_1: bool
+    xml_text: str,
+    min_transaction_value_usd: float,
+    exclude_10b5_1: bool,
+    *,
+    expected_cik: str,
+    ticker: str = "",
+    url: str = "",
 ) -> bool:
     """Parse one raw Form 4 ``<ownershipDocument>`` XML for a qualifying purchase.
+
+    ``expected_cik`` is the zero-padded CIK the flag is being computed *for*,
+    and the filing is rejected outright unless it names that CIK as its
+    ``<issuer><issuerCik>``. This is not redundant with the
+    ``submissions.json`` lookup that produced the candidate: that payload
+    also lists filings where the CIK is a *reporting owner* of another
+    company, and counting one of those credits another issuer's insider
+    purchase to this ticker (confirmed on AEI/Alset, whose only Form 4 in
+    window was a $500k open-market purchase of *HWH* stock -- see the module
+    docstring's step 1). Any holdco, parent/affiliate, or 10%-owner corporate
+    can hit this.
 
     A malformed/unparseable document is treated as "no qualifying purchase
     found here" (``False``), not a retrieval failure -- the filing was
     successfully fetched, it just isn't usable; the outer loop moves on to
     the next candidate rather than failing the whole ticker.
+
+    That fallthrough is deliberately *logged*, not silent: an unparseable
+    filing and a cleanly-parsed filing with no purchase both return ``False``,
+    and conflating the two is exactly how the XSL-path bug produced a 100%
+    false-negative rate through a real batch run without anything looking
+    wrong. ``ticker``/``url`` are for that log line only.
     """
     try:
         root = ET.fromstring(xml_text)
-    except ET.ParseError:
+    except ET.ParseError as exc:
+        _LOG.warning(
+            "edgar_insider_provider: unparseable filing document ticker=%s url=%s: %s",
+            ticker or "?",
+            url or "?",
+            exc,
+        )
+        return False
+
+    # Issuer-role gate. Zero-padded to 10 the same way the submissions URL's
+    # CIK is (``str(cik).zfill(10)``), so a filing writing the CIK unpadded
+    # still matches. A document with no <issuerCik> at all is not rejected:
+    # real Form 4s always carry one, so an absent value means a shape this
+    # module doesn't recognize, and the transaction gates below still apply.
+    issuer_cik = (root.findtext("issuer/issuerCik") or "").strip()
+    if issuer_cik and issuer_cik.zfill(10) != expected_cik:
+        _LOG.debug(
+            "edgar_insider_provider: skipping filing whose issuer is another CIK "
+            "ticker=%s expected_cik=%s issuer_cik=%s url=%s",
+            ticker or "?",
+            expected_cik,
+            issuer_cik,
+            url or "?",
+        )
         return False
 
     if exclude_10b5_1:

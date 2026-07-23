@@ -316,6 +316,16 @@ class _SecHttpClient:
         """
         return self._get(url).text
 
+    def get_bytes(self, url: str) -> bytes:
+        """GET *url* and return the raw response body as bytes.
+
+        Used for the quarterly insider-transactions bulk zips
+        (``edgar_insider_bulk_loader``), which are binary and would be
+        corrupted by ``response.text``'s decoding. Same session, same
+        throttle/retry state as every other request shape.
+        """
+        return self._get(url).content
+
 
 def build_sec_http_client(
     sec_user_agent: str | None = None,

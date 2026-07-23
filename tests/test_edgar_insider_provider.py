@@ -43,6 +43,17 @@ def _submissions(
     }
 
 
+# What the SEC actually serves at the ``xslF345X0N/`` path: HTML, not XML.
+# Deliberately shaped like the real renderer output (unclosed <br>, <meta>) so
+# `ET.fromstring` raises -- note a *well-formed* stub like
+# "<!DOCTYPE html><html></html>" parses fine as XML and would not exercise this.
+_RENDERED_FORM4_HTML = (
+    '<!DOCTYPE html><html><head><meta http-equiv="Content-Type" content="text/html">'
+    "</head><body><span>FORM 4</span><br><table><tr><td>1. Title of Security"
+    "</td></tr></table></body></html>"
+)
+
+
 def _form4_xml(
     *,
     transaction_code: str = "P",
@@ -51,10 +62,21 @@ def _form4_xml(
     aff10b5one: str = "0",
     table: str = "nonDerivativeTable",
     txn_tag: str = "nonDerivativeTransaction",
+    issuer_cik: str | None = CIK,
 ) -> str:
+    """A raw ownership document. ``issuer_cik=None`` omits the <issuer> block."""
+    issuer_block = (
+        ""
+        if issuer_cik is None
+        else f"""
+    <issuer>
+        <issuerCik>{issuer_cik}</issuerCik>
+        <issuerTradingSymbol>GME</issuerTradingSymbol>
+    </issuer>"""
+    )
     return f"""<?xml version="1.0"?>
 <ownershipDocument>
-    <documentType>4</documentType>
+    <documentType>4</documentType>{issuer_block}
     <aff10b5One>{aff10b5one}</aff10b5One>
     <{table}>
         <{txn_tag}>
@@ -270,6 +292,153 @@ class TestFetchInsiderPurchaseFlag:
 
         eip.fetch_insider_purchase_flag("GME", AS_OF, "1326380", fetch_json, lambda u: "")
         assert seen_urls == ["https://data.sec.gov/submissions/CIK0001326380.json"]
+
+    def test_xsl_render_prefix_is_stripped_to_reach_raw_ownership_xml(self):
+        """Regression test for the confirmed 100%-parse-failure bug.
+
+        Real ``submissions.json`` reports ownership filings' ``primaryDocument``
+        as the XSL-*rendered HTML* view (``xslF345X05/wk-form4.xml``), never the
+        raw XML. Fetching that path verbatim returns HTML, `ET.fromstring`
+        raises, and `_is_qualifying_purchase` swallowed it as "no purchase" --
+        making `insider_trade_flag` structurally incapable of being True.
+        Earlier fixtures used bare ``wk-form4.xml`` and so never exercised it.
+        """
+        fetch_json = lambda url: _submissions(
+            forms=["4"], filing_dates=["2026-07-10"],
+            accessions=["0001990547-26-000014"], docs=["xslF345X05/wk-form4.xml"],
+        )
+        fetched_urls: list[str] = []
+
+        def fetch_xml(url: str) -> str:
+            fetched_urls.append(url)
+            # Mirror the real server: the rendered path is HTML, only the raw
+            # path is parseable XML.
+            if "xslF345X05" in url:
+                return _RENDERED_FORM4_HTML
+            return _form4_xml(transaction_code="P", shares=1000, price=50.0)
+
+        result = eip.fetch_insider_purchase_flag("GME", AS_OF, CIK, fetch_json, fetch_xml)
+
+        assert result is True
+        assert fetched_urls == [
+            "https://www.sec.gov/Archives/edgar/data/1326380/"
+            "000199054726000014/wk-form4.xml"
+        ]
+
+    @pytest.mark.parametrize(
+        "primary_doc, expected",
+        [
+            ("xslF345X05/wk-form4.xml", "wk-form4.xml"),   # observed, 1,774 filings
+            ("xslF345X06/form4.xml", "form4.xml"),          # observed, 1,235 filings
+            ("xslF345X99/doc4.xml", "doc4.xml"),            # future schema version
+            ("wk-form4.xml", "wk-form4.xml"),               # already raw -- unchanged
+            ("", ""),
+        ],
+    )
+    def test_raw_ownership_document_path(self, primary_doc, expected):
+        assert eip._raw_ownership_document_path(primary_doc) == expected
+
+    def test_unparseable_filing_logs_a_warning_distinct_from_no_purchase(self, caplog):
+        """A parse failure must be loud; "checked, no purchase" must stay quiet."""
+        fetch_json = lambda url: _submissions(
+            forms=["4"], filing_dates=["2026-07-10"],
+            accessions=["acc-1"], docs=["doc.xml"],
+        )
+
+        with caplog.at_level("WARNING"):
+            assert eip.fetch_insider_purchase_flag(
+                "GME", AS_OF, CIK, fetch_json, lambda url: _RENDERED_FORM4_HTML
+            ) is False
+        assert "unparseable filing document" in caplog.text
+        assert "ticker=GME" in caplog.text
+
+        caplog.clear()
+        with caplog.at_level("WARNING"):
+            assert eip.fetch_insider_purchase_flag(
+                "GME", AS_OF, CIK, fetch_json,
+                lambda url: _form4_xml(transaction_code="S"),
+            ) is False
+        assert caplog.records == []
+
+    def test_filing_where_queried_cik_is_reporting_owner_not_issuer_is_rejected(self):
+        """Regression test for the confirmed AEI/HWH false positive (anomaly B-A1).
+
+        ``submissions.json`` lists Form 4s where the queried CIK is merely a
+        *reporting owner* of another company alongside the ones where it is the
+        issuer -- the two roles have separate top-level flags and the filing
+        list does not distinguish them. AEI (Alset Inc., CIK 0001750106) had
+        exactly one Form 4 in a 90-day window: a real, well-formed, $500k
+        open-market purchase where Alset was the reporting owner and **HWH
+        International** was the issuer. Counting it made AEI's
+        insider_trade_flag True off another company's purchase.
+        """
+        fetch_json = lambda url: _submissions(
+            forms=["4"], filing_dates=["2026-06-09"],
+            accessions=["0001493152-26-027990"], docs=["xslF345X05/form4.xml"],
+        )
+        # Qualifying in every other respect: code P, $500k, not a 10b5-1 plan.
+        fetch_xml = lambda url: _form4_xml(
+            issuer_cik="0001897245",  # HWH International, not the queried CIK
+            transaction_code="P", shares=250_000, price=2.0, aff10b5one="0",
+        )
+
+        result = eip.fetch_insider_purchase_flag(
+            "AEI", date(2026, 6, 30), "0001750106", fetch_json, fetch_xml,
+            lookback_days=90,
+        )
+        assert result is False
+
+    def test_matching_issuer_cik_still_qualifies_when_filing_writes_it_unpadded(self):
+        """No false rejection from a padding mismatch -- the gate normalizes."""
+        fetch_json = lambda url: _submissions(
+            forms=["4"], filing_dates=["2026-07-10"],
+            accessions=["acc-1"], docs=["doc.xml"],
+        )
+        fetch_xml = lambda url: _form4_xml(
+            issuer_cik="1326380",  # same CIK as the queried one, sans leading zeros
+            transaction_code="P", shares=1000, price=50.0,
+        )
+        result = eip.fetch_insider_purchase_flag("GME", AS_OF, CIK, fetch_json, fetch_xml)
+        assert result is True
+
+    def test_filing_without_an_issuer_block_is_not_rejected_by_the_issuer_gate(self):
+        """An absent <issuerCik> falls through to the transaction gates.
+
+        Real Form 4s always carry one; treating "absent" as "mismatched" would
+        turn an unrecognized document shape into a silent False, which is the
+        failure mode the XSL parse bug already demonstrated.
+        """
+        fetch_json = lambda url: _submissions(
+            forms=["4"], filing_dates=["2026-07-10"],
+            accessions=["acc-1"], docs=["doc.xml"],
+        )
+        fetch_xml = lambda url: _form4_xml(
+            issuer_cik=None, transaction_code="P", shares=1000, price=50.0,
+        )
+        result = eip.fetch_insider_purchase_flag("GME", AS_OF, CIK, fetch_json, fetch_xml)
+        assert result is True
+
+    def test_owner_role_filing_does_not_mask_a_later_real_issuer_purchase(self):
+        """The rejected filing must not short-circuit the remaining candidates."""
+        fetch_json = lambda url: _submissions(
+            forms=["4", "4"],
+            filing_dates=["2026-07-12", "2026-07-10"],
+            accessions=["acc-owner-role", "acc-own-issuer"],
+            docs=["owner.xml", "issuer.xml"],
+        )
+        fetched: list[str] = []
+
+        def fetch_xml(url: str) -> str:
+            fetched.append(url)
+            other_issuer = "owner.xml" in url
+            return _form4_xml(
+                issuer_cik="0001897245" if other_issuer else CIK,
+                transaction_code="P", shares=1000, price=50.0,
+            )
+
+        result = eip.fetch_insider_purchase_flag("GME", AS_OF, CIK, fetch_json, fetch_xml)
+        assert result is True
+        assert len(fetched) == 2  # kept going past the rejected owner-role filing
 
     def test_max_candidate_filings_caps_worst_case_requests(self):
         forms = ["4"] * 10
